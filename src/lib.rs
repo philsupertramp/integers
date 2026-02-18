@@ -77,6 +77,13 @@ pub mod kernels {
             .sum()
     }
 
+    pub fn dot_product_mixed_scalar(a: &[i8], b: &[i16]) -> i32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| (x as i32) * (y as i32))
+            .sum()
+    }
+
     pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i8 {
         let mask = (1 << shift) - 1;
         let frac = val & mask;
@@ -86,12 +93,18 @@ pub mod kernels {
 
         let shifted = (val >> shift) + round_bit;
 
-        if shifted > 127 {
-            127
-        } else if shifted < -128 {
-            -128
-        } else {
-            shifted as i8
+        if shifted > 127 { 127 }
+        else if shifted < -128 { -128 }
+        else { shifted as i8 }
+    }
+
+    pub fn update_weights(weights: &mut [i32], grads: &[i16], lr_shift: u32) {
+        assert_eq!(weights.len(), grads.len(), "weights and grads must match length!" );
+
+        for (w, g) in weights.iter_mut().zip(grads.iter()) {
+            let update = (*g as i32) >> lr_shift;
+
+            *w = w.wrapping_sub(update);
         }
     }
 
@@ -136,6 +149,109 @@ pub mod kernels {
         }
     }
 }
+
+pub struct Linear {
+    /// all weights are of Transposed Form [out, in] for memory reasons
+
+    /// Source of truth
+    weights_master: Tensor<i32>,
+    /// Shadow copy used for dot-product
+    weights_storage: Tensor<i8>,
+    /// Biases before quantization
+    bias: Tensor<i32>,
+    /// "hyperparameter" that determines how much we right-shift
+    scale_shift: u32,
+}
+
+impl Linear {
+    pub fn sync_weights(&mut self, rng: &mut XorShift64){
+        for idx in 0..self.weights_master.data.len() {
+            self.weights_storage.data[idx] = kernels::stochastic_downcast(
+                self.weights_master.data[idx],
+                self.scale_shift,
+                rng
+            )
+        }
+    }
+
+    pub fn forward(&self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+        assert_eq!(input.shape[1], self.weights_storage.shape[1], "Input in wrong dimension for weights! {} vs {}", input.shape[1], self.weights_storage.shape[1]);
+
+        let batch_size = input.shape[0];
+        let input_dim = input.shape[1];
+        let output_size = self.weights_storage.shape[0];
+        let mut out = Tensor::new([batch_size, output_size].to_vec());
+        for b in 0..batch_size {
+            let in_start = b * input_dim;
+            let in_end = in_start + input_dim;
+
+            let input_row = &input.data[in_start..in_end];
+
+            for o in 0..output_size {
+                let w_start = o * input_dim;
+                let w_end = w_start + input_dim;
+
+                let weight_row = &self.weights_storage.data[w_start..w_end];
+                let raw_val = kernels::dot_product_scalar(input_row, weight_row);
+                let acc = raw_val + self.bias.data[o];
+                out.data[b * output_size + o] += kernels::stochastic_downcast(
+                    acc,
+                    self.scale_shift,
+                    rng
+                );
+                
+            }
+        }
+        return out;
+    }
+
+    pub fn backward(&self, input: &Tensor<i8>, grad_output: &Tensor<i16>) -> (Tensor<i16>, Tensor<i16>) {
+        let output_size = self.weights_storage.shape[1];
+        let input_dim = input.shape[1];
+        let batch_size = input.shape[0];
+
+        let mut grad_input = Tensor::new(self.weights_storage.shape);
+        let mut grad_weights = Tensor::new(input.shape);
+        for o in 0..output_size {
+            let in_start = b * input_dim;
+            let in_end = in_start + input_dim;
+            let grad_output_row = &grad_output.data[in_start..in_end];
+
+            for b in 0..batch_size {
+                let w_start = o * input_dim;
+                let w_end = w_start + input_dim;
+
+                let w_row = &input.data[w_start..w_end];
+                let val = kernels::dot_product_mixed_scalar(
+                    &w_row,
+                    &grad_output_row
+                );
+                grad_weights.data[i * input.shape[0] + o] += ((val >> 8) as i16);
+            }
+        }
+        for b in 0..batch_size {
+            let in_start = b * input_dim;
+            let in_end = in_start + input_dim;
+            let grad_output_row = &grad_output.data[in_start..in_end];
+
+            for o in 0..output_size {
+                let w_start = o * input_dim;
+                let w_end = w_start + input_dim;
+                let weight_row = &self.weights_storage.data[w_start..w_end];
+                let val = kernels::dot_product_mixed_scalar(
+                    &weight_row,
+                    &grad_output_row
+                );
+                for i in 0..input_dim {
+                    grad_input.data[b * input.shape[1] + i] += (val >> 8) as i16;
+                }
+            }
+        }
+
+        [grad_input, grad_weights].into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +274,17 @@ mod tests {
         let res = kernels::dot_product_scalar(&vec1, &vec2);
 
         assert_eq!(res, 3);
+    }
+
+    #[test]
+    fn test_optimizer_shift() {
+        let mut weights = [1000, 1000];
+        let grads = [100, -100];
+
+        kernels::update_weights(&mut weights, &grads, 1);
+
+        assert_eq!(weights[0], 950);
+        assert_eq!(weights[1], 1050);
     }
 
     #[test]
@@ -249,6 +376,69 @@ mod tests {
         let vec3 = [-1i8; 16];
         let res_neg = unsafe { kernels::arm_neon::dot_product_neon_raw(&vec1, &vec3) };
         assert_eq!(res_neg, -16);
+    }
+
+    #[test]
+    fn test_linear_forward() {
+        let mut lin = Linear{
+            weights_master: Tensor::new([2, 2].to_vec()),
+            weights_storage: Tensor::new([2, 2].to_vec()),
+            bias: Tensor::new([1, 2].to_vec()),
+            scale_shift: 0
+        };
+        lin.weights_master.data[0] = 1;
+        lin.weights_master.data[3] = 1;
+        let mut rng = XorShift64{state: 420};
+        lin.sync_weights(&mut rng);
+
+        let mut input = Tensor::new([1, 2].to_vec());
+        input.data[0] = 10;
+        input.data[1] = 20;
+        let out = lin.forward(&input, &mut rng);
+
+        assert_eq!(out.data[0], 10);
+        assert_eq!(out.data[1], 20);
+    }
+
+    #[test]
+    fn test_linear_forward_saturation() {
+        let mut lin = Linear{
+            weights_master: Tensor::new([2, 2].to_vec()),
+            weights_storage: Tensor::new([2, 2].to_vec()),
+            bias: Tensor::new([1, 2].to_vec()),
+            scale_shift: 0
+        };
+        lin.weights_master.data[0] = 126;
+        lin.weights_master.data[3] = 126;
+        let mut rng = XorShift64{state: 420};
+        lin.sync_weights(&mut rng);
+
+        let mut input = Tensor::new([1, 2].to_vec());
+        input.data[0] = 126;
+        input.data[1] = 126;
+        let out = lin.forward(&input, &mut rng);
+
+        // clamping around 127
+        assert_eq!(out.data[0], 127);
+        assert_eq!(out.data[1], 127);
+    }
+
+    #[test]
+    fn test_linear_forward_shape() {
+        let mut lin = Linear{
+            weights_master: Tensor::new([3, 2].to_vec()),
+            weights_storage: Tensor::new([3, 2].to_vec()),
+            bias: Tensor::new([1, 3].to_vec()),
+            scale_shift: 0
+        };
+        let mut rng = XorShift64{state: 420};
+        lin.sync_weights(&mut rng);
+
+        let input = Tensor::new([10, 2].to_vec());
+        let out = lin.forward(&input, &mut rng);
+
+        assert_eq!(out.shape[0], 10);
+        assert_eq!(out.shape[1], 3);
     }
 }
 
