@@ -21,7 +21,7 @@ do
         cd $TARGET_DIR
 
         echo "--- deploy: Running Tests ---"
-        python script.py
+        cargo test
 
         echo "--- deploy: Complete! ---"
     else
