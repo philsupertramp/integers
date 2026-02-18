@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# 1. Define variables
+TARGET_DIR="/home/phil/work/integers"
+GIT_DIR="/home/phil/remote/integers.git"
+BRANCH="master"
+
+while read oldrev newrev ref
+do
+    # Only deploy if the master/main branch is pushed
+    if [[ $ref =~ .*/$BRANCH$ ]];
+    then
+        echo "--- deploy: Starting CI/CD for $BRANCH ---"
+
+        # 2. Checkout the code to the target directory
+        # --work-tree tells Git where to unpack the files
+        # --git-dir tells Git where the history is
+        git --work-tree=$TARGET_DIR --git-dir=$GIT_DIR checkout -f $BRANCH
+
+        # 3. Enter the target directory
+        cd $TARGET_DIR
+
+        echo "--- deploy: Running Tests ---"
+        python script.py
+
+        echo "--- deploy: Complete! ---"
+    else
+        echo "--- deploy: Ref $ref received. Doing nothing: only the ${BRANCH} branch may be deployed on this server."
+    fi
+done
