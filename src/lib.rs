@@ -100,52 +100,39 @@ pub mod kernels {
         use std::arch::aarch64::*;
 
         pub unsafe fn dot_product_neon_raw(a: &[i8], b: &[i8]) -> i32 {
+            // 1. Initialize accumulator to zero
+            let mut sum_vec = vdupq_n_s32(0);
+            
+            let mut ptr_a = a.as_ptr();
+            let mut ptr_b = b.as_ptr();
             let len = a.len();
-            // In a raw kernel, we trust the caller to pad, but debug_assert helps dev.
-            debug_assert_eq!(len % 16, 0, "NEON raw kernel len must be multiple of 16");
 
-            unsafe {
-                // 1. Initialize the accumulator vector to [0, 0, 0, 0]
-                let mut sum_vec = vdupq_n_s32(0);
+            // 2. Main Loop: Process 16 elements (128 bits) per iteration
+            for _ in (0..len).step_by(16) {
+                let va = vld1q_s8(ptr_a);
+                let vb = vld1q_s8(ptr_b);
 
-                // 2. Iterate via pointers for maximum efficiency
-                let mut ptr_a = a.as_ptr();
-                let mut ptr_b = b.as_ptr();
+                // Widening Multiply (The stable workaround for SDOT)
+                // Split 128-bit regs into low/high halves
+                let va_lo = vget_low_s8(va);
+                let vb_lo = vget_low_s8(vb);
+                let va_hi = vget_high_s8(va);
+                let vb_hi = vget_high_s8(vb);
 
-                // Unrolling is handled well by LLVM.
-                // WE USE A STABLE FALLBACK HERE instead of SDOT (vdotq_s32)
-                // to ensure this compiles on stable Rust without 'dotprod' feature gates.
-                for _ in (0..len).step_by(16) {
-                    // Load 16 x i8 elements (128 bits)
-                    let va = vld1q_s8(ptr_a);
-                    let vb = vld1q_s8(ptr_b);
+                // Multiply i8 -> i16
+                let prod_lo = vmull_s8(va_lo, vb_lo); 
+                let prod_hi = vmull_s8(va_hi, vb_hi);
 
-                    // Strategy: Widening Multiply (vmull) -> Pairwise Add (vpadal)
-                    
-                    // Split 128-bit vectors into Low/High 64-bit halves (8 elements each)
-                    let va_lo = vget_low_s8(va);
-                    let vb_lo = vget_low_s8(vb);
-                    let va_hi = vget_high_s8(va);
-                    let vb_hi = vget_high_s8(vb);
+                // Accumulate i16 -> i32
+                sum_vec = vpadalq_s16(sum_vec, prod_lo);
+                sum_vec = vpadalq_s16(sum_vec, prod_hi);
 
-                    // Multiply: i8 -> i16 results
-                    // vmull_s8: Multiplies two int8x8 vectors into an int16x8 vector
-                    let prod_lo = vmull_s8(va_lo, vb_lo); 
-                    let prod_hi = vmull_s8(va_hi, vb_hi);
-
-                    // Accumulate: i16 -> i32
-                    // vpadalq_s16: Pairwise adds int16s and accumulates into int32x4
-                    // [x0+x1, x2+x3, x4+x5, x6+x7]
-                    sum_vec = vpadalq_s16(sum_vec, prod_lo);
-                    sum_vec = vpadalq_s16(sum_vec, prod_hi);
-
-                    ptr_a = ptr_a.add(16);
-                    ptr_b = ptr_b.add(16);
-                }
-
-                // 3. Horizontal Sum: Sum the 4 x i32 lanes into a single scalar
-                vaddvq_s32(sum_vec)
+                ptr_a = ptr_a.add(16);
+                ptr_b = ptr_b.add(16);
             }
+
+            // 3. Horizontal Sum (Reduce vector to scalar)
+            vaddvq_s32(sum_vec)
         }
     }
 }
