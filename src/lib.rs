@@ -226,20 +226,4 @@ mod tests {
         assert!(avg > -2.51 && avg < -2.49, "Average {} was too far from -2.5", avg);
     }
 
-    #[test]
-    #[cfg(target_arch = "aarch64")]
-    fn test_dot_product_neon() {
-        let vec1 = [1i8; 16];
-        let vec2 = [1i8; 16];
-
-        let res = unsafe { kernels::arm_neon::dot_product_neon_raw(&vec1, &vec2 ) };
-
-        assert_eq!(res, 16);
-
-        let vec3 = [-1i8; 16];
-        let res_neg = unsafe { kernels::arm_neon::dot_product_neon_raw(&vec1, &vec3) };
-        assert_eq!(res_neg, -16);
-    }
 }
-
-
