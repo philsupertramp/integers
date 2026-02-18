@@ -232,12 +232,12 @@ mod tests {
         let vec1 = [1i8; 16];
         let vec2 = [1i8; 16];
 
-        let res = unsafe { kernels::dot_product_neon_raw(&vec1, &vec2 ) };
+        let res = unsafe { kernels::arm_neon::dot_product_neon_raw(&vec1, &vec2 ) };
 
         assert_eq!(res, 16);
 
         let vec3 = [-1i8; 16];
-        let res_neg = unsafe { kernels::dot_product_neon_raw(&vec1, &vec3) };
+        let res_neg = unsafe { kernels::arm_neon::dot_product_neon_raw(&vec1, &vec3) };
         assert_eq!(res_neg, -16);
     }
 }
