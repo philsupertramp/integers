@@ -97,7 +97,7 @@ pub mod kernels {
 
     #[cfg(target_arch = "aarch64")]
     pub mod arm_neon {
-        use std::arch::arch64::*;
+        use std::arch::aarch64::*;
 
         pub unsafe fn dot_product_neon_raw(a: &[i8], b: &[i8]) -> i32 {
             let len = a.len();
