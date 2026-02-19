@@ -811,7 +811,7 @@ mod tests {
                      epoch, loss, layer.weights_master.data[0], layer.weights_storage.data[0]);
                      
             if loss == 0 {
-                println!("Converged early!");
+                println!("Converged early! Epoch {}", epoch);
                 break;
             }
         }
