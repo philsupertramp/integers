@@ -87,6 +87,18 @@ pub mod kernels {
             .sum()
     }
 
+    /// Newton-Raphson Method
+    pub fn isqrt(n: u32) -> u32 {
+        if n == 0 { return 0; }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
+    }
+
     pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i8 {
         let mask = (1 << shift) - 1;
         let frac = val & mask;
@@ -168,6 +180,7 @@ pub struct Linear {
     ///
     pub forward_cache: Option<Tensor<i8>>,
     pub grad_cache: Option<Tensor<i16>>,
+    pub bias_grad_cache: Option<Tensor<i16>>,
 }
 
 impl Linear {
@@ -179,6 +192,7 @@ impl Linear {
             scale_shift,
             forward_cache: None,
             grad_cache: None,
+            bias_grad_cache: None,
         }
     }
     pub fn sync_weights(&mut self, rng: &mut XorShift64){
@@ -293,6 +307,7 @@ impl Linear {
             }
         }
         self.grad_cache = Some(grad_weights);
+        self.bias_grad_cache = Some(grad_bias);
         grad_input
     }
 }
@@ -350,12 +365,100 @@ impl Layer {
             l.sync_weights(rng);
         }
     }
+}
 
-    pub fn step(&mut self, lr_shift: u32) {
-        if let Layer::Linear(l) = self {
-            if let Some(cache) = l.grad_cache.take() {
-                kernels::update_weights(&mut l.weights_master.data, &cache.data, lr_shift);
+pub trait Optimizer {
+    fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]);
+}
+
+pub struct SGD {
+    pub lr_shift: u32,
+    pub momentum_shift: Option<u32>,
+    pub velocity: Vec<Vec<i32>>,
+}
+
+impl SGD {
+    pub fn new(lr_shift: u32, momentum_shift: Option<u32>) -> Self {
+        Self { lr_shift, momentum_shift, velocity: Vec::new() }
+    }
+}
+
+impl Optimizer for SGD {
+    fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]) {
+        let lr_div = 1 << self.lr_shift;
+
+        if let Some(m_shift) = self.momentum_shift {
+            // Lazy init momentum tensor if it doesn't exist
+            if self.velocity.len() <= param_idx {
+                self.velocity.push(vec![0; weights.len()]);
             }
+            
+            let m_div = 1 << m_shift;
+            let m_vec = &mut self.velocity[param_idx];
+
+            for ((w, m), g) in weights.iter_mut().zip(m_vec.iter_mut()).zip(grads.iter()) {
+                let mut decay = *m / m_div;
+                if decay == 0 && *m != 0 { decay = m.signum(); }
+                *m = m.wrapping_sub(decay).wrapping_add(*g as i32);
+                *w = w.wrapping_sub(*m / lr_div);
+            }
+        } else {
+            // Vanilla SGD
+            for (w, g) in weights.iter_mut().zip(grads.iter()) {
+                *w = w.wrapping_sub((*g as i32) / lr_div);
+            }
+        }
+    }
+}
+
+pub struct Adam {
+    pub lr_mult: i32,
+    pub b1_shift: u32,
+    pub b2_shift: u32,
+    pub eps: i32,
+    pub m: Vec<Vec<i32>>,
+    pub v: Vec<Vec<i32>>,
+}
+
+impl Adam {
+    pub fn new(lr_mult: i32) -> Self {
+        Self {
+            lr_mult,
+            b1_shift: 3, // /approx 0.875
+            b2_shift: 4, // /approx 0.9375
+            eps: 1,       // to prevent division by 0
+            m: Vec::new(),
+            v: Vec::new()
+        }
+    }
+}
+
+impl Optimizer for Adam {
+    fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]){
+        if self.m.len() <= param_idx {
+            self.m.push(vec![0; weights.len()]);
+            self.v.push(vec![0; weights.len()]);
+        }
+
+        let m_vec = &mut self.m[param_idx];
+        let v_vec = &mut self.v[param_idx];
+        let b1_div = 1 << self.b1_shift;
+        let b2_div = 1 << self.b2_shift;
+
+        for i in 0..weights.len() {
+            let g = grads[i] as i32;
+            let g_sq = g.wrapping_mul(g); // delta^2
+                                          //
+            let m_decay = m_vec[i] / b1_div;
+            m_vec[i] = m_vec[i].wrapping_sub(m_decay).wrapping_add(g);
+
+            let v_decay = v_vec[i] / b2_div;
+            v_vec[i] = v_vec[i].wrapping_sub(v_decay).wrapping_add(g_sq);
+
+            let denom = kernels::isqrt(v_vec[i].max(0) as u32) as i32 + self.eps;
+
+            let step_size = (m_vec[i] * self.lr_mult) / denom;
+            weights[i] = weights[i].wrapping_sub(step_size);
         }
     }
 }
@@ -390,9 +493,19 @@ impl Sequential {
         }
 
     }
-    pub fn step(&mut self, lr_shift: u32) {
+    pub fn step<O: Optimizer>(&mut self, optim: &mut O) {
+        let mut param_idx = 0;
         for layer in self.layers.iter_mut() {
-            layer.step(lr_shift);
+            if let Layer::Linear(l) = layer {
+                if let Some(cache) = l.grad_cache.take() {
+                    optim.step(param_idx, &mut l.weights_master.data, &cache.data);
+                    param_idx += 1;
+                }
+                if let Some(b_cache) = l.bias_grad_cache.take() {
+                    optim.step(param_idx, &mut l.bias.data, &b_cache.data);
+                    param_idx += 1;
+                }
+            }
         }
     }
 }
@@ -533,6 +646,7 @@ mod tests {
             scale_shift: 0,
             forward_cache: None,
             grad_cache: None,
+            bias_grad_cache: None
         };
         lin.weights_master.data[0] = 1;
         lin.weights_master.data[3] = 1;
@@ -557,6 +671,7 @@ mod tests {
             scale_shift: 0,
             forward_cache: None,
             grad_cache: None,
+            bias_grad_cache: None,
         };
         lin.weights_master.data[0] = 126;
         lin.weights_master.data[3] = 126;
@@ -582,6 +697,7 @@ mod tests {
             scale_shift: 0,
             forward_cache: None,
             grad_cache: None,
+            bias_grad_cache: None,
         };
         let mut rng = XorShift64{state: 420};
         lin.sync_weights(&mut rng);
@@ -749,23 +865,18 @@ mod tests {
     }
 
     #[test]
-    fn test_train_xor() {
+    fn test_train_xor_sgd_momentum() {
         let mut rng = XorShift64::new(777);
 
-        // 1. Setup Network (2 -> 8 -> ReLU -> 1)
-        // INCREASED CAPACITY: Small hidden layers (size 4) often get trapped in local minima in quantized networks.
         let mut l1 = Linear::new(2, 8, 2);
         let mut l2 = Linear::new(8, 1, 2);
 
-        // REDUCED INIT RANGE: Prevent early i8 saturation which kills gradients.
         for w in l1.weights_master.data.iter_mut() {
-            *w = (rng.gen_range(60) as i32) - 30; // [-30, 30]
+            *w = (rng.gen_range(60) as i32) - 30; 
         }
         for w in l2.weights_master.data.iter_mut() {
-            *w = (rng.gen_range(60) as i32) - 30; // [-30, 30]
+            *w = (rng.gen_range(60) as i32) - 30; 
         }
-        
-        // Initialize Biases slightly positive to keep ReLUs alive initially
         for b in l1.bias.data.iter_mut() {
             *b = 5;
         }
@@ -778,7 +889,8 @@ mod tests {
             ],
         };
 
-        // 2. XOR Dataset
+        let mut optim = SGD::new(4, Some(2));
+
         let x = Tensor::from_vec(vec![
             0, 0,
             0, 1,
@@ -786,15 +898,82 @@ mod tests {
             1, 1,
         ], vec![4, 2]);
 
-        // INCREASED TARGET: Scaled up to 20 for stronger error signals.
         let y_target = vec![0, 20, 20, 0];
-
-        // 3. Train
-        let epochs = 1000; 
-        // INCREASED LR: Shift right by 2 (divide by 4) so gradients don't vanish to 0!
-        let lr_shift = 2; 
+        let epochs = 8000; 
         
-        println!("--- Starting Integer XOR Training ---");
+        println!("--- Starting Integer XOR Training with SGD + Momentum ---");
+
+        for epoch in 0..epochs {
+            model.sync_weights(&mut rng);
+            let preds = model.forward(&x, &mut rng);
+
+            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
+            let mut loss = 0;
+
+            for i in 0..4 {
+                let error = preds.data[i] as i16 - y_target[i] as i16;
+                grad_out.data[i] = error; 
+                loss += (error as i32) * (error as i32); 
+            }
+
+            if loss == 0 {
+                println!("Converged early at epoch {}!", epoch);
+                break;
+            }
+
+            model.backward(&grad_out, Some(0)); 
+            model.step(&mut optim);
+        }
+
+        model.sync_weights(&mut rng);
+        let final_preds = model.forward(&x, &mut rng);
+
+        assert!(final_preds.data[0] < 8, "{}", final_preds.data[0]);
+        assert!(final_preds.data[3] < 8, "{}", final_preds.data[3]);
+        assert!(final_preds.data[1] > 12, "{}", final_preds.data[1]);
+        assert!(final_preds.data[2] > 12, "{}", final_preds.data[2]);
+    }
+
+    #[test]
+    fn test_train_xor_adam() {
+        let mut rng = XorShift64::new(777);
+
+        let mut l1 = Linear::new(2, 8, 2);
+        let mut l2 = Linear::new(8, 1, 2);
+
+        for w in l1.weights_master.data.iter_mut() {
+            *w = (rng.gen_range(60) as i32) - 30; 
+        }
+        for w in l2.weights_master.data.iter_mut() {
+            *w = (rng.gen_range(60) as i32) - 30; 
+        }
+        for b in l1.bias.data.iter_mut() {
+            *b = 5;
+        }
+
+        let mut model = Sequential {
+            layers: vec![
+                Layer::Linear(l1),
+                Layer::ReLU(ReLU::new()),
+                Layer::Linear(l2),
+            ],
+        };
+
+        // NEW: Instantiate our Integer Adam!
+        // We set the learning rate multiplier to 2.
+        let mut optim = Adam::new(2);
+
+        let x = Tensor::from_vec(vec![
+            0, 0,
+            0, 1,
+            1, 0,
+            1, 1,
+        ], vec![4, 2]);
+
+        let y_target = vec![0, 20, 20, 0];
+        let epochs = 800; 
+        
+        println!("--- Starting Integer XOR Training with ADAM ---");
 
         for epoch in 0..epochs {
             model.sync_weights(&mut rng);
@@ -820,26 +999,22 @@ mod tests {
             }
 
             model.backward(&grad_out, Some(0)); 
-            model.step(lr_shift);
+            
+            // NEW: Pass the optimizer to the model step
+            model.step(&mut optim);
         }
 
         model.sync_weights(&mut rng);
         let final_preds = model.forward(&x, &mut rng);
-
-        let p00 = final_preds.data[0];
-        let p01 = final_preds.data[1];
-        let p10 = final_preds.data[2];
-        let p11 = final_preds.data[3];
+        let p00 = final_preds.data[0]; let p01 = final_preds.data[1];
+        let p10 = final_preds.data[2]; let p11 = final_preds.data[3];
 
         println!("Final XOR Evaluation: 0,0->{} | 0,1->{} | 1,0->{} | 1,1->{}", p00, p01, p10, p11);
 
-        // Relaxed strict margins (from <5 to <8) to account for stochastic rounding noise
-        // applied to the master weights right before this final evaluation check!
         assert!(p00 < 8, "0,0 failed: expected low, got {}", p00);
         assert!(p11 < 8, "1,1 failed: expected low, got {}", p11);
         assert!(p01 > 12, "0,1 failed: expected high, got {}", p01);
         assert!(p10 > 12, "1,0 failed: expected high, got {}", p10);
-    }
-}
+    }}
 
 
