@@ -743,17 +743,22 @@ mod tests {
     fn test_train_xor() {
         let mut rng = XorShift64::new(777);
 
-        // 1. Setup Network (2 -> 4 -> ReLU -> 1)
-        // Shift scale set to 2 to give the accumulator some damping.
-        let mut l1 = Linear::new(2, 4, 2);
-        let mut l2 = Linear::new(4, 1, 2);
+        // 1. Setup Network (2 -> 8 -> ReLU -> 1)
+        // INCREASED CAPACITY: Small hidden layers (size 4) often get trapped in local minima in quantized networks.
+        let mut l1 = Linear::new(2, 8, 2);
+        let mut l2 = Linear::new(8, 1, 2);
 
-        // Randomly initialize weights to break symmetry (crucial for XOR)
+        // REDUCED INIT RANGE: Prevent early i8 saturation which kills gradients.
         for w in l1.weights_master.data.iter_mut() {
-            *w = (rng.gen_range(200) as i32) - 100; // [-100, 100]
+            *w = (rng.gen_range(60) as i32) - 30; // [-30, 30]
         }
         for w in l2.weights_master.data.iter_mut() {
-            *w = (rng.gen_range(200) as i32) - 100;
+            *w = (rng.gen_range(60) as i32) - 30; // [-30, 30]
+        }
+        
+        // Initialize Biases slightly positive to keep ReLUs alive initially
+        for b in l1.bias.data.iter_mut() {
+            *b = 5;
         }
 
         let mut model = Sequential {
@@ -772,12 +777,13 @@ mod tests {
             1, 1,
         ], vec![4, 2]);
 
-        // Target outputs. Scaled up to 10 so our integer engine has gradient headroom!
-        let y_target = vec![0, 10, 10, 0];
+        // INCREASED TARGET: Scaled up to 20 for stronger error signals.
+        let y_target = vec![0, 20, 20, 0];
 
         // 3. Train
-        let epochs = 800;
-        let lr_shift = 4; // Shift right by 4 (damping the gradient)
+        let epochs = 1000; 
+        // INCREASED LR: Shift right by 2 (divide by 4) so gradients don't vanish to 0!
+        let lr_shift = 2; 
         
         println!("--- Starting Integer XOR Training ---");
 
@@ -795,7 +801,7 @@ mod tests {
             }
 
             if epoch % 50 == 0 {
-                println!("Epoch {:03}: Loss = {:04}, Preds: [{}, {}, {}, {}]", 
+                println!("Epoch {:03}: Loss = {:05}, Preds: [{}, {}, {}, {}]", 
                          epoch, loss, preds.data[0], preds.data[1], preds.data[2], preds.data[3]);
             }
 
@@ -804,7 +810,7 @@ mod tests {
                 break;
             }
 
-            model.backward(&grad_out, Some(0)); // No gradient down-shift needed for toy data
+            model.backward(&grad_out, Some(0)); 
             model.step(lr_shift);
         }
 
@@ -818,13 +824,12 @@ mod tests {
 
         println!("Final XOR Evaluation: 0,0->{} | 0,1->{} | 1,0->{} | 1,1->{}", p00, p01, p10, p11);
 
-        // Assert network learned the non-linear boundary 
-        // We expect identical inputs (0,0 / 1,1) to be near 0
-        // We expect differing inputs (0,1 / 1,0) to be near 10
-        assert!(p00 < 4, "0,0 failed: expected low, got {}", p00);
-        assert!(p11 < 4, "1,1 failed: expected low, got {}", p11);
-        assert!(p01 > 6, "0,1 failed: expected high, got {}", p01);
-        assert!(p10 > 6, "1,0 failed: expected high, got {}", p10);
+        // Relaxed strict margins (from <5 to <8) to account for stochastic rounding noise
+        // applied to the master weights right before this final evaluation check!
+        assert!(p00 < 8, "0,0 failed: expected low, got {}", p00);
+        assert!(p11 < 8, "1,1 failed: expected low, got {}", p11);
+        assert!(p01 > 12, "0,1 failed: expected high, got {}", p01);
+        assert!(p10 > 12, "1,0 failed: expected high, got {}", p10);
     }
 }
 
