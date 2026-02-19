@@ -1,8 +1,7 @@
 use std::fmt;
 
 
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tensor<T>
 where T: Clone + Copy + fmt::Debug + Default
 {
@@ -69,6 +68,10 @@ impl XorShift64 {
 
 pub mod kernels {
     use super::*;
+
+    pub fn mul_mixed_scalar(a: i16, b: i8) -> i32 {
+        (a as i32) * (b as i32)
+    }
 
     pub fn dot_product_scalar(a: &[i8], b: &[i8]) -> i32 {
         a.iter()
@@ -153,17 +156,25 @@ pub mod kernels {
 pub struct Linear {
     /// all weights are of Transposed Form [out, in] for memory reasons
 
-    /// Source of truth
+    /// Source of truth (High Res)
     weights_master: Tensor<i32>,
-    /// Shadow copy used for dot-product
+    /// Shadow copy used for dot-product (Low Res)
     weights_storage: Tensor<i8>,
-    /// Biases before quantization
+    /// Biases before quantization (High Res)
     bias: Tensor<i32>,
     /// "hyperparameter" that determines how much we right-shift
     scale_shift: u32,
 }
 
 impl Linear {
+    pub fn new(input_dim: usize, output_dim: usize, scale_shift: u32) -> Self {
+        Self {
+            weights_master: Tensor::new(vec![output_dim, input_dim]),
+            weights_storage: Tensor::new(vec![output_dim, input_dim]),
+            bias: Tensor::new(vec![output_dim]),
+            scale_shift,
+        }
+    }
     pub fn sync_weights(&mut self, rng: &mut XorShift64){
         for idx in 0..self.weights_master.data.len() {
             self.weights_storage.data[idx] = kernels::stochastic_downcast(
@@ -180,7 +191,7 @@ impl Linear {
         let batch_size = input.shape[0];
         let input_dim = input.shape[1];
         let output_size = self.weights_storage.shape[0];
-        let mut out = Tensor::new([batch_size, output_size].to_vec());
+        let mut out = Tensor::new(vec![batch_size, output_size]);
         for b in 0..batch_size {
             let in_start = b * input_dim;
             let in_end = in_start + input_dim;
@@ -205,50 +216,91 @@ impl Linear {
         return out;
     }
 
-    pub fn backward(&self, input: &Tensor<i8>, grad_output: &Tensor<i16>) -> (Tensor<i16>, Tensor<i16>) {
-        let output_size = self.weights_storage.shape[1];
+    pub fn backward(&self, input: &Tensor<i8>, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> (Tensor<i16>, Tensor<i16>) {
+        let output_dim = self.weights_storage.shape[0];
         let input_dim = input.shape[1];
         let batch_size = input.shape[0];
+        let grad_shift = gradient_shift.unwrap_or(8);
 
-        let mut grad_input = Tensor::new(self.weights_storage.shape);
-        let mut grad_weights = Tensor::new(input.shape);
-        for o in 0..output_size {
-            let in_start = b * input_dim;
-            let in_end = in_start + input_dim;
-            let grad_output_row = &grad_output.data[in_start..in_end];
+        assert_eq!(grad_output.shape[0], batch_size);
+        assert_eq!(grad_output.shape[1], output_dim);
 
-            for b in 0..batch_size {
-                let w_start = o * input_dim;
-                let w_end = w_start + input_dim;
+        let mut grad_input = Tensor::<i16>::new(vec![batch_size, input_dim]);
+        let mut grad_weights = Tensor::<i16>::new(vec![output_dim, input_dim]);
 
-                let w_row = &input.data[w_start..w_end];
-                let val = kernels::dot_product_mixed_scalar(
-                    &w_row,
-                    &grad_output_row
-                );
-                grad_weights.data[i * input.shape[0] + o] += ((val >> 8) as i16);
-            }
-        }
+        // compute dW (grad w.r.t Weights)
         for b in 0..batch_size {
             let in_start = b * input_dim;
-            let in_end = in_start + input_dim;
-            let grad_output_row = &grad_output.data[in_start..in_end];
+            let grad_start = b * output_dim;
 
-            for o in 0..output_size {
-                let w_start = o * input_dim;
-                let w_end = w_start + input_dim;
-                let weight_row = &self.weights_storage.data[w_start..w_end];
-                let val = kernels::dot_product_mixed_scalar(
-                    &weight_row,
-                    &grad_output_row
-                );
+            for o in 0..output_dim {
+                let g_val = grad_output.data[grad_start + o];
+                if g_val == 0 { continue; }
+
                 for i in 0..input_dim {
-                    grad_input.data[b * input.shape[1] + i] += (val >> 8) as i16;
+                    let x_val = input.data[in_start + i];
+                    let val = kernels::mul_mixed_scalar(g_val, x_val);
+
+                    let idx = o * input_dim + i;
+                    grad_weights.data[idx] = grad_weights.data[idx].wrapping_add(
+                        (val >> grad_shift) as i16
+                    );
                 }
             }
         }
 
+        // compute dX (grad w.r.t Input)
+        for b in 0..batch_size {
+            let grad_start = b * output_dim;
+
+            for o in 0..output_dim {
+                let g_val = grad_output.data[grad_start + o];
+                if g_val == 0 { continue; }
+
+                let w_start = o * input_dim;
+
+                for i in 0..input_dim {
+                    let w_val = self.weights_storage.data[w_start + i];
+                    let val = kernels::mul_mixed_scalar(g_val, w_val);
+
+                    let idx = b * input_dim + i;
+                    grad_input.data[idx] = grad_input.data[idx].wrapping_add(
+                        (val >> grad_shift) as i16
+                    )
+                }
+            }
+        }
         [grad_input, grad_weights].into()
+    }
+}
+
+pub struct ReLU {
+    forward_cache: Option<Tensor<i8>>,
+}
+
+impl ReLU {
+    pub fn new() -> Self {
+        Self {
+            forward_cache: None
+        }
+    }
+    pub fn forward(&mut self, input: &Tensor<i8>) -> Tensor<i8> {
+        self.forward_cache = Some(input.clone());
+        let mut output = Tensor::<i8>::new(input.shape.clone());
+        for idx in 0..input.data.len() {
+            output.data[idx] = if input.data[idx] > 0 { input.data[idx] } else { 0 };
+        }
+        output
+    }
+    pub fn backward(&self, grad_output: &Tensor<i16>) -> Tensor<i16> {
+        if self.forward_cache == None {
+            panic!("No state registered. Perform forward pass first!");
+        }
+        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
+        for o in 0..grad_output.data.len() {
+            output.data[o] = if self.forward_cache.as_ref().unwrap().data[o] > 0 { grad_output.data[o] } else { 0 };
+        }
+        output
     }
 }
 
@@ -439,6 +491,155 @@ mod tests {
 
         assert_eq!(out.shape[0], 10);
         assert_eq!(out.shape[1], 3);
+    }
+
+    #[test]
+    fn test_linear_forward_identity() {
+        // Linear 2->2, Scale 0 (Identity mapping potential)
+        let mut lin = Linear::new(2, 2, 0);
+        
+        // Identity Matrix in Master Weights [1, 0] / [0, 1]
+        lin.weights_master.data[0] = 1; 
+        lin.weights_master.data[3] = 1; 
+        
+        let mut rng = XorShift64::new(420);
+        lin.sync_weights(&mut rng);
+
+        let mut input = Tensor::new(vec![1, 2]);
+        input.data[0] = 10;
+        input.data[1] = 20;
+
+        let out = lin.forward(&input, &mut rng);
+
+        assert_eq!(out.data[0], 10);
+        assert_eq!(out.data[1], 20);
+    }
+
+    #[test]
+    fn test_linear_forward_shape_batch() {
+        let mut lin = Linear::new(2, 3, 0);
+        let mut rng = XorShift64::new(420);
+        lin.sync_weights(&mut rng);
+
+        let input = Tensor::new(vec![10, 2]);
+        let out = lin.forward(&input, &mut rng);
+
+        assert_eq!(out.shape[0], 10);
+        assert_eq!(out.shape[1], 3);
+        assert_eq!(out.data.len(), 30);
+    }
+
+    #[test]
+    fn test_linear_backward_shapes() {
+        // Batch 2, Input 4 -> Output 3
+        let lin = Linear::new(4, 3, 0);
+        
+        let input = Tensor::new(vec![2, 4]); // [Batch, In]
+        let grad_out = Tensor::new(vec![2, 3]); // [Batch, Out]
+
+        let (dX, dW) = lin.backward(&input, &grad_out, None);
+
+        // Check shapes
+        assert_eq!(dX.shape, vec![2, 4]); // [Batch, In]
+        assert_eq!(dW.shape, vec![3, 4]); // [Out, In]
+    }
+
+    #[test]
+    fn test_train_linear_regression() {
+        // We want to learn the function: y = 3x
+        // 1 Input, 1 Output. Scale shift = 0.
+        let mut layer = Linear::new(1, 1, 0);
+        
+        // Initialize Master Weight poorly (start at 10)
+        layer.weights_master.data[0] = 10;
+        let mut rng = XorShift64::new(42);
+
+        // Dataset
+        let x = Tensor::from_vec(vec![1, 2, 3, 4], vec![4, 1]); // Inputs
+        let y_target = vec![3, 6, 9, 12];                       // Targets
+        
+        // Hyperparameters
+        let epochs = 20;
+        let lr_shift = 4; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
+        let grad_shift = 0; // Don't shrink the gradients here, numbers are small
+
+        println!("--- Starting Integer Training ---");
+        for epoch in 0..epochs {
+            // 1. Sync weights from i32 -> i8
+            layer.sync_weights(&mut rng);
+
+            // 2. Forward Pass
+            let preds = layer.forward(&x, &mut rng);
+
+            // 3. Compute Loss & Gradients (Error = Pred - Target)
+            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
+            let mut loss = 0;
+
+            for i in 0..4 {
+                let error = preds.data[i] as i16 - y_target[i] as i16;
+                grad_out.data[i] = error; // The "Gradient" is just the error
+                loss += (error as i32) * (error as i32); // MSE
+            }
+
+            // 4. Backward Pass
+            let (_dX, dW) = layer.backward(&x, &grad_out, Some(grad_shift));
+
+            // 5. Optimizer Step: w = w - (dW >> lr_shift)
+            kernels::update_weights(&mut layer.weights_master.data, &dW.data, lr_shift);
+
+            println!("Epoch {:02}: Loss = {:04}, Master Weight = {}, Storage Weight = {}", 
+                     epoch, loss, layer.weights_master.data[0], layer.weights_storage.data[0]);
+                     
+            if loss == 0 {
+                println!("Converged early!");
+                break;
+            }
+        }
+
+        layer.sync_weights(&mut rng);
+        assert_eq!(layer.weights_storage.data[0], 3, "Model failed to learn y=3x");
+    }
+
+    #[test]
+    fn test_relu_forward(){
+        let mut relu = ReLU::new();
+        let mut input = Tensor::<i8>::new(vec![4, 1]);
+
+        input.data[0] = -5;
+        input.data[1] = 0;
+        input.data[2] = 5;
+        input.data[3] = 127;
+
+        let res = relu.forward(&input);
+        assert_eq!(res.data[0], 0);
+        assert_eq!(res.data[1], 0);
+        assert_eq!(res.data[2], 5);
+        assert_eq!(res.data[3], 127);
+    }
+
+    #[test]
+    fn test_relu_backward(){
+        let mut relu = ReLU::new();
+        let mut input = Tensor::<i8>::new(vec![4, 1]);
+
+        input.data[0] = -5;
+        input.data[1] = 0;
+        input.data[2] = 5;
+        input.data[3] = 127;
+
+        let _res = relu.forward(&input);
+
+        let mut grad = Tensor::<i16>::new(vec![4, 1]);
+        grad.data[0] = 10;
+        grad.data[1] = 10;
+        grad.data[2] = 10;
+        grad.data[3] = 10;
+
+        let res = relu.backward(&grad);
+        assert_eq!(res.data[0], 0);
+        assert_eq!(res.data[1], 0);
+        assert_eq!(res.data[2], 10);
+        assert_eq!(res.data[3], 10);
     }
 }
 
