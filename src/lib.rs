@@ -212,7 +212,16 @@ impl Linear {
                 let w_end = w_start + input_dim;
 
                 let weight_row = &self.weights_storage.data[w_start..w_end];
+                //
+                #[cfg(target_arch = "aarch64")]
+                let raw_val = unsafe {
+                    if input_dim % 16 == 0 { kernels::arm_neon::dot_product_neon_raw(input_row, weight_row)}
+                    else { kernels::dot_product_scalar(input_row, weight_row) }
+                };
+                #[cfg(not(target_arch = "aarch64"))]
                 let raw_val = kernels::dot_product_scalar(input_row, weight_row);
+
+
                 let acc = raw_val + self.bias.data[o];
                 out.data[b * output_size + o] += kernels::stochastic_downcast(
                     acc,
