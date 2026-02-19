@@ -103,9 +103,9 @@ pub mod kernels {
 
     pub fn update_weights(weights: &mut [i32], grads: &[i16], lr_shift: u32) {
         assert_eq!(weights.len(), grads.len(), "weights and grads must match length!" );
-
+        let divisor = 1 << lr_shift;
         for (w, g) in weights.iter_mut().zip(grads.iter()) {
-            let update = (*g as i32) >> lr_shift;
+            let update = (*g as i32) / divisor;
 
             *w = w.wrapping_sub(update);
         }
@@ -157,13 +157,17 @@ pub struct Linear {
     /// all weights are of Transposed Form [out, in] for memory reasons
 
     /// Source of truth (High Res)
-    weights_master: Tensor<i32>,
+    pub weights_master: Tensor<i32>,
     /// Shadow copy used for dot-product (Low Res)
-    weights_storage: Tensor<i8>,
+    pub weights_storage: Tensor<i8>,
     /// Biases before quantization (High Res)
-    bias: Tensor<i32>,
+    pub bias: Tensor<i32>,
     /// "hyperparameter" that determines how much we right-shift
-    scale_shift: u32,
+    pub scale_shift: u32,
+
+    ///
+    pub forward_cache: Option<Tensor<i8>>,
+    pub grad_cache: Option<Tensor<i16>>,
 }
 
 impl Linear {
@@ -173,6 +177,8 @@ impl Linear {
             weights_storage: Tensor::new(vec![output_dim, input_dim]),
             bias: Tensor::new(vec![output_dim]),
             scale_shift,
+            forward_cache: None,
+            grad_cache: None,
         }
     }
     pub fn sync_weights(&mut self, rng: &mut XorShift64){
@@ -185,8 +191,11 @@ impl Linear {
         }
     }
 
-    pub fn forward(&self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+    pub fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
         assert_eq!(input.shape[1], self.weights_storage.shape[1], "Input in wrong dimension for weights! {} vs {}", input.shape[1], self.weights_storage.shape[1]);
+
+        // store input for backward pass
+        self.forward_cache = Some(input.clone());
 
         let batch_size = input.shape[0];
         let input_dim = input.shape[1];
@@ -216,7 +225,9 @@ impl Linear {
         return out;
     }
 
-    pub fn backward(&self, input: &Tensor<i8>, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> (Tensor<i16>, Tensor<i16>) {
+    pub fn backward(&mut self, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
+        let input = self.forward_cache.as_ref().expect("Backward called without forward call!");
+
         let output_dim = self.weights_storage.shape[0];
         let input_dim = input.shape[1];
         let batch_size = input.shape[0];
@@ -227,6 +238,7 @@ impl Linear {
 
         let mut grad_input = Tensor::<i16>::new(vec![batch_size, input_dim]);
         let mut grad_weights = Tensor::<i16>::new(vec![output_dim, input_dim]);
+        let mut grad_bias = Tensor::<i16>::new(vec![output_dim]);
 
         // compute dW (grad w.r.t Weights)
         for b in 0..batch_size {
@@ -235,6 +247,7 @@ impl Linear {
 
             for o in 0..output_dim {
                 let g_val = grad_output.data[grad_start + o];
+                grad_bias.data[o] = grad_bias.data[o].wrapping_add(g_val);
                 if g_val == 0 { continue; }
 
                 for i in 0..input_dim {
@@ -270,7 +283,8 @@ impl Linear {
                 }
             }
         }
-        [grad_input, grad_weights].into()
+        self.grad_cache = Some(grad_weights);
+        grad_input
     }
 }
 
@@ -284,7 +298,7 @@ impl ReLU {
             forward_cache: None
         }
     }
-    pub fn forward(&mut self, input: &Tensor<i8>) -> Tensor<i8> {
+    pub fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
         self.forward_cache = Some(input.clone());
         let mut output = Tensor::<i8>::new(input.shape.clone());
         for idx in 0..input.data.len() {
@@ -292,17 +306,88 @@ impl ReLU {
         }
         output
     }
-    pub fn backward(&self, grad_output: &Tensor<i16>) -> Tensor<i16> {
-        if self.forward_cache == None {
-            panic!("No state registered. Perform forward pass first!");
-        }
+    pub fn backward(&self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
+        let input = self.forward_cache.as_ref().expect("No state registered. Perform forward pass first!");
         let mut output = Tensor::<i16>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
-            output.data[o] = if self.forward_cache.as_ref().unwrap().data[o] > 0 { grad_output.data[o] } else { 0 };
+            output.data[o] = if input.data[o] > 0 { grad_output.data[o] } else { 0 };
         }
         output
     }
 }
+
+pub enum Layer {
+    Linear(Linear),
+    ReLU(ReLU),
+}
+
+impl Layer {
+    pub fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+        match self {
+            Layer::Linear(l) => l.forward(input, rng),
+            Layer::ReLU(r) => r.forward(input, rng),
+        }
+    }
+
+    pub fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
+        match self {
+            Layer::Linear(l) => l.backward(grad_output, grad_shift),
+            Layer::ReLU(r) => r.backward(grad_output, grad_shift),
+        }
+    }
+
+    pub fn sync_weights(&mut self, rng: &mut XorShift64) {
+        if let Layer::Linear(l) = self {
+            l.sync_weights(rng);
+        }
+    }
+
+    pub fn step(&mut self, lr_shift: u32) {
+        if let Layer::Linear(l) = self {
+            if let Some(cache) = l.grad_cache.take() {
+                kernels::update_weights(&mut l.weights_master.data, &cache.data, lr_shift);
+            }
+        }
+    }
+}
+
+pub struct Sequential {
+    pub layers: Vec<Layer>,
+}
+
+impl Sequential {
+    pub fn new() -> Self{
+        Self {
+            layers: vec![]
+        }
+    }
+    pub fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+        let mut output = input.clone();
+        for layer in self.layers.iter_mut() {
+            output = layer.forward(&output, rng);
+        }
+        output
+    }
+    pub fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
+        let mut output = grad_output.clone();
+        for layer in self.layers.iter_mut().rev() {
+            output = layer.backward(&output, grad_shift);
+        }
+        output
+    }
+    pub fn sync_weights(&mut self, rng: &mut XorShift64) {
+        for layer in self.layers.iter_mut() {
+            layer.sync_weights(rng)
+        }
+
+    }
+    pub fn step(&mut self, lr_shift: u32) {
+        for layer in self.layers.iter_mut() {
+            layer.step(lr_shift);
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -436,7 +521,9 @@ mod tests {
             weights_master: Tensor::new([2, 2].to_vec()),
             weights_storage: Tensor::new([2, 2].to_vec()),
             bias: Tensor::new([1, 2].to_vec()),
-            scale_shift: 0
+            scale_shift: 0,
+            forward_cache: None,
+            grad_cache: None,
         };
         lin.weights_master.data[0] = 1;
         lin.weights_master.data[3] = 1;
@@ -458,7 +545,9 @@ mod tests {
             weights_master: Tensor::new([2, 2].to_vec()),
             weights_storage: Tensor::new([2, 2].to_vec()),
             bias: Tensor::new([1, 2].to_vec()),
-            scale_shift: 0
+            scale_shift: 0,
+            forward_cache: None,
+            grad_cache: None,
         };
         lin.weights_master.data[0] = 126;
         lin.weights_master.data[3] = 126;
@@ -481,7 +570,9 @@ mod tests {
             weights_master: Tensor::new([3, 2].to_vec()),
             weights_storage: Tensor::new([3, 2].to_vec()),
             bias: Tensor::new([1, 3].to_vec()),
-            scale_shift: 0
+            scale_shift: 0,
+            forward_cache: None,
+            grad_cache: None,
         };
         let mut rng = XorShift64{state: 420};
         lin.sync_weights(&mut rng);
@@ -532,12 +623,15 @@ mod tests {
     #[test]
     fn test_linear_backward_shapes() {
         // Batch 2, Input 4 -> Output 3
-        let lin = Linear::new(4, 3, 0);
+        let mut lin = Linear::new(4, 3, 0);
         
         let input = Tensor::new(vec![2, 4]); // [Batch, In]
         let grad_out = Tensor::new(vec![2, 3]); // [Batch, Out]
 
-        let (dX, dW) = lin.backward(&input, &grad_out, None);
+        lin.forward_cache = Some(input.clone());
+
+        let dX = lin.backward(&grad_out, None);
+        let dW = lin.grad_cache.unwrap().clone();
 
         // Check shapes
         assert_eq!(dX.shape, vec![2, 4]); // [Batch, In]
@@ -582,7 +676,8 @@ mod tests {
             }
 
             // 4. Backward Pass
-            let (_dX, dW) = layer.backward(&x, &grad_out, Some(grad_shift));
+            let _dX = layer.backward(&grad_out, Some(grad_shift));
+            let dW = layer.grad_cache.clone().unwrap();
 
             // 5. Optimizer Step: w = w - (dW >> lr_shift)
             kernels::update_weights(&mut layer.weights_master.data, &dW.data, lr_shift);
@@ -604,13 +699,14 @@ mod tests {
     fn test_relu_forward(){
         let mut relu = ReLU::new();
         let mut input = Tensor::<i8>::new(vec![4, 1]);
+        let mut rng = XorShift64::new(42);
 
         input.data[0] = -5;
         input.data[1] = 0;
         input.data[2] = 5;
         input.data[3] = 127;
 
-        let res = relu.forward(&input);
+        let res = relu.forward(&input, &mut rng);
         assert_eq!(res.data[0], 0);
         assert_eq!(res.data[1], 0);
         assert_eq!(res.data[2], 5);
@@ -621,13 +717,14 @@ mod tests {
     fn test_relu_backward(){
         let mut relu = ReLU::new();
         let mut input = Tensor::<i8>::new(vec![4, 1]);
+        let mut rng = XorShift64::new(42);
 
         input.data[0] = -5;
         input.data[1] = 0;
         input.data[2] = 5;
         input.data[3] = 127;
 
-        let _res = relu.forward(&input);
+        let _res = relu.forward(&input, &mut rng);
 
         let mut grad = Tensor::<i16>::new(vec![4, 1]);
         grad.data[0] = 10;
@@ -635,11 +732,99 @@ mod tests {
         grad.data[2] = 10;
         grad.data[3] = 10;
 
-        let res = relu.backward(&grad);
+        let res = relu.backward(&grad, Some(8));
         assert_eq!(res.data[0], 0);
         assert_eq!(res.data[1], 0);
         assert_eq!(res.data[2], 10);
         assert_eq!(res.data[3], 10);
+    }
+
+    #[test]
+    fn test_train_xor() {
+        let mut rng = XorShift64::new(777);
+
+        // 1. Setup Network (2 -> 4 -> ReLU -> 1)
+        // Shift scale set to 2 to give the accumulator some damping.
+        let mut l1 = Linear::new(2, 4, 2);
+        let mut l2 = Linear::new(4, 1, 2);
+
+        // Randomly initialize weights to break symmetry (crucial for XOR)
+        for w in l1.weights_master.data.iter_mut() {
+            *w = (rng.gen_range(200) as i32) - 100; // [-100, 100]
+        }
+        for w in l2.weights_master.data.iter_mut() {
+            *w = (rng.gen_range(200) as i32) - 100;
+        }
+
+        let mut model = Sequential {
+            layers: vec![
+                Layer::Linear(l1),
+                Layer::ReLU(ReLU::new()),
+                Layer::Linear(l2),
+            ],
+        };
+
+        // 2. XOR Dataset
+        let x = Tensor::from_vec(vec![
+            0, 0,
+            0, 1,
+            1, 0,
+            1, 1,
+        ], vec![4, 2]);
+
+        // Target outputs. Scaled up to 10 so our integer engine has gradient headroom!
+        let y_target = vec![0, 10, 10, 0];
+
+        // 3. Train
+        let epochs = 800;
+        let lr_shift = 4; // Shift right by 4 (damping the gradient)
+        
+        println!("--- Starting Integer XOR Training ---");
+
+        for epoch in 0..epochs {
+            model.sync_weights(&mut rng);
+            let preds = model.forward(&x, &mut rng);
+
+            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
+            let mut loss = 0;
+
+            for i in 0..4 {
+                let error = preds.data[i] as i16 - y_target[i] as i16;
+                grad_out.data[i] = error; 
+                loss += (error as i32) * (error as i32); 
+            }
+
+            if epoch % 50 == 0 {
+                println!("Epoch {:03}: Loss = {:04}, Preds: [{}, {}, {}, {}]", 
+                         epoch, loss, preds.data[0], preds.data[1], preds.data[2], preds.data[3]);
+            }
+
+            if loss == 0 {
+                println!("Converged early at epoch {}!", epoch);
+                break;
+            }
+
+            model.backward(&grad_out, Some(0)); // No gradient down-shift needed for toy data
+            model.step(lr_shift);
+        }
+
+        model.sync_weights(&mut rng);
+        let final_preds = model.forward(&x, &mut rng);
+
+        let p00 = final_preds.data[0];
+        let p01 = final_preds.data[1];
+        let p10 = final_preds.data[2];
+        let p11 = final_preds.data[3];
+
+        println!("Final XOR Evaluation: 0,0->{} | 0,1->{} | 1,0->{} | 1,1->{}", p00, p01, p10, p11);
+
+        // Assert network learned the non-linear boundary 
+        // We expect identical inputs (0,0 / 1,1) to be near 0
+        // We expect differing inputs (0,1 / 1,0) to be near 10
+        assert!(p00 < 4, "0,0 failed: expected low, got {}", p00);
+        assert!(p11 < 4, "1,1 failed: expected low, got {}", p11);
+        assert!(p01 > 6, "0,1 failed: expected high, got {}", p01);
+        assert!(p10 > 6, "1,0 failed: expected high, got {}", p10);
     }
 }
 
