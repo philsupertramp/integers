@@ -15,7 +15,11 @@ impl<T> Tensor<T>
 where T: Clone + Copy + fmt::Debug + Default
 {
     pub fn new(shape: Vec<usize>) -> Self {
-        let total_elements: usize = shape.iter().product();
+        let mut total_elements: usize = 0;
+
+        if !shape.is_empty() {
+            total_elements = shape.iter().product();
+        }
         Self {
             data: vec![T::default(); total_elements],
             shape,
@@ -23,7 +27,10 @@ where T: Clone + Copy + fmt::Debug + Default
     }
 
     pub fn from_vec(data: Vec<T>, shape: Vec<usize>) -> Self {
-        let expected: usize = shape.iter().product();
+        let mut expected = 0;
+        if !shape.is_empty() {
+            expected = shape.iter().product();
+        }
         assert_eq!(
             data.len(),
             expected,
@@ -36,6 +43,10 @@ where T: Clone + Copy + fmt::Debug + Default
 
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        self.data.len() * std::mem::size_of::<T>()
     }
 }
 
@@ -111,16 +122,6 @@ pub mod kernels {
         if shifted > 127 { 127 }
         else if shifted < -128 { -128 }
         else { shifted as i8 }
-    }
-
-    pub fn update_weights(weights: &mut [i32], grads: &[i16], lr_shift: u32) {
-        assert_eq!(weights.len(), grads.len(), "weights and grads must match length!" );
-        let divisor = 1 << lr_shift;
-        for (w, g) in weights.iter_mut().zip(grads.iter()) {
-            let update = (*g as i32) / divisor;
-
-            *w = w.wrapping_sub(update);
-        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -310,6 +311,29 @@ impl Linear {
         self.bias_grad_cache = Some(grad_bias);
         grad_input
     }
+
+    pub fn memory_report(&self) -> (usize, usize) {
+        let static_mem = self.weights_master.memory_bytes()
+            + self.weights_storage.memory_bytes()
+            + self.bias.memory_bytes();
+
+        let mut dyn_mem = 0;
+        if let Some(fc) = &self.forward_cache { dyn_mem += fc.memory_bytes(); }
+        if let Some(gc) = &self.grad_cache { dyn_mem += gc.memory_bytes(); }
+        if let Some(bgc) = &self.bias_grad_cache { dyn_mem += bgc.memory_bytes(); }
+
+        (static_mem, dyn_mem)
+    }
+    
+    pub fn step<O: Optimizer>(&mut self, optim: &mut O) {
+        if let Some(cache) = self.grad_cache.take() {
+            optim.step(0, &mut self.weights_master.data, &cache.data);
+        }
+        if let Some(b_cache) = self.bias_grad_cache.take() {
+            optim.step(1, &mut self.bias.data, &b_cache.data);
+        }
+    }
+
 }
 
 pub struct ReLU {
@@ -337,6 +361,14 @@ impl ReLU {
             output.data[o] = if input.data[o] > 0 { grad_output.data[o] } else { 0 };
         }
         output
+    }
+
+    pub fn memory_report(&self) -> (usize, usize) {
+        let mut dyn_mem = 0;
+        let static_mem = 0;
+        if let Some(fc) = &self.forward_cache { dyn_mem += fc.memory_bytes(); }
+
+        (static_mem, dyn_mem)
     }
 }
 
@@ -367,6 +399,23 @@ impl Layer {
     }
 }
 
+impl fmt::Display for Layer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Layer::Linear(l) => {
+                let in_dim = l.weights_storage.shape[1];
+                let out_dim = l.weights_storage.shape[0];
+
+                let params = (in_dim * out_dim) + out_dim;
+                write!(f, "{:<15} | [{:<4}, {:<4}, ({:<4})] | {:<10}", "Linear (i8/i32)", in_dim, out_dim, out_dim, params)
+            },
+            Layer::ReLU(_) => {
+                write!(f, "{:<15} | {:-<18} | {:<10}", "ReLU", "---", "0")
+            }
+        }
+    }
+}
+
 pub trait Optimizer {
     fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]);
 }
@@ -385,6 +434,13 @@ impl SGD {
 
 impl Optimizer for SGD {
     fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]) {
+        assert_eq!(
+            weights.len(),
+            grads.len(),
+            "Weights and Gradients must match length! Got {} vs. {}",
+            weights.len(),
+            grads.len(),
+        );
         let lr_div = 1 << self.lr_shift;
 
         if let Some(m_shift) = self.momentum_shift {
@@ -508,12 +564,120 @@ impl Sequential {
             }
         }
     }
+
+    pub fn summary(&self) {
+        println!("{:-<50}", "-");
+        println!("{:<15} | {:<16} | {:<10}", "Layer Type", "Shape [I, O, (B)]", "Param # (I x O + B)");
+        println!("{:-<50}", "-");
+        
+        let mut total_params = 0;
+        let mut stat_mem = 0;
+        let mut dyn_mem = 0;
+
+        for layer in &self.layers {
+            println!("{}", layer);  
+
+            if let Layer::Linear(l) = layer {
+                total_params += (
+                    l.weights_storage.shape[0]
+                    * l.weights_storage.shape[1]
+                ) + l.weights_storage.shape[0];
+                let (stat, dyna) = l.memory_report();
+                stat_mem += stat;
+                dyn_mem += dyna;
+            } else if let Layer::ReLU(r) = layer {
+                let (_, dyna) = r.memory_report();
+                dyn_mem += dyna;
+            }
+        }
+        println!("{:-<50}", "-");
+        println!("Total Parameters: {}", total_params);
+        println!("{:-<50}", "-");
+        println!("Static Memory usage: {}", stat_mem);
+        println!("Dynamic Memory usage: {}", dyn_mem);
+        println!("{:-<50}", "-");
+    }
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Tensor<T> test suite
+    #[test]
+    fn test_tensor_new() {
+        let t: Tensor<i32> = Tensor::new(vec![2, 4]);
+
+        assert_eq!(t.shape[0], 2);
+        assert_eq!(t.shape[1], 4);
+        assert_eq!(t.data.len(), 8);
+    }
+
+    #[test]
+    fn test_tensor_new_empty_vec() {
+        let t: Tensor<i32> = Tensor::new(vec![]);
+
+        assert_eq!(t.shape.len(), 0);
+        assert_eq!(t.data.len(), 0);
+    }
+
+    #[test]
+    fn test_tensor_from_vec(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![2, 1,], vec![2, 1]);
+        assert_eq!(t.data.len(), t.shape[0] * t.shape[1]);
+    }
+
+    #[test]
+    fn test_tensor_from_vec_empty_vec(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![], vec![]);
+        assert_eq!(t.shape.len(), 0);
+        assert_eq!(t.data.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed: Shape [2, 1] does not match data len 3\n  left: 3\n right: 2")]
+    fn test_tensor_from_vec_wrong_shape_for_data(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![2, 1, 3], vec![2, 1]);
+    }
+
+    #[test]
+    fn test_tensor_len() {
+        let t: Tensor<i32> = Tensor::from_vec(vec![2, 1,], vec![2, 1]);
+
+        assert_eq!(t.len(), 2);
+    }
+    #[test]
+    fn test_tensor_len_empty() {
+        let t: Tensor<i32> = Tensor::new(vec![]);
+
+        assert_eq!(t.len(), 0, "{:?}", t);
+    }
+
+    #[test]
+    fn test_tensor_memory_bytes() {
+        let t: Tensor<i32> = Tensor::from_vec(vec![2,], vec![1, 1]);
+
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.memory_bytes(), 4);
+    }
+
+    // XorShift64 tests
+    #[test]
+    fn test_xorshift_new(){
+        let rng1 = XorShift64::new(12345);
+        assert_eq!(rng1.state, 12345);
+        let rng2 = XorShift64::new(0);
+        assert_eq!(rng2.state, 0xCAFEBABE);
+    }
+
+    #[test]
+    fn test_xorshift_next(){
+        let mut rng = XorShift64::new(1);
+
+        assert_eq!(rng.next(), 1082269761);
+        assert_eq!(rng.state, 1082269761);
+    }
 
     #[test]
     fn test_xorshift_determinism() {
@@ -526,7 +690,25 @@ mod tests {
     }
 
     #[test]
-    fn test_dot_product_scalar() {
+    fn test_xorshift_gen_range(){
+        let mut rng = XorShift64::new(1);
+
+        for i in 0..1000 {
+            let val = rng.gen_range(12);
+            assert!(val <= 12);
+            assert!(val >= 0);
+        }
+
+    }
+
+    // Kernel tests
+    #[test]
+    fn test_kernel_mul_mixed_scalar(){
+        assert_eq!(kernels::mul_mixed_scalar(5 as i16, 3 as i8), 15 as i32);
+    }
+
+    #[test]
+    fn test_kernel_dot_product_scalar() {
         let vec1 = [1, 1, 1];
         let vec2 = [1, 1, 1];
 
@@ -536,18 +718,30 @@ mod tests {
     }
 
     #[test]
-    fn test_optimizer_shift() {
-        let mut weights = [1000, 1000];
-        let grads = [100, -100];
+    fn test_kernel_dot_product_mixed_scalar(){
+        let vec1: &[i8] = &[1, 1, 1];
+        let vec2: &[i16] = &[1, 1, 1];
 
-        kernels::update_weights(&mut weights, &grads, 1);
+        let res = kernels::dot_product_mixed_scalar(&vec1, &vec2);
 
-        assert_eq!(weights[0], 950);
-        assert_eq!(weights[1], 1050);
+        assert_eq!(res, 3);
     }
 
     #[test]
-    fn test_stochastic_downcast_deterministic() {
+    fn test_kernel_isqrt(){
+        assert_eq!(kernels::isqrt(9), 3);
+        assert_eq!(kernels::isqrt(8), 2);
+        assert_eq!(kernels::isqrt(7), 2);
+        assert_eq!(kernels::isqrt(6), 2);
+        assert_eq!(kernels::isqrt(5), 2);
+        assert_eq!(kernels::isqrt(4), 2);
+        assert_eq!(kernels::isqrt(3), 1);
+        assert_eq!(kernels::isqrt(2), 1);
+        assert_eq!(kernels::isqrt(1), 1);
+    }
+
+    #[test]
+    fn test_kernel_stochastic_downcast_deterministic() {
         let mut rng = XorShift64::new(999);
         
         // Case 1: Exact integer (no fraction)
@@ -563,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stochastic_downcast_saturation() {
+    fn test_kernel_stochastic_downcast_saturation() {
         let mut rng = XorShift64::new(111);
         
         // Value: 1000. Shift: 0. Should clamp to 127.
@@ -576,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stochastic_downcast_statistics() {
+    fn test_kernel_stochastic_downcast_statistics() {
         let mut rng = XorShift64::new(777);
         let n_runs = 100_000;
         
@@ -600,7 +794,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stochastic_downcast_negative_statistics() {
+    fn test_kernel_stochastic_downcast_negative_statistics() {
         let mut rng = XorShift64::new(888);
         let n_runs = 100_000;
 
@@ -624,7 +818,7 @@ mod tests {
 
     #[test]
     #[cfg(target_arch = "aarch64")]
-    fn test_dot_product_neon() {
+    fn test_kernel_dot_product_neon() {
         let vec1 = [1i8; 16];
         let vec2 = [1i8; 16];
 
@@ -637,12 +831,64 @@ mod tests {
         assert_eq!(res_neg, -16);
     }
 
+    // Linear tests
+    #[test]
+    fn test_linear_new() {
+        let lin = Linear::new(4, 8, 2);
+
+        assert_eq!(lin.weights_master.len(), 4 * 8);
+        assert_eq!(lin.weights_storage.len(), 4 * 8);
+        assert_eq!(lin.bias.len(), 8);
+        assert_eq!(lin.scale_shift, 2);
+        assert_eq!(lin.forward_cache, None);
+        assert_eq!(lin.grad_cache, None);
+        assert_eq!(lin.bias_grad_cache, None);
+    }
+
+    #[test]
+    fn test_linear_sync_weights() {
+        let mut lin = Linear::new(2, 2, 0);
+        lin.weights_master.data[0] = 10;
+        lin.weights_master.data[3] = 10;
+        let mut rng = XorShift64{state: 420};
+        lin.sync_weights(&mut rng);
+
+        assert_eq!(lin.weights_storage.data[0], 10);
+        assert_eq!(lin.weights_storage.data[1], 0);
+        assert_eq!(lin.weights_storage.data[2], 0);
+        assert_eq!(lin.weights_storage.data[3], 10);
+
+        lin.scale_shift = 1;
+        lin.sync_weights(&mut rng);
+
+        assert_eq!(lin.weights_storage.data[0], 5);
+        assert_eq!(lin.weights_storage.data[1], 0);
+        assert_eq!(lin.weights_storage.data[2], 0);
+        assert_eq!(lin.weights_storage.data[3], 5);
+
+        lin.scale_shift = 2;
+        lin.sync_weights(&mut rng);
+
+        assert_eq!(lin.weights_storage.data[0], 2);
+        assert_eq!(lin.weights_storage.data[1], 0);
+        assert_eq!(lin.weights_storage.data[2], 0);
+        assert_eq!(lin.weights_storage.data[3], 3);
+
+        lin.scale_shift = 3;
+        lin.sync_weights(&mut rng);
+
+        assert_eq!(lin.weights_storage.data[0], 1);
+        assert_eq!(lin.weights_storage.data[1], 0);
+        assert_eq!(lin.weights_storage.data[2], 0);
+        assert_eq!(lin.weights_storage.data[3], 1);
+    }
+
     #[test]
     fn test_linear_forward() {
         let mut lin = Linear{
-            weights_master: Tensor::new([2, 2].to_vec()),
-            weights_storage: Tensor::new([2, 2].to_vec()),
-            bias: Tensor::new([1, 2].to_vec()),
+            weights_master: Tensor::new(vec![2, 2]),
+            weights_storage: Tensor::new(vec![2, 2]),
+            bias: Tensor::new(vec![2]),
             scale_shift: 0,
             forward_cache: None,
             grad_cache: None,
@@ -653,7 +899,7 @@ mod tests {
         let mut rng = XorShift64{state: 420};
         lin.sync_weights(&mut rng);
 
-        let mut input = Tensor::new([1, 2].to_vec());
+        let mut input = Tensor::new(vec![1, 2]);
         input.data[0] = 10;
         input.data[1] = 20;
         let out = lin.forward(&input, &mut rng);
@@ -764,60 +1010,98 @@ mod tests {
     }
 
     #[test]
-    fn test_train_linear_regression() {
-        // We want to learn the function: y = 3x
-        // 1 Input, 1 Output. Scale shift = 0.
-        let mut layer = Linear::new(1, 1, 0);
-        
-        // Initialize Master Weight poorly (start at 10)
-        layer.weights_master.data[0] = 10;
-        let mut rng = XorShift64::new(42);
+    #[should_panic(expected = "assertion `left == right` failed: Input in wrong dimension for weights! 1 vs 2\n  left: 1\n right: 2")]
+    fn test_linear_forward_wrong_dimensional_input(){
+        let mut lin = Linear::new(2, 3, 0);
+        let mut rng = XorShift64::new(420);
+        lin.sync_weights(&mut rng);
 
-        // Dataset
-        let x = Tensor::from_vec(vec![1, 2, 3, 4], vec![4, 1]); // Inputs
-        let y_target = vec![3, 6, 9, 12];                       // Targets
-        
-        // Hyperparameters
-        let epochs = 20;
-        let lr_shift = 4; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
-        let grad_shift = 0; // Don't shrink the gradients here, numbers are small
+        let input = Tensor::from_vec(vec![2; 10], vec![10, 1]);
+        lin.forward(&input, &mut rng);
+    }
 
-        println!("--- Starting Integer Training ---");
-        for epoch in 0..epochs {
-            // 1. Sync weights from i32 -> i8
-            layer.sync_weights(&mut rng);
+    #[test]
+    fn test_linear_memory_report(){
+        let mut rng = XorShift64::new(777);
+        let mut l1 = Linear::new(2, 1, 2);
+        let x = Tensor::from_vec(vec![0, 0], vec![1, 2]);
+        l1.forward(&x, &mut rng);
 
-            // 2. Forward Pass
-            let preds = layer.forward(&x, &mut rng);
+        let (a, b) = l1.memory_report();
+        assert_eq!(a, 14);
+        assert_eq!(b, 2);
 
-            // 3. Compute Loss & Gradients (Error = Pred - Target)
-            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
-            let mut loss = 0;
+        let mut l2 = Linear::new(2, 10, 2);
+        l2.forward(&x, &mut rng);
 
-            for i in 0..4 {
-                let error = preds.data[i] as i16 - y_target[i] as i16;
-                grad_out.data[i] = error; // The "Gradient" is just the error
-                loss += (error as i32) * (error as i32); // MSE
-            }
+        let (a2, b2) = l2.memory_report();
+        assert_eq!(a2, 140);
+        assert_eq!(b2, 2);
+    }
 
-            // 4. Backward Pass
-            let _dX = layer.backward(&grad_out, Some(grad_shift));
-            let dW = layer.grad_cache.clone().unwrap();
+    #[test]
+    fn test_linear_step() {
+        let mut rng = XorShift64::new(777);
+        let mut l1 = Linear::new(2, 1, 1);
+        let mut optim = SGD::new(0, None);
+        l1.weights_master.data[0] = 111;
+        l1.weights_master.data[1] = 222;
+        l1.sync_weights(&mut rng);
 
-            // 5. Optimizer Step: w = w - (dW >> lr_shift)
-            kernels::update_weights(&mut layer.weights_master.data, &dW.data, lr_shift);
+        assert_eq!(l1.weights_master.data[0], 111);
+        assert_eq!(l1.weights_master.data[1], 222);
+        assert_eq!(l1.weights_storage.data[0], 55);
+        assert_eq!(l1.weights_storage.data[1], 111);
 
-            println!("Epoch {:02}: Loss = {:04}, Master Weight = {}, Storage Weight = {}", 
-                     epoch, loss, layer.weights_master.data[0], layer.weights_storage.data[0]);
-                     
-            if loss == 0 {
-                println!("Converged early! Epoch {}", epoch);
-                break;
-            }
-        }
+        // no gradient -> no change
+        l1.step(&mut optim);
+        assert_eq!(l1.weights_master.data[0], 111);
+        assert_eq!(l1.weights_master.data[1], 222);
+        assert_eq!(l1.weights_storage.data[0], 55);
+        assert_eq!(l1.weights_storage.data[1], 111);
 
-        layer.sync_weights(&mut rng);
-        assert_eq!(layer.weights_storage.data[0], 3, "Model failed to learn y=3x");
+        let x = Tensor::from_vec(vec![1, 1], vec![1, 2]);
+
+        l1.forward(&x, &mut rng);
+        l1.step(&mut optim);
+
+        assert_eq!(l1.weights_master.data[0], 111);
+        assert_eq!(l1.weights_master.data[1], 222);
+        assert_eq!(l1.weights_storage.data[0], 55);
+        assert_eq!(l1.weights_storage.data[1], 111);
+
+        let x2 = Tensor::from_vec(vec![2, 2], vec![1, 2]);
+
+        l1.sync_weights(&mut rng);
+        let preds = l1.forward(&x2, &mut rng);
+
+        // 3. Compute Loss & Gradients (Error = Pred - Target)
+        let mut grad_out = Tensor::<i16>::from_vec(vec![126, 2], vec![2, 1]);
+
+        l1.grad_cache = Some(grad_out);
+
+        l1.step(&mut optim);
+
+        assert_eq!(l1.weights_master.data[0], -15);
+        assert_eq!(l1.weights_master.data[1], 220);
+        assert_eq!(l1.weights_storage.data[0], 55);
+        assert_eq!(l1.weights_storage.data[1], 111);
+    }
+
+    #[test]
+    fn test_linear_step_with_shifting() {
+        let mut rng = XorShift64::new(777);
+        let mut l1 = Linear::new(2, 1, 2);
+        let mut optim = SGD::new(0, None);
+        l1.weights_master.data[0] = 111;
+        l1.weights_master.data[1] = 222;
+
+        l1.step(&mut optim);
+
+        assert_eq!(l1.weights_master.data[0], 111);
+        assert_eq!(l1.weights_master.data[1], 222);
+        assert_eq!(l1.weights_storage.data[0], 0);
+        assert_eq!(l1.weights_storage.data[1], 0);
     }
 
     #[test]
@@ -865,6 +1149,133 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "No state registered. Perform forward pass first!")]
+    fn test_relu_backward_without_forward_call(){
+        let mut relu = ReLU::new();
+        let mut input = Tensor::<i16>::new(vec![4, 1]);
+        let mut rng = XorShift64::new(42);
+        let _res = relu.backward(&input, Some(2));
+    }
+
+    #[test]
+    fn test_relu_memory_report() {
+        let mut relu = ReLU::new();
+
+        let (mut stat, mut dyna) = relu.memory_report();
+
+        assert_eq!(stat, 0);
+        assert_eq!(dyna, 0);
+        
+        let mut input = Tensor::<i8>::new(vec![4, 1]);
+        let mut rng = XorShift64::new(42);
+        relu.forward(&input, &mut rng);
+        
+        (stat, dyna) = relu.memory_report();
+
+        assert_eq!(stat, 0);
+        assert_eq!(dyna, 4);
+    }
+
+    #[test]
+    fn test_summary() {
+        let mut l1 = Linear::new(2, 8, 2);
+        let mut l2 = Linear::new(8, 1, 2);
+
+        let mut model = Sequential {
+            layers: vec![
+                Layer::Linear(l1),
+                Layer::ReLU(ReLU::new()),
+                Layer::Linear(l2),
+            ],
+        };
+        model.summary();
+    }
+
+    #[test]
+    fn test_summary_with_dynamic_memory() {
+        let mut rng = XorShift64::new(777);
+        let mut l1 = Linear::new(2, 8, 2);
+        let mut l2 = Linear::new(8, 1, 2);
+
+        let mut model = Sequential {
+            layers: vec![
+                Layer::Linear(l1),
+                Layer::ReLU(ReLU::new()),
+                Layer::Linear(l2),
+            ],
+        };
+        model.summary();
+        model.sync_weights(&mut rng);
+
+        let x = Tensor::from_vec(vec![
+            0, 0,
+            0, 1,
+            1, 0,
+            1, 1,
+        ], vec![4, 2]);
+        let _preds = model.forward(&x, &mut rng);
+        model.summary();
+    }
+
+    // Examples
+    #[test]
+    fn test_train_linear_regression_sgd() {
+        // We want to learn the function: y = 3x
+        // 1 Input, 1 Output. Scale shift = 0.
+        let mut layer = Linear::new(1, 1, 0);
+        
+        // Initialize Master Weight poorly (start at 10)
+        layer.weights_master.data[0] = 10;
+        let mut rng = XorShift64::new(42);
+
+        // Dataset
+        let x = Tensor::from_vec(vec![1, 2, 3, 4], vec![4, 1]); // Inputs
+        let y_target = vec![4, 7, 10, 13];                       // Targets
+        
+        // Hyperparameters
+        let epochs = 2;
+        let lr_shift = 5; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
+        let grad_shift = 0; // Don't shrink the gradients here, numbers are small
+
+        let mut optim = SGD::new(lr_shift, Some(grad_shift));
+        println!("--- Starting Integer Training ---");
+        for epoch in 0..epochs {
+            // 1. Sync weights from i32 -> i8
+            layer.sync_weights(&mut rng);
+
+            // 2. Forward Pass
+            let preds = layer.forward(&x, &mut rng);
+
+            // 3. Compute Loss & Gradients (Error = Pred - Target)
+            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
+            let mut loss = 0;
+
+            for i in 0..4 {
+                let error = preds.data[i] as i16 - y_target[i] as i16;
+                grad_out.data[i] = error; // The "Gradient" is just the error
+                loss += (error as i32) * (error as i32); // MSE
+            }
+
+            // 4. Backward Pass
+            let _dX = layer.backward(&grad_out, Some(grad_shift));
+
+            // 5. Optimizer Step: w = w - (dW >> lr_shift)
+            layer.step(&mut optim);
+
+            println!("Epoch {:02}: Loss = {:04}, Master Weight = {}, Storage Weight = {}", 
+                     epoch, loss, layer.weights_master.data[0], layer.weights_storage.data[0]);
+                     
+            if loss == 0 {
+                println!("Converged early! Epoch {}", epoch);
+                break;
+            }
+        }
+
+        layer.sync_weights(&mut rng);
+        assert_eq!(layer.weights_storage.data[0], 4, "Model failed to learn y=3x + 1");
+    }
+
+    #[test]
     fn test_train_xor_sgd_momentum() {
         let mut rng = XorShift64::new(777);
 
@@ -888,6 +1299,7 @@ mod tests {
                 Layer::Linear(l2),
             ],
         };
+        model.summary();
 
         let mut optim = SGD::new(4, Some(2));
 
@@ -958,6 +1370,7 @@ mod tests {
                 Layer::Linear(l2),
             ],
         };
+        model.summary();
 
         // NEW: Instantiate our Integer Adam!
         // We set the learning rate multiplier to 2.
@@ -1015,6 +1428,6 @@ mod tests {
         assert!(p11 < 8, "1,1 failed: expected low, got {}", p11);
         assert!(p01 > 12, "0,1 failed: expected high, got {}", p01);
         assert!(p10 > 12, "1,0 failed: expected high, got {}", p10);
-    }}
+    }
 
-
+}
