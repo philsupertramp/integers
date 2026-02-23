@@ -1,4 +1,25 @@
+use std::sync::OnceLock;
 use std::fmt;
+
+/// A global reference to our dynamically generated lookup table.
+static TANH_LUT: OnceLock<[i8; 256]> = OnceLock::new();
+
+/// Generates the LUT based on a specific input scale.
+fn generate_lut(input_scale: f32) -> [i8; 256] {
+    let mut lut = [0i8; 256];
+    
+    for i in -128..=127 {
+        // De-quantize, calculate, and re-quantize
+        let float_x = (i as f32) / input_scale;
+        let float_y = float_x.tanh();
+        
+        // Scale to [-127, 127] and clamp
+        let int_y = (float_y * 127.0).round() as i32;
+        lut[(i + 128) as usize] = int_y.clamp(-128, 127) as i8;
+    }
+    
+    lut
+}
 
 
 #[derive(Clone, Debug, PartialEq)]
@@ -110,6 +131,18 @@ pub mod kernels {
         x
     }
 
+    /// Tanh via piecewise linear approximation over i8 domain.
+    /// Real tanh saturates at ~ +/- 3, so we map
+    /// |x| >= 64 (i8 scale) -> +/- 127
+    /// and linear in between
+    pub fn tanh_i8(x: i8) -> i8 {
+        // Get the table, initializing it on the very first call if necessary.
+        let lut = TANH_LUT.get_or_init(|| generate_lut(127.0));
+        
+        let index = (x as i16 + 128) as usize;
+        lut[index]
+    }
+
     pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i8 {
         let mask = (1 << shift) - 1;
         let frac = val & mask;
@@ -166,274 +199,37 @@ pub mod kernels {
     }
 }
 
-pub struct Linear {
-    /// all weights are of Transposed Form [out, in] for memory reasons
 
-    /// Source of truth (High Res)
-    pub weights_master: Tensor<i32>,
-    /// Shadow copy used for dot-product (Low Res)
-    pub weights_storage: Tensor<i8>,
-    /// Biases before quantization (High Res)
-    pub bias: Tensor<i32>,
-    /// "hyperparameter" that determines how much we right-shift
-    pub scale_shift: u32,
-
-    ///
-    pub forward_cache: Option<Tensor<i8>>,
-    pub grad_cache: Option<Tensor<i16>>,
-    pub bias_grad_cache: Option<Tensor<i16>>,
+pub trait OptimizerConfig {
+    fn update(&self, weights: &mut [i32], grads: &[i16], state: &mut OptimizerState);
+    fn init_state(&self, len: usize) -> OptimizerState;
 }
 
-impl Linear {
-    pub fn new(input_dim: usize, output_dim: usize, scale_shift: u32) -> Self {
-        Self {
-            weights_master: Tensor::new(vec![output_dim, input_dim]),
-            weights_storage: Tensor::new(vec![output_dim, input_dim]),
-            bias: Tensor::new(vec![output_dim]),
-            scale_shift,
-            forward_cache: None,
-            grad_cache: None,
-            bias_grad_cache: None,
-        }
-    }
-    pub fn sync_weights(&mut self, rng: &mut XorShift64){
-        for idx in 0..self.weights_master.data.len() {
-            self.weights_storage.data[idx] = kernels::stochastic_downcast(
-                self.weights_master.data[idx],
-                self.scale_shift,
-                rng
-            )
-        }
-    }
-
-    pub fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
-        assert_eq!(input.shape[1], self.weights_storage.shape[1], "Input in wrong dimension for weights! {} vs {}", input.shape[1], self.weights_storage.shape[1]);
-
-        // store input for backward pass
-        self.forward_cache = Some(input.clone());
-
-        let batch_size = input.shape[0];
-        let input_dim = input.shape[1];
-        let output_size = self.weights_storage.shape[0];
-        let mut out = Tensor::new(vec![batch_size, output_size]);
-        for b in 0..batch_size {
-            let in_start = b * input_dim;
-            let in_end = in_start + input_dim;
-
-            let input_row = &input.data[in_start..in_end];
-
-            for o in 0..output_size {
-                let w_start = o * input_dim;
-                let w_end = w_start + input_dim;
-
-                let weight_row = &self.weights_storage.data[w_start..w_end];
-                //
-                #[cfg(target_arch = "aarch64")]
-                let raw_val = unsafe {
-                    if input_dim % 16 == 0 { kernels::arm_neon::dot_product_neon_raw(input_row, weight_row)}
-                    else { kernels::dot_product_scalar(input_row, weight_row) }
-                };
-                #[cfg(not(target_arch = "aarch64"))]
-                let raw_val = kernels::dot_product_scalar(input_row, weight_row);
-
-
-                let acc = raw_val + self.bias.data[o];
-                out.data[b * output_size + o] += kernels::stochastic_downcast(
-                    acc,
-                    self.scale_shift,
-                    rng
-                );
-                
-            }
-        }
-        return out;
-    }
-
-    pub fn backward(&mut self, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
-        let input = self.forward_cache.as_ref().expect("Backward called without forward call!");
-
-        let output_dim = self.weights_storage.shape[0];
-        let input_dim = input.shape[1];
-        let batch_size = input.shape[0];
-        let grad_shift = gradient_shift.unwrap_or(8);
-
-        assert_eq!(grad_output.shape[0], batch_size);
-        assert_eq!(grad_output.shape[1], output_dim);
-
-        let mut grad_input = Tensor::<i16>::new(vec![batch_size, input_dim]);
-        let mut grad_weights = Tensor::<i16>::new(vec![output_dim, input_dim]);
-        let mut grad_bias = Tensor::<i16>::new(vec![output_dim]);
-
-        // compute dW (grad w.r.t Weights)
-        for b in 0..batch_size {
-            let in_start = b * input_dim;
-            let grad_start = b * output_dim;
-
-            for o in 0..output_dim {
-                let g_val = grad_output.data[grad_start + o];
-                grad_bias.data[o] = grad_bias.data[o].wrapping_add(g_val);
-                if g_val == 0 { continue; }
-
-                for i in 0..input_dim {
-                    let x_val = input.data[in_start + i];
-                    let val = kernels::mul_mixed_scalar(g_val, x_val);
-
-                    let idx = o * input_dim + i;
-                    grad_weights.data[idx] = grad_weights.data[idx].wrapping_add(
-                        (val >> grad_shift) as i16
-                    );
-                }
-            }
-        }
-
-        // compute dX (grad w.r.t Input)
-        for b in 0..batch_size {
-            let grad_start = b * output_dim;
-
-            for o in 0..output_dim {
-                let g_val = grad_output.data[grad_start + o];
-                if g_val == 0 { continue; }
-
-                let w_start = o * input_dim;
-
-                for i in 0..input_dim {
-                    let w_val = self.weights_storage.data[w_start + i];
-                    let val = kernels::mul_mixed_scalar(g_val, w_val);
-
-                    let idx = b * input_dim + i;
-                    grad_input.data[idx] = grad_input.data[idx].wrapping_add(
-                        (val >> grad_shift) as i16
-                    )
-                }
-            }
-        }
-        self.grad_cache = Some(grad_weights);
-        self.bias_grad_cache = Some(grad_bias);
-        grad_input
-    }
-
-    pub fn memory_report(&self) -> (usize, usize) {
-        let static_mem = self.weights_master.memory_bytes()
-            + self.weights_storage.memory_bytes()
-            + self.bias.memory_bytes();
-
-        let mut dyn_mem = 0;
-        if let Some(fc) = &self.forward_cache { dyn_mem += fc.memory_bytes(); }
-        if let Some(gc) = &self.grad_cache { dyn_mem += gc.memory_bytes(); }
-        if let Some(bgc) = &self.bias_grad_cache { dyn_mem += bgc.memory_bytes(); }
-
-        (static_mem, dyn_mem)
-    }
-    
-    pub fn step<O: Optimizer>(&mut self, optim: &mut O) {
-        if let Some(cache) = self.grad_cache.take() {
-            optim.step(0, &mut self.weights_master.data, &cache.data);
-        }
-        if let Some(b_cache) = self.bias_grad_cache.take() {
-            optim.step(1, &mut self.bias.data, &b_cache.data);
-        }
-    }
-
+pub enum OptimizerState {
+    None,
+    SGD { velocity: Vec<i32> },
+    Adam { m: Vec<i32>, v: Vec<i32> },
 }
 
-pub struct ReLU {
-    forward_cache: Option<Tensor<i8>>,
-}
-
-impl ReLU {
-    pub fn new() -> Self {
-        Self {
-            forward_cache: None
-        }
-    }
-    pub fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
-        self.forward_cache = Some(input.clone());
-        let mut output = Tensor::<i8>::new(input.shape.clone());
-        for idx in 0..input.data.len() {
-            output.data[idx] = if input.data[idx] > 0 { input.data[idx] } else { 0 };
-        }
-        output
-    }
-    pub fn backward(&self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
-        let input = self.forward_cache.as_ref().expect("No state registered. Perform forward pass first!");
-        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
-        for o in 0..grad_output.data.len() {
-            output.data[o] = if input.data[o] > 0 { grad_output.data[o] } else { 0 };
-        }
-        output
-    }
-
-    pub fn memory_report(&self) -> (usize, usize) {
-        let mut dyn_mem = 0;
-        let static_mem = 0;
-        if let Some(fc) = &self.forward_cache { dyn_mem += fc.memory_bytes(); }
-
-        (static_mem, dyn_mem)
-    }
-}
-
-pub enum Layer {
-    Linear(Linear),
-    ReLU(ReLU),
-}
-
-impl Layer {
-    pub fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
-        match self {
-            Layer::Linear(l) => l.forward(input, rng),
-            Layer::ReLU(r) => r.forward(input, rng),
-        }
-    }
-
-    pub fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
-        match self {
-            Layer::Linear(l) => l.backward(grad_output, grad_shift),
-            Layer::ReLU(r) => r.backward(grad_output, grad_shift),
-        }
-    }
-
-    pub fn sync_weights(&mut self, rng: &mut XorShift64) {
-        if let Layer::Linear(l) = self {
-            l.sync_weights(rng);
-        }
-    }
-}
-
-impl fmt::Display for Layer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Layer::Linear(l) => {
-                let in_dim = l.weights_storage.shape[1];
-                let out_dim = l.weights_storage.shape[0];
-
-                let params = (in_dim * out_dim) + out_dim;
-                write!(f, "{:<15} | [{:<4}, {:<4}, ({:<4})] | {:<10}", "Linear (i8/i32)", in_dim, out_dim, out_dim, params)
-            },
-            Layer::ReLU(_) => {
-                write!(f, "{:<15} | {:-<18} | {:<10}", "ReLU", "---", "0")
-            }
-        }
-    }
-}
-
-pub trait Optimizer {
-    fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]);
-}
-
-pub struct SGD {
+// SGD
+pub struct SGDConfig {
     pub lr_shift: u32,
     pub momentum_shift: Option<u32>,
-    pub velocity: Vec<Vec<i32>>,
 }
 
-impl SGD {
-    pub fn new(lr_shift: u32, momentum_shift: Option<u32>) -> Self {
-        Self { lr_shift, momentum_shift, velocity: Vec::new() }
+impl SGDConfig {
+    pub fn new(lr_shift: u32, momentum_shift: Option<u32>) -> Self { Self { lr_shift, momentum_shift } }
+}
+
+impl OptimizerConfig for SGDConfig {
+    fn init_state(&self, len: usize) -> OptimizerState {
+        match self.momentum_shift {
+            Some(_) => OptimizerState::SGD {velocity: vec![0; len] },
+            None    => OptimizerState::None,
+        }
     }
-}
 
-impl Optimizer for SGD {
-    fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]) {
+    fn update(&self, weights: &mut [i32], grads: &[i16], state: &mut OptimizerState) {
         assert_eq!(
             weights.len(),
             grads.len(),
@@ -443,159 +239,533 @@ impl Optimizer for SGD {
         );
         let lr_div = 1 << self.lr_shift;
 
-        if let Some(m_shift) = self.momentum_shift {
-            // Lazy init momentum tensor if it doesn't exist
-            if self.velocity.len() <= param_idx {
-                self.velocity.push(vec![0; weights.len()]);
+        match (self.momentum_shift, state) {
+            (Some(m_shift), OptimizerState::SGD { velocity }) => {
+                let m_div = 1 << m_shift;
+                for ((w, m), g) in weights.iter_mut().zip(velocity.iter_mut()).zip(grads.iter()) {
+                    let mut decay = *m / m_div;
+                    if decay == 0 && *m != 0 { decay = m.signum(); }
+                    *m = m.wrapping_sub(decay).wrapping_add(*g as i32);
+                    *w = w.wrapping_sub(*m / lr_div);
+                }
             }
-            
-            let m_div = 1 << m_shift;
-            let m_vec = &mut self.velocity[param_idx];
-
-            for ((w, m), g) in weights.iter_mut().zip(m_vec.iter_mut()).zip(grads.iter()) {
-                let mut decay = *m / m_div;
-                if decay == 0 && *m != 0 { decay = m.signum(); }
-                *m = m.wrapping_sub(decay).wrapping_add(*g as i32);
-                *w = w.wrapping_sub(*m / lr_div);
-            }
-        } else {
-            // Vanilla SGD
-            for (w, g) in weights.iter_mut().zip(grads.iter()) {
-                *w = w.wrapping_sub((*g as i32) / lr_div);
+            _ => {
+                for (w, g) in weights.iter_mut().zip(grads) {
+                    *w = w.wrapping_sub((*g as i32) / lr_div);
+                }
             }
         }
+
     }
 }
 
-pub struct Adam {
+// Adam
+pub struct AdamConfig {
     pub lr_mult: i32,
     pub b1_shift: u32,
     pub b2_shift: u32,
     pub eps: i32,
-    pub m: Vec<Vec<i32>>,
-    pub v: Vec<Vec<i32>>,
 }
 
-impl Adam {
+impl AdamConfig {
     pub fn new(lr_mult: i32) -> Self {
+        Self { lr_mult, b1_shift: 3, b2_shift: 4, eps: 1 }
+    }
+}
+
+impl OptimizerConfig for AdamConfig {
+    fn init_state(&self, len: usize) -> OptimizerState {
+        OptimizerState::Adam { m: vec![0; len], v: vec![0; len] }
+    }
+
+    fn update(&self, weights: &mut [i32], grads: &[i16], state: &mut OptimizerState) {
+        if let OptimizerState::Adam {m, v } = state {
+            let b1_div = 1 << self.b1_shift;
+            let b2_div = 1 << self.b2_shift;
+
+            for i in 0..weights.len() {
+                let g = grads[i] as i32;
+                m[i] = m[i].wrapping_sub(m[i] / b1_div).wrapping_add(g);
+                v[i] = v[i].wrapping_sub(v[i] / b2_div).wrapping_add(g.wrapping_mul(g));
+                let denom = kernels::isqrt(v[i].max(0) as u32) as i32 + self.eps;
+                weights[i] = weights[i].wrapping_sub((m[i] * self.lr_mult) / denom);
+            }
+        }
+    }
+}
+
+// Module trait
+// Every building block needs to implement this.
+// Containers delegate; primitives do work.
+//
+pub struct ModuleInfo {
+    pub name: &'static str,
+    pub params: usize,
+    pub static_bytes: usize,
+    pub children: Vec<ModuleInfo>,
+}
+
+impl ModuleInfo {
+    pub fn total(&self) -> (usize, usize) {
+        let child_totals = self.children.iter()
+            .map(|c| c.total())
+            .fold((0, 0), |(p, b), (cp, cb)| (p + cp, b + cb));
+        (self.params + child_totals.0, self.static_bytes + child_totals.1)
+    }
+}
+pub trait Module {
+    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8>;
+    fn backward(&mut self, grad: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16>;
+
+    /// quantize i32 master weights -> i8 storage. No-op for non-parameterized modules.
+    fn sync_weights(&mut self, _rng: &mut XorShift64) {}
+
+    /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
+    fn step(&mut self, _optim: &dyn OptimizerConfig) {}
+
+    fn memory_report(&self) -> (usize, usize) { (0, 0) }
+
+    fn describe(&self) -> ModuleInfo {
+        ModuleInfo { name: "unknown", params: 0, static_bytes: 0, children: vec![] }
+    }
+
+    fn print_summary(&self, info: &ModuleInfo, depth: usize) {
+        let indent = "  ".repeat(depth);
+        let (total_params, total_bytes) = info.total();
+        println!("{}{}  params={} static={}B", indent, info.name, total_params, total_bytes);
+        for child in &info.children {
+            self.print_summary(child, depth + 1);
+        }
+    }
+}
+
+pub struct Params {
+    pub master: Tensor<i32>,
+    pub storage: Tensor<i8>,
+    pub grads: Option<Tensor<i16>>,
+    pub state: Option<OptimizerState>,
+    pub shift: u32,
+}
+
+impl Params {
+    pub fn new (shape: Vec<usize>, shift: u32) -> Self {
         Self {
-            lr_mult,
-            b1_shift: 3, // /approx 0.875
-            b2_shift: 4, // /approx 0.9375
-            eps: 1,       // to prevent division by 0
-            m: Vec::new(),
-            v: Vec::new()
+            master: Tensor::new(shape.clone()),
+            storage: Tensor::new(shape),
+            grads: None,
+            state: None,
+            shift,
+        }
+    }
+
+    pub fn init_uniform(&mut self, rng: &mut XorShift64, range: i32) {
+        let range = range.max(1);
+        let spread = (2 * range) as u32;
+        for w in self.master.data.iter_mut() {
+            *w = (rng.gen_range(spread) as i32) - range;
+        }
+    }
+
+    pub fn init_xavier_uniform(&mut self, rng: &mut XorShift64, fan_in: usize, fan_out: usize) {
+        let limit = (6.0 / (fan_in + fan_out) as f64).sqrt();
+        let limit_i8 = (limit * 127.0).round() as i32;
+        let limit_master = limit_i8 * (1 << self.shift);
+        self.init_uniform(rng, limit_master);
+    }
+
+    pub fn sync(&mut self, rng: &mut XorShift64) {
+        for (m, s) in self.master.data.iter().zip(self.storage.data.iter_mut()) {
+            *s = kernels::stochastic_downcast(*m, self.shift, rng);
+        }
+    }
+
+    pub fn step(&mut self, optim: &dyn OptimizerConfig) {
+        if let Some(grads) = self.grads.take() {
+            let state = self.state.get_or_insert_with(|| optim.init_state(self.master.len()));
+            optim.update(&mut self.master.data, &grads.data, state);
+        }
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        self.master.memory_bytes() + self.storage.memory_bytes()
+    }
+}
+
+pub struct Linear {
+    /// all weights are of Transposed Form [out, in] for memory reasons
+
+    pub weights: Params,
+    pub bias: Params,
+    pub cache: Option<Tensor<i8>>,
+}
+
+impl Linear {
+    pub fn new(input_dim: usize, output_dim: usize, scale_shift: u32) -> Self {
+        Self {
+            weights: Params::new(vec![output_dim, input_dim], scale_shift),
+            bias: Params::new(vec![output_dim], scale_shift),
+            cache: None,
+        }
+    }
+
+    pub fn init_xavier(&mut self, rng: &mut XorShift64) {
+        let fan_in = self.weights.master.shape[1];
+        let fan_out = self.weights.master.shape[0];
+        self.weights.init_xavier_uniform(rng, fan_in, fan_out);
+        for b in self.bias.master.data.iter_mut() { *b = 0; }
+    }
+}
+
+impl Module for Linear {
+    fn sync_weights(&mut self, rng: &mut XorShift64){
+        self.weights.sync(rng);
+        self.bias.sync(rng);
+    }
+
+    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+        assert_eq!(input.shape[1], self.weights.storage.shape[1], "Input in wrong dimension for weights! {} vs {}", input.shape[1], self.weights.storage.shape[1]);
+        let batch      = input.shape[0];
+        let input_dim  = input.shape[1];
+        let output_dim = self.weights.storage.shape[0];
+
+        self.cache = Some(input.clone());
+        let mut out = Tensor::new(vec![batch, output_dim]);
+
+        for b in 0..batch {
+            let in_row = &input.data[b * input_dim .. (b + 1) * input_dim];
+            for o in 0..output_dim {
+                let w_row = &self.weights.storage.data[o * input_dim .. (o + 1) * input_dim];
+                #[cfg(target_arch = "aarch64")]
+                let raw_val = unsafe {
+                    if input_dim % 16 == 0 { kernels::arm_neon::dot_product_neon_raw(in_row, w_row)}
+                    else { kernels::dot_product_scalar(in_row, w_row) }
+                };
+                #[cfg(not(target_arch = "aarch64"))]
+                let raw_val = kernels::dot_product_scalar(in_row, w_row);
+                let acc   = raw_val + self.bias.storage.data[o] as i32;
+                out.data[b * output_dim + o] = kernels::stochastic_downcast(acc, self.weights.shift, rng);
+            }
+        }
+        out
+    }
+
+    fn backward(&mut self, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
+        let input      = self.cache.as_ref().expect("Backward called without forward");
+        let batch      = input.shape[0];
+        let input_dim  = input.shape[1];
+        let output_dim = self.weights.storage.shape[0];
+        let gshift     = gradient_shift.unwrap_or(8);
+
+        let mut grad_input   = Tensor::<i16>::new(vec![batch, input_dim]);
+        let mut grad_weights = Tensor::<i16>::new(vec![output_dim, input_dim]);
+        let mut grad_bias    = Tensor::<i16>::new(vec![output_dim]);
+
+        for b in 0..batch {
+            for o in 0..output_dim {
+                let g = grad_output.data[b * output_dim + o];
+                grad_bias.data[o] = grad_bias.data[o].wrapping_add(g);
+                if g == 0 { continue; }
+
+                for i in 0..input_dim {
+                    let x = input.data[b * input_dim + i];
+                    let dw = kernels::mul_mixed_scalar(g, x);
+                    grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i]
+                        .wrapping_add((dw >> gshift) as i16);
+
+                    let w = self.weights.storage.data[o * input_dim + i];
+                    let dx = kernels::mul_mixed_scalar(g, w);
+                    grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i]
+                        .wrapping_add((dx >> gshift) as i16);
+                }
+            }
+        }
+
+        self.weights.grads = Some(grad_weights);
+        self.bias.grads    = Some(grad_bias);
+        grad_input
+    }
+
+    fn step(&mut self, optim: &dyn OptimizerConfig) {
+        self.weights.step(optim);
+        self.bias.step(optim);
+    }
+
+    fn memory_report(&self) -> (usize, usize) {
+        let stat = self.weights.memory_bytes() + self.bias.memory_bytes();
+        let dyn_ = self.cache.as_ref().map_or(0, |t| t.memory_bytes());
+        (stat, dyn_)
+    }
+
+    fn describe(&self) -> ModuleInfo {
+        let in_dim  = self.weights.storage.shape[1];
+        let out_dim = self.weights.storage.shape[0];
+        ModuleInfo {
+            name: "Linear",
+            params: (in_dim * out_dim) + out_dim,  // weights + bias
+            static_bytes: self.weights.memory_bytes() + self.bias.memory_bytes(),
+            children: vec![],
         }
     }
 }
 
-impl Optimizer for Adam {
-    fn step(&mut self, param_idx: usize, weights: &mut [i32], grads: &[i16]){
-        if self.m.len() <= param_idx {
-            self.m.push(vec![0; weights.len()]);
-            self.v.push(vec![0; weights.len()]);
+pub struct ReLU {
+    pub cache: Option<Tensor<i8>>,
+}
+
+impl ReLU {
+    pub fn new() -> Self { Self { cache: None } }
+}
+
+impl Module for ReLU {
+    fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
+        self.cache = Some(input.clone());
+        let mut output = Tensor::<i8>::new(input.shape.clone());
+        for idx in 0..input.data.len() {
+            output.data[idx] = if input.data[idx] > 0 { input.data[idx] } else { 0 };
         }
-
-        let m_vec = &mut self.m[param_idx];
-        let v_vec = &mut self.v[param_idx];
-        let b1_div = 1 << self.b1_shift;
-        let b2_div = 1 << self.b2_shift;
-
-        for i in 0..weights.len() {
-            let g = grads[i] as i32;
-            let g_sq = g.wrapping_mul(g); // delta^2
-                                          //
-            let m_decay = m_vec[i] / b1_div;
-            m_vec[i] = m_vec[i].wrapping_sub(m_decay).wrapping_add(g);
-
-            let v_decay = v_vec[i] / b2_div;
-            v_vec[i] = v_vec[i].wrapping_sub(v_decay).wrapping_add(g_sq);
-
-            let denom = kernels::isqrt(v_vec[i].max(0) as u32) as i32 + self.eps;
-
-            let step_size = (m_vec[i] * self.lr_mult) / denom;
-            weights[i] = weights[i].wrapping_sub(step_size);
+        output
+    }
+    fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
+        let input = self.cache.as_ref().expect("No state registered. Perform forward pass first!");
+        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
+        for o in 0..grad_output.data.len() {
+            output.data[o] = if input.data[o] > 0 { grad_output.data[o] } else { 0 };
+        }
+        output
+    }
+    fn memory_report(&self) -> (usize, usize) {
+        match self.cache.as_ref() {
+            Some(cache) => ( 0, cache.memory_bytes() ),
+            None => ( 0, 0 )
         }
     }
+
+    fn describe(&self) -> ModuleInfo {
+        ModuleInfo { name: "ReLU", params: 0, static_bytes: 0, children: vec![] }
+    }
 }
+
+pub struct Tanh { cache: Option<Tensor<i8>> }
+
+impl Tanh { pub fn new() -> Self { Self { cache: None } } }
+
+impl Module for Tanh {
+    fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
+        self.cache = Some(input.clone());
+        let mut output = Tensor::<i8>::new(input.shape.clone());
+        for (o, &x) in output.data.iter_mut().zip(&input.data) {
+            *o = kernels::tanh_i8(x);
+        }
+        output
+    }
+    fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
+        let input = self.cache.as_ref().expect("No state registered. Perform forward pass first!");
+        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
+        for o in 0..grad_output.data.len() {
+            let t = kernels::tanh_i8(input.data[o]) as i32;
+            let dtanh = (127 * 127 - t * t) / 127;
+            output.data[o] = ((grad_output.data[o] as i32 * dtanh) >> 7).clamp(-32768, 32767) as i16;
+        }
+        output
+    }
+    fn memory_report(&self) -> (usize, usize) {
+        match self.cache.as_ref() {
+            Some(cache) => ( 0, cache.memory_bytes() ),
+            None => ( 0, 0 )
+        }
+    }
+
+    fn describe(&self) -> ModuleInfo {
+        ModuleInfo { name: "Tanh", params: 0, static_bytes: 0, children: vec![] }
+    }
+}
+
 
 pub struct Sequential {
-    pub layers: Vec<Layer>,
+    pub modules: Vec<Box<dyn Module>>,
 }
 
 impl Sequential {
-    pub fn new() -> Self{
-        Self {
-            layers: vec![]
-        }
+    pub fn new() -> Self { Self { modules: vec![] } }
+
+    pub fn add(&mut self, m: impl Module + 'static) -> &mut Self {
+        self.modules.push(Box::new(m));
+        self
     }
-    pub fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+}
+
+impl Module for Sequential {
+    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
         let mut output = input.clone();
-        for layer in self.layers.iter_mut() {
-            output = layer.forward(&output, rng);
+        for m in self.modules.iter_mut() {
+            output = m.forward(&output, rng);
         }
         output
     }
-    pub fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
+    fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
         let mut output = grad_output.clone();
-        for layer in self.layers.iter_mut().rev() {
-            output = layer.backward(&output, grad_shift);
+        for m in self.modules.iter_mut().rev() {
+            output = m.backward(&output, grad_shift);
         }
         output
     }
-    pub fn sync_weights(&mut self, rng: &mut XorShift64) {
-        for layer in self.layers.iter_mut() {
-            layer.sync_weights(rng)
+    fn sync_weights(&mut self, rng: &mut XorShift64) {
+        for m in self.modules.iter_mut() {
+            m.sync_weights(rng)
         }
 
     }
-    pub fn step<O: Optimizer>(&mut self, optim: &mut O) {
-        let mut param_idx = 0;
-        for layer in self.layers.iter_mut() {
-            if let Layer::Linear(l) = layer {
-                if let Some(cache) = l.grad_cache.take() {
-                    optim.step(param_idx, &mut l.weights_master.data, &cache.data);
-                    param_idx += 1;
-                }
-                if let Some(b_cache) = l.bias_grad_cache.take() {
-                    optim.step(param_idx, &mut l.bias.data, &b_cache.data);
-                    param_idx += 1;
-                }
-            }
+    fn step(&mut self, optim: &dyn OptimizerConfig) {
+        for m in self.modules.iter_mut() {
+            m.step(optim);
         }
     }
 
-    pub fn summary(&self) {
-        println!("{:-<50}", "-");
-        println!("{:<15} | {:<16} | {:<10}", "Layer Type", "Shape [I, O, (B)]", "Param # (I x O + B)");
-        println!("{:-<50}", "-");
-        
-        let mut total_params = 0;
-        let mut stat_mem = 0;
-        let mut dyn_mem = 0;
+    fn memory_report(&self) -> (usize, usize) {
+        self.modules.iter()
+            .map(|m| m.memory_report())
+            .fold((0, 0), |(s, d), (ms, md)| (s + ms, d + md))
+    }
 
-        for layer in &self.layers {
-            println!("{}", layer);  
-
-            if let Layer::Linear(l) = layer {
-                total_params += (
-                    l.weights_storage.shape[0]
-                    * l.weights_storage.shape[1]
-                ) + l.weights_storage.shape[0];
-                let (stat, dyna) = l.memory_report();
-                stat_mem += stat;
-                dyn_mem += dyna;
-            } else if let Layer::ReLU(r) = layer {
-                let (_, dyna) = r.memory_report();
-                dyn_mem += dyna;
-            }
+    fn describe(&self) -> ModuleInfo {
+        ModuleInfo {
+            name: "Sequential",
+            params: 0,
+            static_bytes: 0,
+            children: self.modules.iter().map(|m| m.describe()).collect(),
         }
-        println!("{:-<50}", "-");
-        println!("Total Parameters: {}", total_params);
-        println!("{:-<50}", "-");
-        println!("Static Memory usage: {}", stat_mem);
-        println!("Dynamic Memory usage: {}", dyn_mem);
-        println!("{:-<50}", "-");
+    }
+}
+
+pub struct RNNCell {
+    pub w_ih: Linear,
+    pub w_hh: Linear,
+    pub act: Tanh,
+    pub h_prev: Option<Tensor<i8>>,
+    pub hidden_dim: usize,
+}
+
+impl RNNCell {
+    pub fn new(input_dim: usize, hidden_dim: usize, scale_shift: u32) -> Self {
+        Self {
+            w_ih: Linear::new(input_dim, hidden_dim, scale_shift),
+            w_hh: Linear::new(hidden_dim, hidden_dim, scale_shift),
+            act: Tanh::new(),
+            h_prev: None,
+            hidden_dim,
+        }
+    }
+
+    pub fn reset_state(&mut self) { self.h_prev = None; }
+
+    pub fn init_weights(&mut self, rng: &mut XorShift64){
+        self.w_ih.init_xavier(rng);
+
+        let hidden_dim = self.w_hh.weights.master.shape[0];
+        let spectral_cap_i8 = kernels::isqrt(16129 / (hidden_dim as u32)) as i32;
+        let spectral_cap_master = spectral_cap_i8 * (1 << self.w_hh.weights.shift);
+
+        let fan_in = self.w_hh.weights.master.shape[1];
+        let fan_out = self.w_hh.weights.master.shape[0];
+        let xavier_limit_i8 = kernels::isqrt(96774 / (fan_in + fan_out) as u32) as i32;
+
+        let xavier_limit_master = xavier_limit_i8 * (1 << self.w_hh.weights.shift);
+        let range = xavier_limit_master.min(spectral_cap_master);
+        self.w_hh.weights.init_uniform(rng, range);
+    }
+}
+
+impl Module for RNNCell {
+    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+        let batch = input.shape[0];
+
+        let h = self.h_prev.get_or_insert_with(|| Tensor::new(vec![batch, self.hidden_dim]));
+
+        // h_t = tanh(W_ih * x_t + W_hh * h_{t-1})
+        // We do both linear transforms, add elementwise, then tanh.
+        // Simplest: pass through w_ih, add w_hh output, apply tanh.
+        //
+        // Note: adding two i8 tensors before tanh risks overflow.
+        // Accumulate in i16, then downcast before tanh.
+        let ih = self.w_ih.forward(input, rng);
+        let hh = self.w_hh.forward(h, rng);
+
+        let mut comb = Tensor::<i8>::new(vec![batch, self.hidden_dim]);
+        for i in 0..comb.data.len() {
+            let sum = (ih.data[i] as i16).wrapping_add(hh.data[i] as i16);
+            comb.data[i] = sum.clamp(-128, 127) as i8;
+        }
+
+        let h_next = self.act.forward(&comb, rng);
+        self.h_prev = Some(h_next.clone());
+        h_next
+    }
+    fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
+        let d_comb = self.act.backward(grad_output, grad_shift);
+
+        let d_ih = self.w_ih.backward(&d_comb, grad_shift);
+        let d_hh = self.w_hh.backward(&d_comb, grad_shift); // compute it...
+        // d_hh should be fed back as the grad for h_prev in the next BPTT step
+        // For now at minimum it shouldn't be silently dropped
+
+        d_ih
+    }
+    fn sync_weights(&mut self, rng: &mut XorShift64) {
+        self.w_ih.sync_weights(rng);
+        self.w_hh.sync_weights(rng);
+    }
+
+    fn step(&mut self, optim: &dyn OptimizerConfig) {
+        self.w_ih.step(optim);
+        self.w_hh.step(optim);
+    }
+
+    fn memory_report(&self) -> (usize, usize) {
+        let (s1, d1) = self.w_ih.memory_report();
+        let (s2, d2) = self.w_hh.memory_report();
+        let h_mem = self.h_prev.as_ref().map_or(0, |t| t.memory_bytes());
+        (s1 + s2, d1 + d2 + h_mem)
+    }
+
+    fn describe(&self) -> ModuleInfo {
+        let children = vec![
+            self.w_ih.describe(),
+            self.w_hh.describe(),
+            self.act.describe()
+        ];
+        ModuleInfo {
+            name: "RNNCell",
+            params: children.iter().map(|e| e.params).sum(),
+            static_bytes: 0,
+            children: children,
+        }
+    }
+}
+
+pub struct RNN {
+    pub cell: RNNCell,
+    pub bptt_steps: usize,
+}
+
+impl RNN {
+    pub fn new(input_dim: usize, hidden_dim: usize, scale_shift: u32, bptt_steps: usize) -> Self {
+        Self {
+            cell: RNNCell::new(input_dim, hidden_dim, scale_shift),
+            bptt_steps,
+        }
+    }
+
+    pub fn reset_state(&mut self) { self.cell.reset_state(); }
+
+    pub fn forward_seq(&mut self, input_seq: &[Tensor<i8>], rng: &mut XorShift64) -> Vec<Tensor<i8>> {
+        input_seq.iter().map(|x| self.cell.forward(x, rng)).collect()
+    }
+
+    pub fn backward_seq(&mut self, grad_seq: &[Tensor<i16>], grad_shift: Option<u32>) -> Vec<Tensor<i16>> {
+        let start = grad_seq.len().saturating_sub(self.bptt_steps);
+        grad_seq[start..].iter().rev()
+            .map(|g| self.cell.backward(g, grad_shift))
+            .collect()
     }
 }
 
@@ -836,66 +1006,58 @@ mod tests {
     fn test_linear_new() {
         let lin = Linear::new(4, 8, 2);
 
-        assert_eq!(lin.weights_master.len(), 4 * 8);
-        assert_eq!(lin.weights_storage.len(), 4 * 8);
-        assert_eq!(lin.bias.len(), 8);
-        assert_eq!(lin.scale_shift, 2);
-        assert_eq!(lin.forward_cache, None);
-        assert_eq!(lin.grad_cache, None);
-        assert_eq!(lin.bias_grad_cache, None);
+        assert_eq!(lin.weights.master.len(), 4 * 8);
+        assert_eq!(lin.weights.storage.len(), 4 * 8);
+        assert_eq!(lin.bias.master.len(), 8);
+        assert_eq!(lin.weights.shift, 2);
+        assert_eq!(lin.cache, None);
+        assert_eq!(lin.weights.grads, None);
+        assert_eq!(lin.bias.grads, None);
     }
 
     #[test]
     fn test_linear_sync_weights() {
         let mut lin = Linear::new(2, 2, 0);
-        lin.weights_master.data[0] = 10;
-        lin.weights_master.data[3] = 10;
+        lin.weights.master.data[0] = 10;
+        lin.weights.master.data[3] = 10;
         let mut rng = XorShift64{state: 420};
         lin.sync_weights(&mut rng);
 
-        assert_eq!(lin.weights_storage.data[0], 10);
-        assert_eq!(lin.weights_storage.data[1], 0);
-        assert_eq!(lin.weights_storage.data[2], 0);
-        assert_eq!(lin.weights_storage.data[3], 10);
+        assert_eq!(lin.weights.storage.data[0], 10);
+        assert_eq!(lin.weights.storage.data[1], 0);
+        assert_eq!(lin.weights.storage.data[2], 0);
+        assert_eq!(lin.weights.storage.data[3], 10);
 
-        lin.scale_shift = 1;
+        lin.weights.shift = 1;
         lin.sync_weights(&mut rng);
 
-        assert_eq!(lin.weights_storage.data[0], 5);
-        assert_eq!(lin.weights_storage.data[1], 0);
-        assert_eq!(lin.weights_storage.data[2], 0);
-        assert_eq!(lin.weights_storage.data[3], 5);
+        assert_eq!(lin.weights.storage.data[0], 5);
+        assert_eq!(lin.weights.storage.data[1], 0);
+        assert_eq!(lin.weights.storage.data[2], 0);
+        assert_eq!(lin.weights.storage.data[3], 5);
 
-        lin.scale_shift = 2;
+        lin.weights.shift = 2;
         lin.sync_weights(&mut rng);
 
-        assert_eq!(lin.weights_storage.data[0], 2);
-        assert_eq!(lin.weights_storage.data[1], 0);
-        assert_eq!(lin.weights_storage.data[2], 0);
-        assert_eq!(lin.weights_storage.data[3], 3);
+        assert_eq!(lin.weights.storage.data[0], 2);
+        assert_eq!(lin.weights.storage.data[1], 0);
+        assert_eq!(lin.weights.storage.data[2], 0);
+        assert_eq!(lin.weights.storage.data[3], 2);
 
-        lin.scale_shift = 3;
+        lin.weights.shift = 3;
         lin.sync_weights(&mut rng);
 
-        assert_eq!(lin.weights_storage.data[0], 1);
-        assert_eq!(lin.weights_storage.data[1], 0);
-        assert_eq!(lin.weights_storage.data[2], 0);
-        assert_eq!(lin.weights_storage.data[3], 1);
+        assert_eq!(lin.weights.storage.data[0], 2);
+        assert_eq!(lin.weights.storage.data[1], 0);
+        assert_eq!(lin.weights.storage.data[2], 0);
+        assert_eq!(lin.weights.storage.data[3], 1);
     }
 
     #[test]
     fn test_linear_forward() {
-        let mut lin = Linear{
-            weights_master: Tensor::new(vec![2, 2]),
-            weights_storage: Tensor::new(vec![2, 2]),
-            bias: Tensor::new(vec![2]),
-            scale_shift: 0,
-            forward_cache: None,
-            grad_cache: None,
-            bias_grad_cache: None
-        };
-        lin.weights_master.data[0] = 1;
-        lin.weights_master.data[3] = 1;
+        let mut lin = Linear::new(2, 2, 0);
+        lin.weights.master.data[0] = 1;
+        lin.weights.master.data[3] = 1;
         let mut rng = XorShift64{state: 420};
         lin.sync_weights(&mut rng);
 
@@ -910,17 +1072,9 @@ mod tests {
 
     #[test]
     fn test_linear_forward_saturation() {
-        let mut lin = Linear{
-            weights_master: Tensor::new([2, 2].to_vec()),
-            weights_storage: Tensor::new([2, 2].to_vec()),
-            bias: Tensor::new([1, 2].to_vec()),
-            scale_shift: 0,
-            forward_cache: None,
-            grad_cache: None,
-            bias_grad_cache: None,
-        };
-        lin.weights_master.data[0] = 126;
-        lin.weights_master.data[3] = 126;
+        let mut lin = Linear::new(2, 2, 0);
+        lin.weights.master.data[0] = 126;
+        lin.weights.master.data[3] = 126;
         let mut rng = XorShift64{state: 420};
         lin.sync_weights(&mut rng);
 
@@ -936,15 +1090,7 @@ mod tests {
 
     #[test]
     fn test_linear_forward_shape() {
-        let mut lin = Linear{
-            weights_master: Tensor::new([3, 2].to_vec()),
-            weights_storage: Tensor::new([3, 2].to_vec()),
-            bias: Tensor::new([1, 3].to_vec()),
-            scale_shift: 0,
-            forward_cache: None,
-            grad_cache: None,
-            bias_grad_cache: None,
-        };
+        let mut lin = Linear::new(2, 3, 0);
         let mut rng = XorShift64{state: 420};
         lin.sync_weights(&mut rng);
 
@@ -961,8 +1107,8 @@ mod tests {
         let mut lin = Linear::new(2, 2, 0);
         
         // Identity Matrix in Master Weights [1, 0] / [0, 1]
-        lin.weights_master.data[0] = 1; 
-        lin.weights_master.data[3] = 1; 
+        lin.weights.master.data[0] = 1; 
+        lin.weights.master.data[3] = 1; 
         
         let mut rng = XorShift64::new(420);
         lin.sync_weights(&mut rng);
@@ -999,10 +1145,10 @@ mod tests {
         let input = Tensor::new(vec![2, 4]); // [Batch, In]
         let grad_out = Tensor::new(vec![2, 3]); // [Batch, Out]
 
-        lin.forward_cache = Some(input.clone());
+        lin.cache = Some(input.clone());
 
         let dX = lin.backward(&grad_out, None);
-        let dW = lin.grad_cache.unwrap().clone();
+        let dW = lin.weights.grads.unwrap().clone();
 
         // Check shapes
         assert_eq!(dX.shape, vec![2, 4]); // [Batch, In]
@@ -1028,14 +1174,14 @@ mod tests {
         l1.forward(&x, &mut rng);
 
         let (a, b) = l1.memory_report();
-        assert_eq!(a, 14);
+        assert_eq!(a, 15);
         assert_eq!(b, 2);
 
         let mut l2 = Linear::new(2, 10, 2);
         l2.forward(&x, &mut rng);
 
         let (a2, b2) = l2.memory_report();
-        assert_eq!(a2, 140);
+        assert_eq!(a2, 150);
         assert_eq!(b2, 2);
     }
 
@@ -1043,32 +1189,32 @@ mod tests {
     fn test_linear_step() {
         let mut rng = XorShift64::new(777);
         let mut l1 = Linear::new(2, 1, 1);
-        let mut optim = SGD::new(0, None);
-        l1.weights_master.data[0] = 111;
-        l1.weights_master.data[1] = 222;
+        let mut optim = SGDConfig::new(0, None);
+        l1.weights.master.data[0] = 111;
+        l1.weights.master.data[1] = 222;
         l1.sync_weights(&mut rng);
 
-        assert_eq!(l1.weights_master.data[0], 111);
-        assert_eq!(l1.weights_master.data[1], 222);
-        assert_eq!(l1.weights_storage.data[0], 55);
-        assert_eq!(l1.weights_storage.data[1], 111);
+        assert_eq!(l1.weights.master.data[0], 111);
+        assert_eq!(l1.weights.master.data[1], 222);
+        assert_eq!(l1.weights.storage.data[0], 55);
+        assert_eq!(l1.weights.storage.data[1], 111);
 
         // no gradient -> no change
         l1.step(&mut optim);
-        assert_eq!(l1.weights_master.data[0], 111);
-        assert_eq!(l1.weights_master.data[1], 222);
-        assert_eq!(l1.weights_storage.data[0], 55);
-        assert_eq!(l1.weights_storage.data[1], 111);
+        assert_eq!(l1.weights.master.data[0], 111);
+        assert_eq!(l1.weights.master.data[1], 222);
+        assert_eq!(l1.weights.storage.data[0], 55);
+        assert_eq!(l1.weights.storage.data[1], 111);
 
         let x = Tensor::from_vec(vec![1, 1], vec![1, 2]);
 
         l1.forward(&x, &mut rng);
         l1.step(&mut optim);
 
-        assert_eq!(l1.weights_master.data[0], 111);
-        assert_eq!(l1.weights_master.data[1], 222);
-        assert_eq!(l1.weights_storage.data[0], 55);
-        assert_eq!(l1.weights_storage.data[1], 111);
+        assert_eq!(l1.weights.master.data[0], 111);
+        assert_eq!(l1.weights.master.data[1], 222);
+        assert_eq!(l1.weights.storage.data[0], 55);
+        assert_eq!(l1.weights.storage.data[1], 111);
 
         let x2 = Tensor::from_vec(vec![2, 2], vec![1, 2]);
 
@@ -1078,30 +1224,30 @@ mod tests {
         // 3. Compute Loss & Gradients (Error = Pred - Target)
         let mut grad_out = Tensor::<i16>::from_vec(vec![126, 2], vec![2, 1]);
 
-        l1.grad_cache = Some(grad_out);
+        l1.weights.grads = Some(grad_out);
 
         l1.step(&mut optim);
 
-        assert_eq!(l1.weights_master.data[0], -15);
-        assert_eq!(l1.weights_master.data[1], 220);
-        assert_eq!(l1.weights_storage.data[0], 55);
-        assert_eq!(l1.weights_storage.data[1], 111);
+        assert_eq!(l1.weights.master.data[0], -15);
+        assert_eq!(l1.weights.master.data[1], 220);
+        assert_eq!(l1.weights.storage.data[0], 56);
+        assert_eq!(l1.weights.storage.data[1], 111);
     }
 
     #[test]
     fn test_linear_step_with_shifting() {
         let mut rng = XorShift64::new(777);
         let mut l1 = Linear::new(2, 1, 2);
-        let mut optim = SGD::new(0, None);
-        l1.weights_master.data[0] = 111;
-        l1.weights_master.data[1] = 222;
+        let mut optim = SGDConfig::new(0, None);
+        l1.weights.master.data[0] = 111;
+        l1.weights.master.data[1] = 222;
 
         l1.step(&mut optim);
 
-        assert_eq!(l1.weights_master.data[0], 111);
-        assert_eq!(l1.weights_master.data[1], 222);
-        assert_eq!(l1.weights_storage.data[0], 0);
-        assert_eq!(l1.weights_storage.data[1], 0);
+        assert_eq!(l1.weights.master.data[0], 111);
+        assert_eq!(l1.weights.master.data[1], 222);
+        assert_eq!(l1.weights.storage.data[0], 0);
+        assert_eq!(l1.weights.storage.data[1], 0);
     }
 
     #[test]
@@ -1176,46 +1322,7 @@ mod tests {
         assert_eq!(dyna, 4);
     }
 
-    #[test]
-    fn test_summary() {
-        let mut l1 = Linear::new(2, 8, 2);
-        let mut l2 = Linear::new(8, 1, 2);
 
-        let mut model = Sequential {
-            layers: vec![
-                Layer::Linear(l1),
-                Layer::ReLU(ReLU::new()),
-                Layer::Linear(l2),
-            ],
-        };
-        model.summary();
-    }
-
-    #[test]
-    fn test_summary_with_dynamic_memory() {
-        let mut rng = XorShift64::new(777);
-        let mut l1 = Linear::new(2, 8, 2);
-        let mut l2 = Linear::new(8, 1, 2);
-
-        let mut model = Sequential {
-            layers: vec![
-                Layer::Linear(l1),
-                Layer::ReLU(ReLU::new()),
-                Layer::Linear(l2),
-            ],
-        };
-        model.summary();
-        model.sync_weights(&mut rng);
-
-        let x = Tensor::from_vec(vec![
-            0, 0,
-            0, 1,
-            1, 0,
-            1, 1,
-        ], vec![4, 2]);
-        let _preds = model.forward(&x, &mut rng);
-        model.summary();
-    }
 
     // Examples
     #[test]
@@ -1225,7 +1332,7 @@ mod tests {
         let mut layer = Linear::new(1, 1, 0);
         
         // Initialize Master Weight poorly (start at 10)
-        layer.weights_master.data[0] = 10;
+        layer.weights.master.data[0] = 10;
         let mut rng = XorShift64::new(42);
 
         // Dataset
@@ -1237,7 +1344,7 @@ mod tests {
         let lr_shift = 5; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
         let grad_shift = 0; // Don't shrink the gradients here, numbers are small
 
-        let mut optim = SGD::new(lr_shift, Some(grad_shift));
+        let mut optim = SGDConfig::new(lr_shift, Some(grad_shift));
         println!("--- Starting Integer Training ---");
         for epoch in 0..epochs {
             // 1. Sync weights from i32 -> i8
@@ -1263,7 +1370,7 @@ mod tests {
             layer.step(&mut optim);
 
             println!("Epoch {:02}: Loss = {:04}, Master Weight = {}, Storage Weight = {}", 
-                     epoch, loss, layer.weights_master.data[0], layer.weights_storage.data[0]);
+                     epoch, loss, layer.weights.master.data[0], layer.weights.storage.data[0]);
                      
             if loss == 0 {
                 println!("Converged early! Epoch {}", epoch);
@@ -1272,7 +1379,21 @@ mod tests {
         }
 
         layer.sync_weights(&mut rng);
-        assert_eq!(layer.weights_storage.data[0], 4, "Model failed to learn y=3x + 1");
+        assert_eq!(layer.weights.storage.data[0], 4, "Model failed to learn y=3x + 1");
+    }
+
+    #[test]
+    fn test_summary() {
+        let model = Sequential {
+            modules: vec![
+                Box::new(Linear::new(2, 8, 2)),
+                Box::new(ReLU::new()),
+                Box::new(Linear::new(8, 1, 2)),
+            ],
+        };
+
+        model.print_summary(&model.describe(), 1);
+
     }
 
     #[test]
@@ -1282,26 +1403,25 @@ mod tests {
         let mut l1 = Linear::new(2, 8, 2);
         let mut l2 = Linear::new(8, 1, 2);
 
-        for w in l1.weights_master.data.iter_mut() {
+        for w in l1.weights.master.data.iter_mut() {
             *w = (rng.gen_range(60) as i32) - 30; 
         }
-        for w in l2.weights_master.data.iter_mut() {
+        for w in l2.weights.master.data.iter_mut() {
             *w = (rng.gen_range(60) as i32) - 30; 
         }
-        for b in l1.bias.data.iter_mut() {
+        for b in l1.bias.master.data.iter_mut() {
             *b = 5;
         }
 
         let mut model = Sequential {
-            layers: vec![
-                Layer::Linear(l1),
-                Layer::ReLU(ReLU::new()),
-                Layer::Linear(l2),
+            modules: vec![
+                Box::new(l1),
+                Box::new(ReLU::new()),
+                Box::new(l2),
             ],
         };
-        model.summary();
 
-        let mut optim = SGD::new(4, Some(2));
+        let mut optim = SGDConfig::new(4, Some(2));
 
         let x = Tensor::from_vec(vec![
             0, 0,
@@ -1353,28 +1473,27 @@ mod tests {
         let mut l1 = Linear::new(2, 8, 2);
         let mut l2 = Linear::new(8, 1, 2);
 
-        for w in l1.weights_master.data.iter_mut() {
+        for w in l1.weights.master.data.iter_mut() {
             *w = (rng.gen_range(60) as i32) - 30; 
         }
-        for w in l2.weights_master.data.iter_mut() {
+        for w in l2.weights.master.data.iter_mut() {
             *w = (rng.gen_range(60) as i32) - 30; 
         }
-        for b in l1.bias.data.iter_mut() {
+        for b in l1.bias.master.data.iter_mut() {
             *b = 5;
         }
 
         let mut model = Sequential {
-            layers: vec![
-                Layer::Linear(l1),
-                Layer::ReLU(ReLU::new()),
-                Layer::Linear(l2),
+            modules: vec![
+                Box::new(l1),
+                Box::new(ReLU::new()),
+                Box::new(l2),
             ],
         };
-        model.summary();
 
         // NEW: Instantiate our Integer Adam!
         // We set the learning rate multiplier to 2.
-        let mut optim = Adam::new(2);
+        let mut optim = AdamConfig::new(2);
 
         let x = Tensor::from_vec(vec![
             0, 0,
@@ -1429,5 +1548,6 @@ mod tests {
         assert!(p01 > 12, "0,1 failed: expected high, got {}", p01);
         assert!(p10 > 12, "1,0 failed: expected high, got {}", p10);
     }
+
 
 }
