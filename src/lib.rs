@@ -5,7 +5,7 @@ use std::fmt;
 static TANH_LUT: OnceLock<[i8; 256]> = OnceLock::new();
 
 /// Generates the LUT based on a specific input scale.
-fn generate_lut(input_scale: f32) -> [i8; 256] {
+fn generate_tanh_lut(input_scale: f32) -> [i8; 256] {
     let mut lut = [0i8; 256];
     
     for i in -128..=127 {
@@ -137,7 +137,7 @@ pub mod kernels {
     /// and linear in between
     pub fn tanh_i8(x: i8) -> i8 {
         // Get the table, initializing it on the very first call if necessary.
-        let lut = TANH_LUT.get_or_init(|| generate_lut(127.0));
+        let lut = TANH_LUT.get_or_init(|| generate_tanh_lut(127.0));
         
         let index = (x as i16 + 128) as usize;
         lut[index]
