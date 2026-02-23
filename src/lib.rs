@@ -379,6 +379,24 @@ impl Params {
         }
     }
 
+    pub fn accumulate_grads(&mut self, new_grads: Tensor<i16>) {
+        match self.grads.as_mut() {
+            Some(existing) => {
+                // Saturating add to avoid wrapping on large accumulated signals
+                for (e, n) in existing.data.iter_mut().zip(new_grads.data.iter()) {
+                    *e = e.saturating_add(*n);
+                }
+            }
+            None => {
+                self.grads = Some(new_grads);
+            }
+        }
+    }
+
+    pub fn zero_grads(&mut self) {
+        self.grads = None;
+    }
+
     pub fn step(&mut self, optim: &dyn OptimizerConfig) {
         if let Some(grads) = self.grads.take() {
             let state = self.state.get_or_insert_with(|| optim.init_state(self.master.len()));
@@ -480,8 +498,8 @@ impl Module for Linear {
             }
         }
 
-        self.weights.grads = Some(grad_weights);
-        self.bias.grads    = Some(grad_bias);
+        self.weights.accumulate_grads(grad_weights);
+        self.bias.accumulate_grads(grad_bias);
         grad_input
     }
 
