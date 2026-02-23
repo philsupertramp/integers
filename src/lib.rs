@@ -643,6 +643,8 @@ pub struct RNNCell {
     pub act: Tanh,
     pub h_prev: Option<Tensor<i8>>,
     pub hidden_dim: usize,
+
+    d_h_next: Option<Tensor<i16>>,
 }
 
 impl RNNCell {
@@ -653,10 +655,14 @@ impl RNNCell {
             act: Tanh::new(),
             h_prev: None,
             hidden_dim,
+            d_h_next: None,
         }
     }
 
-    pub fn reset_state(&mut self) { self.h_prev = None; }
+    pub fn reset_state(&mut self) {
+        self.h_prev = None;
+        self.d_h_next = None;
+    }
 
     pub fn init_weights(&mut self, rng: &mut XorShift64){
         self.w_ih.init_xavier(rng);
@@ -701,12 +707,23 @@ impl Module for RNNCell {
         h_next
     }
     fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
-        let d_comb = self.act.backward(grad_output, grad_shift);
+        let combined_grad = match self.d_h_next.take() {
+            Some(carry) => {
+                let mut combined = grad_output.clone();
+                for (c, k) in combined.data.iter_mut().zip(carry.data.iter()) {
+                    *c = c.saturating_add(*k);
+                }
+                combined
+            }
+            None => grad_output.clone(),
+        };
+
+        let d_comb = self.act.backward(& combined, grad_shift);
 
         let d_ih = self.w_ih.backward(&d_comb, grad_shift);
         let d_hh = self.w_hh.backward(&d_comb, grad_shift); // compute it...
         // d_hh should be fed back as the grad for h_prev in the next BPTT step
-        // For now at minimum it shouldn't be silently dropped
+        self.d_h_next = Some(d_hh);
 
         d_ih
     }
