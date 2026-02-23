@@ -736,7 +736,7 @@ impl Module for RNNCell {
             None => grad_output.clone(),
         };
 
-        let d_comb = self.act.backward(& combined, grad_shift);
+        let d_comb = self.act.backward(&combined_grad, grad_shift);
 
         let d_ih = self.w_ih.backward(&d_comb, grad_shift);
         let d_hh = self.w_hh.backward(&d_comb, grad_shift); // compute it...
