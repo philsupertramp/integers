@@ -1,6 +1,35 @@
 use std::fmt;
 use std::sync::OnceLock;
 
+/// Debug utils
+pub struct OverflowStats {
+    pub forward_wraps:  u64,
+    pub backward_wraps: u64,
+    pub downcast_clamps: u64,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    pub static OVERFLOW_STATS: std::cell::RefCell<OverflowStats> = 
+        std::cell::RefCell::new(OverflowStats { 
+            forward_wraps: 0, 
+            backward_wraps: 0, 
+            downcast_clamps: 0 
+        });
+}
+
+macro_rules! checked_add_i16 {
+    ($acc:expr, $val:expr, $counter:expr) => {{
+        #[cfg(debug_assertions)]
+        {
+            if $acc.checked_add($val).is_none() {
+                OVERFLOW_STATS.with(|s| s.borrow_mut().$counter += 1);
+            }
+        }
+        $acc.wrapping_add($val)
+    }};
+}
+
 /// A global reference to our dynamically generated lookup table.
 static TANH_LUT: OnceLock<[i8; 256]> = OnceLock::new();
 
