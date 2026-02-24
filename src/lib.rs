@@ -123,7 +123,7 @@ pub mod kernels {
     pub fn isqrt(n: u32) -> u32 {
         if n == 0 { return 0; }
         let mut x = n;
-        let mut y = (x + 1) / 2;
+        let mut y = x.div_ceil(2);
         while y < x {
             x = y;
             y = (x + n / x) / 2;
@@ -133,7 +133,7 @@ pub mod kernels {
     pub fn isqrt_64(n: u64) -> u64 {
         if n == 0 { return 0; }
         let mut x = n;
-        let mut y = (x + 1) / 2;
+        let mut y = x.div_ceil(2);
         while y < x {
             x = y;
             y = (x + n / x) / 2;
@@ -554,6 +554,12 @@ pub struct ReLU {
     pub cache: Vec<Tensor<i8>>,
 }
 
+impl Default for ReLU {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReLU {
     pub fn new() -> Self { Self { cache: Vec::new() } }
 }
@@ -586,6 +592,12 @@ impl Module for ReLU {
 }
 
 pub struct Tanh { cache: Vec<Tensor<i8>> }
+
+impl Default for Tanh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Tanh { pub fn new() -> Self { Self { cache: Vec::new() } } }
 
@@ -621,6 +633,12 @@ impl Module for Tanh {
 
 pub struct Sequential {
     pub modules: Vec<Box<dyn Module>>,
+}
+
+impl Default for Sequential {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Sequential {
@@ -796,7 +814,7 @@ impl Module for RNNCell {
             name: "RNNCell",
             params: children.iter().map(|e| e.params).sum(),
             static_bytes: 0,
-            children: children,
+            children,
         }
     }
 }

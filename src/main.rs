@@ -1,6 +1,6 @@
 mod lib;
 
-use lib::{Tensor, kernels, XorShift64};
+use lib::Tensor;
 
 
 fn main() {
