@@ -128,6 +128,24 @@ impl XorShift64 {
     }
 }
 
+fn clamp_i8(shifted: i32) -> i8 {
+    let mut val = shifted as i8;
+    let mut clamp = true;
+    if shifted > 127 {
+        val = 127;
+    } else if shifted < -128 {
+        val = -128
+    } else { clamp = false; }
+
+    #[cfg(debug_assertions)]
+    {
+        if clamp {
+            OVERFLOW_STATS.with(|s| s.borrow_mut().downscale_clamps += 1);
+        }
+    }
+    val
+}
+
 pub mod kernels {
     use super::*;
 
@@ -196,13 +214,7 @@ pub mod kernels {
 
         let shifted = (val >> shift) + round_bit;
 
-        if shifted > 127 {
-            127
-        } else if shifted < -128 {
-            -128
-        } else {
-            shifted as i8
-        }
+        clamped_i8(shifted)
     }
 
     #[cfg(target_arch = "aarch64")]
