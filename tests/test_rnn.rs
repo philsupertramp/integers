@@ -1,18 +1,20 @@
-use integers::{Sequential, Tensor, Linear, RNNCell, XorShift64, AdamConfig, SGDConfig, Module, RNN};
-
+use integers::{
+    AdamConfig, Linear, Module, RNN, RNNCell, SGDConfig, Sequential, Tensor, XorShift64,
+};
 
 // RNNCell is just another module — drop it into Sequential for
 // a simple sequence classifier
 #[test]
 fn test_rnn_in_sequential() {
     let mut model = Sequential::new();
-    model.add(RNNCell::new(4, 8, 2))   // composite module, no special handling
-         .add(Linear::new(8, 1, 2));
+    model
+        .add(RNNCell::new(4, 8, 2)) // composite module, no special handling
+        .add(Linear::new(8, 1, 2));
 
-    let mut rng   = XorShift64::new(42);
+    let mut rng = XorShift64::new(42);
     let mut optim = AdamConfig::new(2);
 
-    let x = Tensor::new(vec![1, 4]);   // single step, batch=1, input_dim=4
+    let x = Tensor::new(vec![1, 4]); // single step, batch=1, input_dim=4
 
     model.sync_weights(&mut rng);
     let out = model.forward(&x, &mut rng);
@@ -22,9 +24,12 @@ fn test_rnn_in_sequential() {
 // Full sequence with RNN struct (multi-step BPTT)
 #[test]
 fn test_rnn_sequence() {
-    let mut rnn   = RNN::new(4, 8, 2, 5);
-    let mut rng   = XorShift64::new(42);
-    let mut optim = SGDConfig { lr_shift: 4, momentum_shift: None };
+    let mut rnn = RNN::new(4, 8, 2, 5);
+    let mut rng = XorShift64::new(42);
+    let mut optim = SGDConfig {
+        lr_shift: 4,
+        momentum_shift: None,
+    };
 
     rnn.cell.sync_weights(&mut rng);
     rnn.reset_state();
@@ -34,14 +39,14 @@ fn test_rnn_sequence() {
     assert_eq!(outputs.len(), 10);
     assert_eq!(outputs[0].shape, vec![2, 8]);
 
-    let grads: Vec<Tensor<i16>> = outputs.iter()
+    let grads: Vec<Tensor<i16>> = outputs
+        .iter()
         .map(|o| Tensor::new(o.shape.iter().map(|&d| d).collect()))
         .collect();
 
     let _ = rnn.backward_seq(&grads, Some(0));
     rnn.cell.step(&optim);
 }
-
 
 // Example test: predict the next value in a sin wave using an RNN.
 //
@@ -69,15 +74,15 @@ fn test_rnn_sequence() {
 fn test_rnn_sin_prediction() {
     use std::f64::consts::PI;
 
-    const SCALE:       f64   = 100.0;
-    const SEQ_LEN:     usize = 128;
-    const HIDDEN_DIM:  usize = 16;
-    const SCALE_SHIFT: u32   = 4;
-    const GRAD_SHIFT:  u32   = 0;
-    const EPOCHS:      usize = 500;
-    const BPTT_STEPS:  usize = 32;
+    const SCALE: f64 = 100.0;
+    const SEQ_LEN: usize = 128;
+    const HIDDEN_DIM: usize = 16;
+    const SCALE_SHIFT: u32 = 4;
+    const GRAD_SHIFT: u32 = 0;
+    const EPOCHS: usize = 500;
+    const BPTT_STEPS: usize = 32;
 
-    let mut rng       = XorShift64::new(42);
+    let mut rng = XorShift64::new(42);
     let mut quant_rng = XorShift64::new(99); // independent rng for weight quantization
 
     let samples: Vec<i8> = (0..=SEQ_LEN)
@@ -87,7 +92,7 @@ fn test_rnn_sin_prediction() {
         })
         .collect();
 
-    let mut rnn  = RNNCell::new(1, HIDDEN_DIM, SCALE_SHIFT);
+    let mut rnn = RNNCell::new(1, HIDDEN_DIM, SCALE_SHIFT);
     let mut head = Linear::new(HIDDEN_DIM, 1, SCALE_SHIFT);
 
     rnn.init_weights(&mut rng);
@@ -96,7 +101,7 @@ fn test_rnn_sin_prediction() {
     let optim = AdamConfig::new(3);
 
     let mut first_epoch_loss = 0i64;
-    let mut last_epoch_loss  = 0i64;
+    let mut last_epoch_loss = 0i64;
 
     for epoch in 0..EPOCHS {
         rnn.sync_weights(&mut quant_rng);
@@ -109,11 +114,11 @@ fn test_rnn_sin_prediction() {
         let mut epoch_loss: i64 = 0;
 
         for t in 0..(SEQ_LEN - 1) {
-            let x_t    = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
+            let x_t = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
             let target = samples[t + 1] as i16;
 
             // Forward every step so the hidden state evolves continuously.
-            let h_t  = rnn.forward(&x_t, &mut rng);
+            let h_t = rnn.forward(&x_t, &mut rng);
             let pred = head.forward(&h_t, &mut rng);
 
             // Clamp error before backward to avoid i8 overflow in the
@@ -128,7 +133,7 @@ fn test_rnn_sin_prediction() {
             let at_boundary = (t + 1) % BPTT_STEPS == 0 || t == SEQ_LEN - 2;
             if at_boundary {
                 let grad_head_out = Tensor::from_vec(vec![error], vec![1, 1]);
-                let grad_h        = head.backward(&grad_head_out, Some(GRAD_SHIFT));
+                let grad_h = head.backward(&grad_head_out, Some(GRAD_SHIFT));
                 // RNNCell::backward folds d_h_next carry into the incoming
                 // grad, so w_hh gets signal from future steps in the window.
                 rnn.backward(&grad_h, Some(GRAD_SHIFT));
@@ -137,8 +142,12 @@ fn test_rnn_sin_prediction() {
             }
         }
 
-        if epoch == 0          { first_epoch_loss = epoch_loss; }
-        if epoch == EPOCHS - 1 { last_epoch_loss  = epoch_loss; }
+        if epoch == 0 {
+            first_epoch_loss = epoch_loss;
+        }
+        if epoch == EPOCHS - 1 {
+            last_epoch_loss = epoch_loss;
+        }
 
         if epoch % 100 == 0 {
             println!("Epoch {:>4}: loss = {}", epoch, epoch_loss);
@@ -150,14 +159,17 @@ fn test_rnn_sin_prediction() {
     head.sync_weights(&mut quant_rng);
     rnn.reset_state();
 
-    println!("\n{:<6} {:>10} {:>10} {:>8}", "t", "target", "pred", "error");
+    println!(
+        "\n{:<6} {:>10} {:>10} {:>8}",
+        "t", "target", "pred", "error"
+    );
     let mut eval_loss: i64 = 0;
     for t in 0..(SEQ_LEN - 1) {
-        let x_t    = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
+        let x_t = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
         let target = samples[t + 1] as i16;
-        let h_t    = rnn.forward(&x_t, &mut rng);
-        let pred   = head.forward(&h_t, &mut rng);
-        let error  = pred.data[0] as i16 - target;
+        let h_t = rnn.forward(&x_t, &mut rng);
+        let pred = head.forward(&h_t, &mut rng);
+        let error = pred.data[0] as i16 - target;
         eval_loss += (error as i64) * (error as i64);
         println!("{:<6} {:>10} {:>10} {:>8}", t, target, pred.data[0], error);
     }
@@ -169,7 +181,8 @@ fn test_rnn_sin_prediction() {
     assert!(
         last_epoch_loss < first_epoch_loss,
         "Loss did not decrease: first={} last={}",
-        first_epoch_loss, last_epoch_loss
+        first_epoch_loss,
+        last_epoch_loss
     );
 
     let trivial_baseline: i64 = samples[1..SEQ_LEN]
@@ -180,24 +193,24 @@ fn test_rnn_sin_prediction() {
     assert!(
         eval_loss < trivial_baseline,
         "Model worse than predicting zero: eval_loss={} baseline={}",
-        eval_loss, trivial_baseline
+        eval_loss,
+        trivial_baseline
     );
 }
-
 
 #[test]
 fn test_rnn_cos_prediction() {
     use std::f64::consts::PI;
 
-    const SCALE:       f64   = 100.0;
-    const SEQ_LEN:     usize = 128;
-    const HIDDEN_DIM:  usize = 16;
-    const SCALE_SHIFT: u32   = 4;
-    const GRAD_SHIFT:  u32   = 1;
-    const EPOCHS:      usize = 500;
-    const BPTT_STEPS:  usize = 32;
+    const SCALE: f64 = 100.0;
+    const SEQ_LEN: usize = 128;
+    const HIDDEN_DIM: usize = 16;
+    const SCALE_SHIFT: u32 = 4;
+    const GRAD_SHIFT: u32 = 1;
+    const EPOCHS: usize = 500;
+    const BPTT_STEPS: usize = 32;
 
-    let mut rng       = XorShift64::new(123);
+    let mut rng = XorShift64::new(123);
     let mut quant_rng = XorShift64::new(77);
 
     let samples: Vec<i8> = (0..=SEQ_LEN)
@@ -207,7 +220,7 @@ fn test_rnn_cos_prediction() {
         })
         .collect();
 
-    let mut rnn  = RNNCell::new(1, HIDDEN_DIM, SCALE_SHIFT);
+    let mut rnn = RNNCell::new(1, HIDDEN_DIM, SCALE_SHIFT);
     let mut head = Linear::new(HIDDEN_DIM, 1, SCALE_SHIFT);
 
     // FIX: original w_ih used gen_range(8)-10 = [-10,-2], entirely negative.
@@ -216,10 +229,15 @@ fn test_rnn_cos_prediction() {
     rnn.init_weights(&mut rng);
     head.init_xavier(&mut rng);
 
-    let optim = AdamConfig { lr_mult: 4, b1_shift: 3, b2_shift: 4, eps: 4 };
+    let optim = AdamConfig {
+        lr_mult: 4,
+        b1_shift: 3,
+        b2_shift: 4,
+        eps: 4,
+    };
 
     let mut first_epoch_loss = 0i64;
-    let mut last_epoch_loss  = 0i64;
+    let mut last_epoch_loss = 0i64;
 
     for epoch in 0..EPOCHS {
         rnn.sync_weights(&mut quant_rng);
@@ -229,10 +247,10 @@ fn test_rnn_cos_prediction() {
         let mut epoch_loss: i64 = 0;
 
         for t in 0..(SEQ_LEN - 1) {
-            let x_t    = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
+            let x_t = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
             let target = samples[t + 1] as i16;
-            let h_t    = rnn.forward(&x_t, &mut rng);
-            let pred   = head.forward(&h_t, &mut rng);
+            let h_t = rnn.forward(&x_t, &mut rng);
+            let pred = head.forward(&h_t, &mut rng);
 
             let error = (pred.data[0] as i16 - target).clamp(-127, 127);
             epoch_loss += (error as i64) * (error as i64);
@@ -240,15 +258,19 @@ fn test_rnn_cos_prediction() {
             let at_boundary = (t + 1) % BPTT_STEPS == 0 || t == SEQ_LEN - 2;
             if at_boundary {
                 let grad_head_out = Tensor::from_vec(vec![error], vec![1, 1]);
-                let grad_h        = head.backward(&grad_head_out, Some(GRAD_SHIFT));
+                let grad_h = head.backward(&grad_head_out, Some(GRAD_SHIFT));
                 rnn.backward(&grad_h, Some(GRAD_SHIFT));
                 head.step(&optim);
                 rnn.step(&optim);
             }
         }
 
-        if epoch == 0          { first_epoch_loss = epoch_loss; }
-        if epoch == EPOCHS - 1 { last_epoch_loss  = epoch_loss; }
+        if epoch == 0 {
+            first_epoch_loss = epoch_loss;
+        }
+        if epoch == EPOCHS - 1 {
+            last_epoch_loss = epoch_loss;
+        }
 
         if epoch % 100 == 0 {
             println!("Epoch {:>4}: loss = {}", epoch, epoch_loss);
@@ -260,7 +282,10 @@ fn test_rnn_cos_prediction() {
         .map(|&v| (v as i64) * (v as i64))
         .sum();
 
-    println!("cos | first={} last={} baseline={}", first_epoch_loss, last_epoch_loss, trivial_baseline);
+    println!(
+        "cos | first={} last={} baseline={}",
+        first_epoch_loss, last_epoch_loss, trivial_baseline
+    );
 
     assert!(last_epoch_loss < first_epoch_loss);
     assert!(last_epoch_loss < trivial_baseline);

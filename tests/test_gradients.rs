@@ -1,7 +1,4 @@
-use integers::{
-    Tensor, Linear, RNNCell, XorShift64,
-    AdamConfig, SGDConfig, Module, MSE, Loss,
-};
+use integers::{AdamConfig, Linear, Loss, MSE, Module, RNNCell, SGDConfig, Tensor, XorShift64};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // §1  GRADIENT CHECKING
@@ -25,7 +22,7 @@ use integers::{
 fn linear_loss(layer: &mut Linear, input: &Tensor<i8>, seed: u64) -> i64 {
     let mut rng = XorShift64::new(seed);
     layer.sync_weights(&mut rng);
-    let mut rng = XorShift64::new(seed); 
+    let mut rng = XorShift64::new(seed);
     let out = layer.forward(input, &mut rng);
     layer.cache.pop(); // CLEAR THE UNUSED CACHE
     out.data.iter().map(|&x| (x as i64) * (x as i64)).sum()
@@ -34,8 +31,8 @@ fn linear_loss(layer: &mut Linear, input: &Tensor<i8>, seed: u64) -> i64 {
 fn gradient_check_linear(
     layer: &mut Linear,
     input: &Tensor<i8>,
-    eps:   i32,
-    seed:  u64,
+    eps: i32,
+    seed: u64,
 ) -> Vec<(f64, f64)> {
     // backprop gradient
     let mut rng = XorShift64::new(seed);
@@ -49,7 +46,9 @@ fn gradient_check_linear(
     );
     layer.backward(&grad_out, Some(0));
 
-    let backprop: Vec<i32> = layer.weights.grads
+    let backprop: Vec<i32> = layer
+        .weights
+        .grads
         .as_ref()
         .expect("backward did not produce weight grads")
         .data
@@ -73,7 +72,7 @@ fn gradient_check_linear(
 
         layer.weights.master.data[i] = orig;
 
-        let numerical  = (loss_plus - loss_minus) as f64 / (2 * eps) as f64;
+        let numerical = (loss_plus - loss_minus) as f64 / (2 * eps) as f64;
         let backprop_f = backprop[i] as f64;
         results.push((numerical, backprop_f));
     }
@@ -84,34 +83,40 @@ fn gradient_check_linear(
 #[test]
 fn test_grad_check_linear_sign_agreement() {
     let mut layer = Linear::new(2, 3, 0);
-    layer.weights.master.data = vec![
-        15, -10,
-        -8,  12,
-         6, -14,
-    ];
+    layer.weights.master.data = vec![15, -10, -8, 12, 6, -14];
 
-    let mut rng   = XorShift64::new(42);
-    let input     = Tensor::from_vec(vec![4i8, -3], vec![1, 2]);
-    let pairs     = gradient_check_linear(&mut layer, &input, 4, 123);
+    let mut rng = XorShift64::new(42);
+    let input = Tensor::from_vec(vec![4i8, -3], vec![1, 2]);
+    let pairs = gradient_check_linear(&mut layer, &input, 4, 123);
     let total = pairs.len();
 
-    let agreeing = pairs.iter()
+    let agreeing = pairs
+        .iter()
         .filter(|(n, b)| {
             // Near-zero gradients count as agreeing — quantization collapses
             // both sides to 0 when the true gradient is tiny.
-            if n.abs() < 0.5 && b.abs() < 0.5 { return true; }
+            if n.abs() < 0.5 && b.abs() < 0.5 {
+                return true;
+            }
             n.signum() == b.signum()
         })
         .count();
 
     let rate = agreeing as f64 / total as f64;
 
-    println!("\nGradient check: {}/{} weights agree in sign ({:.0}%)",
-             agreeing, total, rate * 100.0);
+    println!(
+        "\nGradient check: {}/{} weights agree in sign ({:.0}%)",
+        agreeing,
+        total,
+        rate * 100.0
+    );
     println!("{:>6} {:>14} {:>14}", "w[i]", "numerical", "backprop");
     for (i, (n, b)) in pairs.iter().enumerate() {
-        let mark = if (n.abs() < 0.5 && b.abs() < 0.5) || n.signum() == b.signum()
-                   { "✓" } else { "✗" };
+        let mark = if (n.abs() < 0.5 && b.abs() < 0.5) || n.signum() == b.signum() {
+            "✓"
+        } else {
+            "✗"
+        };
         println!("{}  w[{:02}]  {:>12.2}  {:>12.2}", mark, i, n, b);
     }
 
@@ -125,7 +130,7 @@ fn test_grad_check_linear_sign_agreement() {
 #[test]
 fn test_grad_check_linear_magnitude() {
     let mut layer = Linear::new(3, 3, 0);
-    let mut rng   = XorShift64::new(77);
+    let mut rng = XorShift64::new(77);
     for w in layer.weights.master.data.iter_mut() {
         *w = (rng.gen_range(30) as i32) - 15;
     }
@@ -133,26 +138,33 @@ fn test_grad_check_linear_magnitude() {
     let input = Tensor::from_vec(vec![20i8, -15, 10], vec![1, 3]);
     let pairs = gradient_check_linear(&mut layer, &input, 4, 55);
 
-    let meaningful: Vec<_> = pairs.iter()
+    let meaningful: Vec<_> = pairs
+        .iter()
         .filter(|(n, b)| n.abs() > 1.0 && b.abs() > 1.0)
         .collect();
 
-    let within_4x = meaningful.iter()
+    let within_4x = meaningful
+        .iter()
         .filter(|(n, b)| {
             let ratio = n.abs() / b.abs();
             ratio > 0.25 && ratio < 4.0
         })
         .count();
 
-    println!("\nMagnitude check: {}/{} meaningful pairs within 4×",
-             within_4x, meaningful.len());
+    println!(
+        "\nMagnitude check: {}/{} meaningful pairs within 4×",
+        within_4x,
+        meaningful.len()
+    );
 
     if meaningful.len() >= 3 {
         let rate = within_4x as f64 / meaningful.len() as f64;
         assert!(
             rate >= 0.70,
             "Magnitude agreement too low: {}/{} within 4× ({:.0}%)",
-            within_4x, meaningful.len(), rate * 100.0
+            within_4x,
+            meaningful.len(),
+            rate * 100.0
         );
     }
 }
@@ -170,33 +182,33 @@ fn test_grad_check_update_direction() {
     layer.weights.master.data[0] = 4;
 
     let mut rng = XorShift64::new(42);
-    let optim   = SGDConfig::new(2, None); // lr_shift=2, divide by 4
-    let x       = Tensor::from_vec(vec![2i8], vec![1, 1]);
-    let target  = 4i16;
+    let optim = SGDConfig::new(2, None); // lr_shift=2, divide by 4
+    let x = Tensor::from_vec(vec![2i8], vec![1, 1]);
+    let target = 4i16;
 
     layer.sync_weights(&mut rng);
-    let mut rng2     = XorShift64::new(42);
-    let pred_before  = layer.forward(&x, &mut rng2);
+    let mut rng2 = XorShift64::new(42);
+    let pred_before = layer.forward(&x, &mut rng2);
     let error_before = pred_before.data[0] as i16 - target;
-    let loss_before  = (error_before as i32).pow(2);
+    let loss_before = (error_before as i32).pow(2);
 
     let grad = Tensor::from_vec(vec![error_before], vec![1, 1]);
     layer.backward(&grad, Some(0));
     layer.step(&optim);
 
     layer.sync_weights(&mut rng2);
-    let pred_after  = layer.forward(&x, &mut rng2);
+    let pred_after = layer.forward(&x, &mut rng2);
     let error_after = pred_after.data[0] as i16 - target;
-    let loss_after  = (error_after as i32).pow(2);
+    let loss_after = (error_after as i32).pow(2);
 
     println!("Update direction: loss {} → {}", loss_before, loss_after);
     assert!(
         loss_after < loss_before,
         "Loss increased after update ({} → {}) — update direction is wrong",
-        loss_before, loss_after
+        loss_before,
+        loss_after
     );
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // §2  COPY TASKS
@@ -214,13 +226,13 @@ fn test_grad_check_update_direction() {
 //   delayed copy cannot.
 // ═══════════════════════════════════════════════════════════════════════════════
 fn train_copy_task(
-    delay:      usize,
-    seq_len:    usize,
+    delay: usize,
+    seq_len: usize,
     hidden_dim: usize,
-    epochs:     usize,
-    seed:       u64,
+    epochs: usize,
+    seed: u64,
 ) -> (i64, i64, Vec<i8>) {
-    let mut rng       = XorShift64::new(seed);
+    let mut rng = XorShift64::new(seed);
     let mut quant_rng = XorShift64::new(seed + 1000);
     let scale_shift = 6;
 
@@ -228,28 +240,31 @@ fn train_copy_task(
         .map(|i| ((i * 17 + 3) % 41) as i8 - 20)
         .collect();
 
-    let mut rnn  = RNNCell::new(1, hidden_dim, scale_shift);
+    let mut rnn = RNNCell::new(1, hidden_dim, scale_shift);
     let mut head = Linear::new(hidden_dim, 1, scale_shift);
-    println!("RNNCell::new(1, {}, {})\nLinear::new({}, 1, {})", hidden_dim, scale_shift, hidden_dim, scale_shift );
+    println!(
+        "RNNCell::new(1, {}, {})\nLinear::new({}, 1, {})",
+        hidden_dim, scale_shift, hidden_dim, scale_shift
+    );
     rnn.init_weights(&mut rng);
     head.init_xavier(&mut rng);
 
     // FIX 1: Dial back the learning rate so the integer weights don't explode
-    let optim = AdamConfig::new(5); 
-    
-    let mut first  = 0i64;
-    let mut last   = 0i64;
+    let optim = AdamConfig::new(5);
+
+    let mut first = 0i64;
+    let mut last = 0i64;
 
     let criterion = MSE;
 
     for epoch in 0..epochs {
         rnn.sync_weights(&mut quant_rng);
         head.sync_weights(&mut quant_rng);
-        rnn.reset_state(); 
+        rnn.reset_state();
 
         let mut epoch_loss = 0i64;
         let mut grads = Vec::with_capacity(seq_len);
-        // FORWARD PASS 
+        // FORWARD PASS
         for t in 0..seq_len {
             let x_t = Tensor::from_vec(vec![seq[t]], vec![1, 1]);
             let h_t = rnn.forward(&x_t, &mut rng);
@@ -268,21 +283,24 @@ fn train_copy_task(
             }
         }
 
-
         //println!("Epoch loss: {}", epoch_loss);
 
         // BACKWARD PASS
-        for t in (0..seq_len).rev() { 
-            let g  = &grads[t];
-            let gh = head.backward(&g, Some(0)); 
-            rnn.backward(&gh, Some(0));          
+        for t in (0..seq_len).rev() {
+            let g = &grads[t];
+            let gh = head.backward(&g, Some(0));
+            rnn.backward(&gh, Some(0));
         }
-        
+
         head.step(&optim);
         rnn.step(&optim);
 
-        if epoch == 0          { first = epoch_loss; }
-        if epoch == epochs - 1 { last  = epoch_loss; }
+        if epoch == 0 {
+            first = epoch_loss;
+        }
+        if epoch == epochs - 1 {
+            last = epoch_loss;
+        }
     }
 
     (first, last, seq)
@@ -293,9 +311,22 @@ fn test_copy_task_1_step() {
     let (first, last, seq) = train_copy_task(0, 32, 8, 500, 42);
     let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
 
-    println!("1-step copy: first={} last={} baseline={}", first, last, baseline);
-    assert!(last < first,    "Loss did not decrease: first={} last={}", first, last);
-    assert!(last < baseline, "Did not beat trivial baseline: last={} baseline={}", last, baseline);
+    println!(
+        "1-step copy: first={} last={} baseline={}",
+        first, last, baseline
+    );
+    assert!(
+        last < first,
+        "Loss did not decrease: first={} last={}",
+        first,
+        last
+    );
+    assert!(
+        last < baseline,
+        "Did not beat trivial baseline: last={} baseline={}",
+        last,
+        baseline
+    );
 }
 
 #[test]
@@ -303,9 +334,22 @@ fn test_copy_task_4_step_delay() {
     let (first, last, seq) = train_copy_task(4, 48, 8, 500, 42);
     let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
 
-    println!("4-step delayed copy: first={} last={} baseline={}", first, last, baseline);
-    assert!(last < first,    "Loss did not decrease: first={} last={}", first, last);
-    assert!(last < baseline, "Did not beat trivial baseline: last={} baseline={}", last, baseline);
+    println!(
+        "4-step delayed copy: first={} last={} baseline={}",
+        first, last, baseline
+    );
+    assert!(
+        last < first,
+        "Loss did not decrease: first={} last={}",
+        first,
+        last
+    );
+    assert!(
+        last < baseline,
+        "Did not beat trivial baseline: last={} baseline={}",
+        last,
+        baseline
+    );
 }
 
 #[test]
@@ -315,17 +359,24 @@ fn test_copy_task_delay_scaling() {
     let mut results = Vec::new();
 
     for &delay in &[1usize, 2, 4] {
-        let seq_len    = delay * 16 + 8;
+        let seq_len = delay * 16 + 8;
         let hidden_dim = (delay * 6 + 4).max(8);
-        let epochs     = 600 + delay * 150;
+        let epochs = 600 + delay * 150;
 
         let (first, last, seq) = train_copy_task(delay, seq_len, hidden_dim, epochs, 77);
-        let active        = seq_len - delay;
+        let active = seq_len - delay;
         let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
 
-        println!("delay={}: first={} last={} baseline={}", delay, first, last, baseline);
-        assert!(last < first,    "delay={}: loss did not decrease", delay);
-        assert!(last < baseline, "delay={}: did not beat trivial baseline", delay);
+        println!(
+            "delay={}: first={} last={} baseline={}",
+            delay, first, last, baseline
+        );
+        assert!(last < first, "delay={}: loss did not decrease", delay);
+        assert!(
+            last < baseline,
+            "delay={}: did not beat trivial baseline",
+            delay
+        );
         results.push(last);
     }
 
@@ -337,7 +388,6 @@ fn test_copy_task_delay_scaling() {
         ratio
     );
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // §3  TRAINING DIAGNOSTICS
@@ -361,19 +411,19 @@ fn test_copy_task_delay_scaling() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct EpochDiag {
-    loss:               i64,
+    loss: i64,
     weight_change_rate: f64,
-    tanh_sat_rate:      f64,
+    tanh_sat_rate: f64,
 }
 
 fn run_one_epoch(
-    rnn:          &mut RNNCell,
-    head:         &mut Linear,
-    samples:      &[i8],
-    seq_len:      usize,
-    rng:          &mut XorShift64,
-    quant_rng:    &mut XorShift64,
-    optim:        &AdamConfig,
+    rnn: &mut RNNCell,
+    head: &mut Linear,
+    samples: &[i8],
+    seq_len: usize,
+    rng: &mut XorShift64,
+    quant_rng: &mut XorShift64,
+    optim: &AdamConfig,
     prev_weights: &[i32],
 ) -> EpochDiag {
     rnn.sync_weights(quant_rng);
@@ -381,30 +431,30 @@ fn run_one_epoch(
     rnn.reset_state();
 
     let mut epoch_loss = 0i64;
-    let mut sat_sum    = 0.0f64;
-    let mut steps      = 0usize;
+    let mut sat_sum = 0.0f64;
+    let mut steps = 0usize;
     let mut errors = Vec::with_capacity(seq_len);
 
     // FORWARD PASS
     for t in 0..(seq_len - 1) {
-        let x_t    = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
+        let x_t = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
         let target = samples[t + 1] as i16;
 
         let h_t = rnn.forward(&x_t, rng);
 
-        let sat = h_t.data.iter().filter(|&&x| x.abs() > 120).count() as f64
-                  / h_t.data.len() as f64;
+        let sat =
+            h_t.data.iter().filter(|&&x| x.abs() > 120).count() as f64 / h_t.data.len() as f64;
         sat_sum += sat;
 
-        let pred  = head.forward(&h_t, rng);
+        let pred = head.forward(&h_t, rng);
         let error = (pred.data[0] as i16 - target).clamp(-127, 127);
         epoch_loss += (error as i64) * (error as i64);
         errors.push(error);
     }
-    
+
     // BACKWARD PASS
     for t in (0..errors.len()).rev() {
-        let g  = Tensor::from_vec(vec![errors[t]], vec![1, 1]);
+        let g = Tensor::from_vec(vec![errors[t]], vec![1, 1]);
         let gh = head.backward(&g, Some(0));
         rnn.backward(&gh, Some(0));
     }
@@ -412,13 +462,21 @@ fn run_one_epoch(
     head.step(optim);
     rnn.step(optim);
 
-    let curr    = &rnn.w_ih.weights.master.data;
-    let changed = curr.iter().zip(prev_weights).filter(|(a, b)| a != b).count();
+    let curr = &rnn.w_ih.weights.master.data;
+    let changed = curr
+        .iter()
+        .zip(prev_weights)
+        .filter(|(a, b)| a != b)
+        .count();
 
     EpochDiag {
-        loss:               epoch_loss,
+        loss: epoch_loss,
         weight_change_rate: changed as f64 / curr.len() as f64,
-        tanh_sat_rate:      if steps > 0 { sat_sum / steps as f64 } else { 0.0 },
+        tanh_sat_rate: if steps > 0 {
+            sat_sum / steps as f64
+        } else {
+            0.0
+        },
     }
 }
 
@@ -427,42 +485,61 @@ fn test_diagnostics_weight_change_rate() {
     use std::f64::consts::PI;
 
     const SEQ_LEN: usize = 64;
-    const EPOCHS:  usize = 200;
+    const EPOCHS: usize = 200;
 
-    let mut rng       = XorShift64::new(42);
+    let mut rng = XorShift64::new(42);
     let mut quant_rng = XorShift64::new(99);
     let samples: Vec<i8> = (0..=SEQ_LEN)
-        .map(|t| ((2.0 * PI * t as f64 / SEQ_LEN as f64).sin() * 80.0)
-            .round().clamp(-128.0, 127.0) as i8)
+        .map(|t| {
+            ((2.0 * PI * t as f64 / SEQ_LEN as f64).sin() * 80.0)
+                .round()
+                .clamp(-128.0, 127.0) as i8
+        })
         .collect();
 
-    let mut rnn  = RNNCell::new(1, 8, 2);
+    let mut rnn = RNNCell::new(1, 8, 2);
     let mut head = Linear::new(8, 1, 2);
     rnn.init_weights(&mut rng);
     head.init_xavier(&mut rng);
 
     let optim = AdamConfig::new(4);
-    let mut prev  = rnn.w_ih.weights.master.data.clone();
+    let mut prev = rnn.w_ih.weights.master.data.clone();
     let mut diags = Vec::with_capacity(EPOCHS);
 
     for _ in 0..EPOCHS {
         let d = run_one_epoch(
-            &mut rnn, &mut head, &samples, SEQ_LEN,
-            &mut rng, &mut quant_rng, &optim, &prev,
+            &mut rnn,
+            &mut head,
+            &samples,
+            SEQ_LEN,
+            &mut rng,
+            &mut quant_rng,
+            &optim,
+            &prev,
         );
         prev = rnn.w_ih.weights.master.data.clone();
         diags.push(d);
     }
 
-    println!("\n{:>6} {:>12} {:>14} {:>14}",
-             "epoch", "loss", "wt_change%", "tanh_sat%");
+    println!(
+        "\n{:>6} {:>12} {:>14} {:>14}",
+        "epoch", "loss", "wt_change%", "tanh_sat%"
+    );
     for (i, d) in diags.iter().enumerate().step_by(50) {
-        println!("{:>6} {:>12} {:>13.1}% {:>13.1}%",
-                 i, d.loss, d.weight_change_rate * 100.0, d.tanh_sat_rate * 100.0);
+        println!(
+            "{:>6} {:>12} {:>13.1}% {:>13.1}%",
+            i,
+            d.loss,
+            d.weight_change_rate * 100.0,
+            d.tanh_sat_rate * 100.0
+        );
     }
 
-    let early_change = diags[..10].iter()
-        .map(|d| d.weight_change_rate).sum::<f64>() / 10.0;
+    let early_change = diags[..10]
+        .iter()
+        .map(|d| d.weight_change_rate)
+        .sum::<f64>()
+        / 10.0;
     assert!(
         early_change > 0.10,
         "Early weight change rate {:.1}% — gradients may be zero",
@@ -482,28 +559,37 @@ fn test_diagnostics_loss_variance_at_convergence() {
     use std::f64::consts::PI;
 
     const SEQ_LEN: usize = 64;
-    const EPOCHS:  usize = 400;
+    const EPOCHS: usize = 400;
 
-    let mut rng       = XorShift64::new(42);
+    let mut rng = XorShift64::new(42);
     let mut quant_rng = XorShift64::new(99);
     let samples: Vec<i8> = (0..=SEQ_LEN)
-        .map(|t| ((2.0 * PI * t as f64 / SEQ_LEN as f64).sin() * 80.0)
-            .round().clamp(-128.0, 127.0) as i8)
+        .map(|t| {
+            ((2.0 * PI * t as f64 / SEQ_LEN as f64).sin() * 80.0)
+                .round()
+                .clamp(-128.0, 127.0) as i8
+        })
         .collect();
 
-    let mut rnn  = RNNCell::new(1, 8, 2);
+    let mut rnn = RNNCell::new(1, 8, 2);
     let mut head = Linear::new(8, 1, 2);
     rnn.init_weights(&mut rng);
     head.init_xavier(&mut rng);
 
-    let optim  = AdamConfig::new(2);
-    let mut prev   = rnn.w_ih.weights.master.data.clone();
+    let optim = AdamConfig::new(2);
+    let mut prev = rnn.w_ih.weights.master.data.clone();
     let mut losses = Vec::with_capacity(EPOCHS);
 
     for _ in 0..EPOCHS {
         let d = run_one_epoch(
-            &mut rnn, &mut head, &samples, SEQ_LEN,
-            &mut rng, &mut quant_rng, &optim, &prev,
+            &mut rnn,
+            &mut head,
+            &samples,
+            SEQ_LEN,
+            &mut rng,
+            &mut quant_rng,
+            &optim,
+            &prev,
         );
         prev = rnn.w_ih.weights.master.data.clone();
         losses.push(d.loss);
@@ -511,21 +597,31 @@ fn test_diagnostics_loss_variance_at_convergence() {
 
     let window = &losses[losses.len() - 20..];
     let mean: f64 = window.iter().sum::<i64>() as f64 / window.len() as f64;
-    let var: f64  = window.iter()
-        .map(|&l| { let d = l as f64 - mean; d * d })
-        .sum::<f64>() / window.len() as f64;
+    let var: f64 = window
+        .iter()
+        .map(|&l| {
+            let d = l as f64 - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / window.len() as f64;
     let cv = var.sqrt() / mean;
 
-    println!("\nFinal 20 epochs — mean: {:.0}  stddev: {:.0}  CV: {:.3}",
-             mean, var.sqrt(), cv);
+    println!(
+        "\nFinal 20 epochs — mean: {:.0}  stddev: {:.0}  CV: {:.3}",
+        mean,
+        var.sqrt(),
+        cv
+    );
 
     assert!(
         cv < 0.50,
         "Loss CV too high at convergence: {:.2} (stddev={:.0} mean={:.0})",
-        cv, var.sqrt(), mean
+        cv,
+        var.sqrt(),
+        mean
     );
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // §4  SCALE READINESS CHECKLIST
@@ -550,120 +646,157 @@ fn test_scale_readiness_checklist() {
     // [1] Gradient sign agreement
     {
         let mut layer = Linear::new(4, 4, 0);
-        let mut rng   = XorShift64::new(42);
+        let mut rng = XorShift64::new(42);
         for w in layer.weights.master.data.iter_mut() {
             // Lower scale to prevent integer saturation hitting bounds
-            *w = (rng.gen_range(10) as i32) - 5; 
+            *w = (rng.gen_range(10) as i32) - 5;
         }
-        let input    = Tensor::from_vec(vec![4i8, -2, 3, -1], vec![1, 4]);
-        let pairs    = gradient_check_linear(&mut layer, &input, 4, 123);
-        let total    = pairs.len();
-        let agreeing = pairs.iter()
+        let input = Tensor::from_vec(vec![4i8, -2, 3, -1], vec![1, 4]);
+        let pairs = gradient_check_linear(&mut layer, &input, 4, 123);
+        let total = pairs.len();
+        let agreeing = pairs
+            .iter()
             .filter(|(n, b)| {
-                if n.abs() < 0.5 && b.abs() < 0.5 { return true; }
+                if n.abs() < 0.5 && b.abs() < 0.5 {
+                    return true;
+                }
                 n.signum() == b.signum()
             })
             .count();
         let rate = agreeing as f64 / total as f64;
-        report.push(("Gradient sign agreement ≥80%", rate >= 0.80,
-                     format!("{:.0}% ({}/{})", rate * 100.0, agreeing, total)));
+        report.push((
+            "Gradient sign agreement ≥80%",
+            rate >= 0.80,
+            format!("{:.0}% ({}/{})", rate * 100.0, agreeing, total),
+        ));
     }
 
     // [2] Update direction
     {
         let mut layer = Linear::new(1, 1, 0);
         layer.weights.master.data[0] = 4; // Drop from 50 to prevent 50 * 10 = 500 clamping to 127
-        let mut rng   = XorShift64::new(42);
-        let optim     = SGDConfig::new(2, None);
-        let x         = Tensor::from_vec(vec![2i8], vec![1, 1]);
-        let target    = 4i16;
+        let mut rng = XorShift64::new(42);
+        let optim = SGDConfig::new(2, None);
+        let x = Tensor::from_vec(vec![2i8], vec![1, 1]);
+        let target = 4i16;
 
         layer.sync_weights(&mut rng);
-        let mut rng2     = XorShift64::new(42);
-        let pred_before  = layer.forward(&x, &mut rng2);
+        let mut rng2 = XorShift64::new(42);
+        let pred_before = layer.forward(&x, &mut rng2);
         let error_before = pred_before.data[0] as i16 - target;
-        let loss_before  = (error_before as i32).pow(2);
+        let loss_before = (error_before as i32).pow(2);
 
         let grad = Tensor::from_vec(vec![error_before], vec![1, 1]);
         layer.backward(&grad, Some(0));
         layer.step(&optim);
         layer.sync_weights(&mut rng2);
-        let pred_after  = layer.forward(&x, &mut rng2);
+        let pred_after = layer.forward(&x, &mut rng2);
         let error_after = pred_after.data[0] as i16 - target;
-        let loss_after  = (error_after as i32).pow(2);
+        let loss_after = (error_after as i32).pow(2);
 
-        report.push(("Update direction correct (y=2x)", loss_after < loss_before,
-                     format!("loss {} → {}", loss_before, loss_after)));
+        report.push((
+            "Update direction correct (y=2x)",
+            loss_after < loss_before,
+            format!("loss {} → {}", loss_before, loss_after),
+        ));
     }
 
     // [3] 1-step copy
     {
         let (first, last, seq) = train_copy_task(0, 32, 8, 500, 42);
         let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
-        report.push(("1-step copy task converges",
-                     last < first && last < baseline,
-                     format!("first={} last={} baseline={}", first, last, baseline)));
+        report.push((
+            "1-step copy task converges",
+            last < first && last < baseline,
+            format!("first={} last={} baseline={}", first, last, baseline),
+        ));
     }
 
     // [4] 4-step delayed copy
     {
         let (first, last, seq) = train_copy_task(4, 48, 8, 500, 42);
         let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
-        report.push(("4-step delayed copy converges",
-                     last < first && last < baseline,
-                     format!("first={} last={} baseline={}", first, last, baseline)));
+        report.push((
+            "4-step delayed copy converges",
+            last < first && last < baseline,
+            format!("first={} last={} baseline={}", first, last, baseline),
+        ));
     }
 
     // [5]+[6]+[7] training health
     {
         const SEQ_LEN: usize = 64;
-        const EPOCHS:  usize = 200;
+        const EPOCHS: usize = 200;
 
-        let mut rng       = XorShift64::new(42);
+        let mut rng = XorShift64::new(42);
         let mut quant_rng = XorShift64::new(99);
         let samples: Vec<i8> = (0..=SEQ_LEN)
-            .map(|t| ((2.0 * PI * t as f64 / SEQ_LEN as f64).sin() * 80.0)
-                .round().clamp(-128.0, 127.0) as i8)
+            .map(|t| {
+                ((2.0 * PI * t as f64 / SEQ_LEN as f64).sin() * 80.0)
+                    .round()
+                    .clamp(-128.0, 127.0) as i8
+            })
             .collect();
 
-        let mut rnn  = RNNCell::new(1, 8, 2);
+        let mut rnn = RNNCell::new(1, 8, 2);
         let mut head = Linear::new(8, 1, 2);
         rnn.init_weights(&mut rng);
         head.init_xavier(&mut rng);
 
-        let optim  = AdamConfig::new(2);
-        let mut prev  = rnn.w_ih.weights.master.data.clone();
+        let optim = AdamConfig::new(2);
+        let mut prev = rnn.w_ih.weights.master.data.clone();
         let mut diags = Vec::with_capacity(EPOCHS);
 
         for _ in 0..EPOCHS {
             let d = run_one_epoch(
-                &mut rnn, &mut head, &samples, SEQ_LEN,
-                &mut rng, &mut quant_rng, &optim, &prev,
+                &mut rnn,
+                &mut head,
+                &samples,
+                SEQ_LEN,
+                &mut rng,
+                &mut quant_rng,
+                &optim,
+                &prev,
             );
             prev = rnn.w_ih.weights.master.data.clone();
             diags.push(d);
         }
 
-        let early_change = diags[..10].iter()
-            .map(|d| d.weight_change_rate).sum::<f64>() / 10.0;
-        report.push(("Weight change rate >10% early",
-                     early_change > 0.10,
-                     format!("{:.1}%", early_change * 100.0)));
+        let early_change = diags[..10]
+            .iter()
+            .map(|d| d.weight_change_rate)
+            .sum::<f64>()
+            / 10.0;
+        report.push((
+            "Weight change rate >10% early",
+            early_change > 0.10,
+            format!("{:.1}%", early_change * 100.0),
+        ));
 
         let max_sat = diags.iter().map(|d| d.tanh_sat_rate).fold(0.0f64, f64::max);
-        report.push(("Tanh saturation <50% throughout",
-                     max_sat < 0.50,
-                     format!("peak {:.1}%", max_sat * 100.0)));
+        report.push((
+            "Tanh saturation <50% throughout",
+            max_sat < 0.50,
+            format!("peak {:.1}%", max_sat * 100.0),
+        ));
 
         let losses: Vec<i64> = diags.iter().map(|d| d.loss).collect();
         let window = &losses[losses.len() - 20..];
         let mean: f64 = window.iter().sum::<i64>() as f64 / window.len() as f64;
-        let var: f64  = window.iter()
-            .map(|&l| { let d = l as f64 - mean; d * d })
-            .sum::<f64>() / window.len() as f64;
+        let var: f64 = window
+            .iter()
+            .map(|&l| {
+                let d = l as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / window.len() as f64;
         let cv = var.sqrt() / mean;
-        report.push(("Loss CV <50% at convergence", cv < 0.50,
-                     format!("CV={:.2}", cv)));
+        report.push((
+            "Loss CV <50% at convergence",
+            cv < 0.50,
+            format!("CV={:.2}", cv),
+        ));
     }
 
     // Print report
@@ -675,7 +808,9 @@ fn test_scale_readiness_checklist() {
     for (name, passed, detail) in &report {
         let mark = if *passed { "✓" } else { "✗" };
         println!("║  {}  {:<40}  {:<14} ║", mark, name, detail);
-        if !passed { all_passed = false; }
+        if !passed {
+            all_passed = false;
+        }
     }
     println!("╠═════════════════════════════════════════════════════════════════╣");
     let verdict = if all_passed {
@@ -691,10 +826,11 @@ fn test_scale_readiness_checklist() {
     assert!(
         failed.is_empty(),
         "Scale readiness failed:\n{}",
-        failed.iter()
-              .map(|(name, _, detail)| format!("  ✗ {} ({})", name, detail))
-              .collect::<Vec<_>>()
-              .join("\n")
+        failed
+            .iter()
+            .map(|(name, _, detail)| format!("  ✗ {} ({})", name, detail))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
@@ -703,7 +839,7 @@ fn test_fully_deterministic_bptt_step() {
     // 1. Setup exact, noise-free environment
     let mut rng = XorShift64::new(42);
     let mut optim = SGDConfig::new(0, None); // No momentum, no LR shift (lr=1)
-    
+
     // 2. Initialize layer with shift=0 (exact integer math)
     let hidden_dim = 2;
     let mut rnn = RNNCell::new(1, hidden_dim, 0);
@@ -713,7 +849,7 @@ fn test_fully_deterministic_bptt_step() {
     // RNN W_ih: [1, -1]
     rnn.w_ih.weights.master.data = vec![1, -1];
     rnn.w_ih.weights.storage.data = vec![1, -1];
-    
+
     // RNN W_hh: [1, 0, 0, 1] (Identity matrix)
     rnn.w_hh.weights.master.data = vec![1, 0, 0, 1];
     rnn.w_hh.weights.storage.data = vec![1, 0, 0, 1];
@@ -721,26 +857,30 @@ fn test_fully_deterministic_bptt_step() {
     // Head Weights: [1, 1]
     head.weights.master.data = vec![1, 1];
     head.weights.storage.data = vec![1, 1];
-    
+
     // Zero biases
-    for b in rnn.w_ih.bias.master.data.iter_mut() { *b = 0; }
-    for b in head.bias.master.data.iter_mut() { *b = 0; }
+    for b in rnn.w_ih.bias.master.data.iter_mut() {
+        *b = 0;
+    }
+    for b in head.bias.master.data.iter_mut() {
+        *b = 0;
+    }
 
     rnn.reset_state();
 
     // 4. Run a single Forward step
     // Input: x_t = 10
     let x_t = Tensor::from_vec(vec![10], vec![1, 1]);
-    
+
     // w_ih * x_t = [10, -10]
     // w_hh * h_prev = [0, 0] (since h_prev is initialized to 0)
     // comb = [10, -10]
-    // h_t = tanh([10, -10]). Look up in tanh_i8 LUT. 
+    // h_t = tanh([10, -10]). Look up in tanh_i8 LUT.
     let h_t = rnn.forward(&x_t, &mut rng);
     println!("Deterministic h_t: {:?}", h_t.data);
 
     assert_eq!(h_t.data, vec![10, -10]);
-    
+
     // pred = head(h_t) = sum(h_t) = 10 + -10 = 0
     let pred = head.forward(&h_t, &mut rng);
     println!("Deterministic pred: {:?}", pred.data);
@@ -757,11 +897,11 @@ fn test_fully_deterministic_bptt_step() {
 
     // 6. Run Backward Pass
     let g = Tensor::from_vec(vec![error], vec![1, 1]);
-    
+
     // Step-by-step backward traces
     let d_head = head.backward(&g, Some(0));
     println!("Gradient into RNN (d_head): {:?}", d_head.data);
-    
+
     let d_rnn = rnn.backward(&d_head, Some(0));
     println!("Gradient of input (d_rnn): {:?}", d_rnn.data);
 
@@ -773,7 +913,10 @@ fn test_fully_deterministic_bptt_step() {
     // to lock in the backward pass behavior forever.
     assert!(head.weights.grads.is_some());
     // e.g., assert_eq!(head.weights.grads.unwrap().data, vec![expected_val1, expected_val2]);
-    assert_eq!(head.weights.grads.unwrap().data, vec![expected_val1, expected_val2]);
+    assert_eq!(
+        head.weights.grads.unwrap().data,
+        vec![expected_val1, expected_val2]
+    );
     assert_eq!(d_head.data, vec![-5, -5]);
     assert_eq!(d_rnn.data, vec![0]);
 }
