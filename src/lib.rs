@@ -55,7 +55,7 @@ where T: Clone + Copy + fmt::Debug + Default
         assert_eq!(
             data.len(),
             expected,
-            "Shape {:?} does not match data len {}",
+            "Tensor::from_vec: Shape {:?} does not match data len {}",
             shape,
             data.len()
         );
@@ -414,7 +414,7 @@ pub struct Linear {
 
     pub weights: Params,
     pub bias: Params,
-    pub cache: Option<Tensor<i8>>,
+    pub cache: Vec<Tensor<i8>>,
 }
 
 impl Linear {
@@ -422,7 +422,7 @@ impl Linear {
         Self {
             weights: Params::new(vec![output_dim, input_dim], scale_shift),
             bias: Params::new(vec![output_dim], scale_shift),
-            cache: None,
+            cache: Vec::new(),
         }
     }
 
@@ -441,12 +441,12 @@ impl Module for Linear {
     }
 
     fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
-        assert_eq!(input.shape[1], self.weights.storage.shape[1], "Input in wrong dimension for weights! {} vs {}", input.shape[1], self.weights.storage.shape[1]);
+        assert_eq!(input.shape[1], self.weights.storage.shape[1], "Linear::forward: Input in wrong dimension for weights! {} vs {}", input.shape[1], self.weights.storage.shape[1]);
         let batch      = input.shape[0];
         let input_dim  = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
 
-        self.cache = Some(input.clone());
+        self.cache.push(input.clone());
         let mut out = Tensor::new(vec![batch, output_dim]);
 
         for b in 0..batch {
@@ -468,11 +468,14 @@ impl Module for Linear {
     }
 
     fn backward(&mut self, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
-        let input      = self.cache.as_ref().expect("Backward called without forward");
+        let input      = self.cache.pop().expect("Backward called without forward");
         let batch      = input.shape[0];
         let input_dim  = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
         let gshift     = gradient_shift.unwrap_or(8);
+        
+        // Mathematically required for the chain rule:
+        let wshift     = self.weights.shift; 
 
         let mut grad_input   = Tensor::<i16>::new(vec![batch, input_dim]);
         let mut grad_weights = Tensor::<i16>::new(vec![output_dim, input_dim]);
@@ -481,19 +484,25 @@ impl Module for Linear {
         for b in 0..batch {
             for o in 0..output_dim {
                 let g = grad_output.data[b * output_dim + o];
-                grad_bias.data[o] = grad_bias.data[o].wrapping_add(g);
                 if g == 0 { continue; }
+
+                // Bias update is an accumulator, so apply gshift
+                let g_shifted = if gshift > 0 { g >> gshift } else { g };
+                grad_bias.data[o] = grad_bias.data[o].saturating_add(g_shifted);
 
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
                     let dw = kernels::mul_mixed_scalar(g, x);
+                    // Weight update is an accumulator, so apply gshift
                     grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i]
-                        .wrapping_add((dw >> gshift) as i16);
+                        .saturating_add((dw >> gshift) as i16);
 
                     let w = self.weights.storage.data[o * input_dim + i];
                     let dx = kernels::mul_mixed_scalar(g, w);
+                    
+                    // Input gradient flows back through the network, apply wshift!
                     grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i]
-                        .wrapping_add((dx >> gshift) as i16);
+                        .saturating_add((dx >> wshift) as i16);
                 }
             }
         }
@@ -510,7 +519,7 @@ impl Module for Linear {
 
     fn memory_report(&self) -> (usize, usize) {
         let stat = self.weights.memory_bytes() + self.bias.memory_bytes();
-        let dyn_ = self.cache.as_ref().map_or(0, |t| t.memory_bytes());
+        let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
         (stat, dyn_)
     }
 
@@ -527,16 +536,16 @@ impl Module for Linear {
 }
 
 pub struct ReLU {
-    pub cache: Option<Tensor<i8>>,
+    pub cache: Vec<Tensor<i8>>,
 }
 
 impl ReLU {
-    pub fn new() -> Self { Self { cache: None } }
+    pub fn new() -> Self { Self { cache: Vec::new() } }
 }
 
 impl Module for ReLU {
     fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
-        self.cache = Some(input.clone());
+        self.cache.push(input.clone());
         let mut output = Tensor::<i8>::new(input.shape.clone());
         for idx in 0..input.data.len() {
             output.data[idx] = if input.data[idx] > 0 { input.data[idx] } else { 0 };
@@ -544,7 +553,7 @@ impl Module for ReLU {
         output
     }
     fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
-        let input = self.cache.as_ref().expect("No state registered. Perform forward pass first!");
+        let input = self.cache.pop().expect("ReLU::backward: No state registered. Perform forward pass first!");
         let mut output = Tensor::<i16>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
             output.data[o] = if input.data[o] > 0 { grad_output.data[o] } else { 0 };
@@ -552,10 +561,8 @@ impl Module for ReLU {
         output
     }
     fn memory_report(&self) -> (usize, usize) {
-        match self.cache.as_ref() {
-            Some(cache) => ( 0, cache.memory_bytes() ),
-            None => ( 0, 0 )
-        }
+        let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
+        (0, dyn_)
     }
 
     fn describe(&self) -> ModuleInfo {
@@ -563,13 +570,13 @@ impl Module for ReLU {
     }
 }
 
-pub struct Tanh { cache: Option<Tensor<i8>> }
+pub struct Tanh { cache: Vec<Tensor<i8>> }
 
-impl Tanh { pub fn new() -> Self { Self { cache: None } } }
+impl Tanh { pub fn new() -> Self { Self { cache: Vec::new() } } }
 
 impl Module for Tanh {
     fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
-        self.cache = Some(input.clone());
+        self.cache.push(input.clone());
         let mut output = Tensor::<i8>::new(input.shape.clone());
         for (o, &x) in output.data.iter_mut().zip(&input.data) {
             *o = kernels::tanh_i8(x);
@@ -577,20 +584,18 @@ impl Module for Tanh {
         output
     }
     fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
-        let input = self.cache.as_ref().expect("No state registered. Perform forward pass first!");
+        let input = self.cache.pop().expect("Tanh::backward: No state registered. Perform forward pass first!");
         let mut output = Tensor::<i16>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
             let t = kernels::tanh_i8(input.data[o]) as i32;
             let dtanh = (127 * 127 - t * t) / 127;
-            output.data[o] = ((grad_output.data[o] as i32 * dtanh) >> 7).clamp(-32768, 32767) as i16;
+            output.data[o] = ((grad_output.data[o] as i32 * dtanh) / 128).clamp(-32768, 32767) as i16;
         }
         output
     }
     fn memory_report(&self) -> (usize, usize) {
-        match self.cache.as_ref() {
-            Some(cache) => ( 0, cache.memory_bytes() ),
-            None => ( 0, 0 )
-        }
+        let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
+        (0, dyn_)
     }
 
     fn describe(&self) -> ModuleInfo {
@@ -680,6 +685,10 @@ impl RNNCell {
     pub fn reset_state(&mut self) {
         self.h_prev = None;
         self.d_h_next = None;
+
+        self.w_ih.cache.clear();
+        self.w_hh.cache.clear();
+        self.act.cache.clear();
     }
 
     pub fn init_weights(&mut self, rng: &mut XorShift64){
@@ -841,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "assertion `left == right` failed: Shape [2, 1] does not match data len 3\n  left: 3\n right: 2")]
+    #[should_panic(expected = "assertion `left == right` failed: Tensor::from_vec: Shape [2, 1] does not match data len 3\n  left: 3\n right: 2")]
     fn test_tensor_from_vec_wrong_shape_for_data(){
         let t: Tensor<i32> = Tensor::from_vec(vec![2, 1, 3], vec![2, 1]);
     }
@@ -1045,7 +1054,7 @@ mod tests {
         assert_eq!(lin.weights.storage.len(), 4 * 8);
         assert_eq!(lin.bias.master.len(), 8);
         assert_eq!(lin.weights.shift, 2);
-        assert_eq!(lin.cache, None);
+        assert_eq!(lin.cache, Vec::new());
         assert_eq!(lin.weights.grads, None);
         assert_eq!(lin.bias.grads, None);
     }
@@ -1180,7 +1189,7 @@ mod tests {
         let input = Tensor::new(vec![2, 4]); // [Batch, In]
         let grad_out = Tensor::new(vec![2, 3]); // [Batch, Out]
 
-        lin.cache = Some(input.clone());
+        lin.cache = vec![input.clone()];
 
         let dX = lin.backward(&grad_out, None);
         let dW = lin.weights.grads.unwrap().clone();
@@ -1191,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "assertion `left == right` failed: Input in wrong dimension for weights! 1 vs 2\n  left: 1\n right: 2")]
+    #[should_panic(expected = "assertion `left == right` failed: Linear::forward: Input in wrong dimension for weights! 1 vs 2\n  left: 1\n right: 2")]
     fn test_linear_forward_wrong_dimensional_input(){
         let mut lin = Linear::new(2, 3, 0);
         let mut rng = XorShift64::new(420);
@@ -1330,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "No state registered. Perform forward pass first!")]
+    #[should_panic(expected = "ReLU::backward: No state registered. Perform forward pass first!")]
     fn test_relu_backward_without_forward_call(){
         let mut relu = ReLU::new();
         let mut input = Tensor::<i16>::new(vec![4, 1]);
