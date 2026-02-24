@@ -1,6 +1,6 @@
 use integers::{
     Tensor, Linear, RNNCell, XorShift64,
-    AdamConfig, SGDConfig, Module,
+    AdamConfig, SGDConfig, Module, MSE, Loss,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -235,10 +235,12 @@ fn train_copy_task(
     head.init_xavier(&mut rng);
 
     // FIX 1: Dial back the learning rate so the integer weights don't explode
-    let optim = AdamConfig::new(5); 
+    let optim = AdamConfig::new(4); 
     
     let mut first  = 0i64;
     let mut last   = 0i64;
+
+    let criterion = MSE;
 
     for epoch in 0..epochs {
         rnn.sync_weights(&mut quant_rng);
@@ -246,26 +248,25 @@ fn train_copy_task(
         rnn.reset_state(); 
 
         let mut epoch_loss = 0i64;
-        let mut errors = Vec::with_capacity(seq_len);
-
+        let mut grads = Vec::with_capacity(seq_len);
         // FORWARD PASS 
         for t in 0..seq_len {
             let x_t = Tensor::from_vec(vec![seq[t]], vec![1, 1]);
             let h_t = rnn.forward(&x_t, &mut rng);
 
-            let target = seq[t] as i16;
+            let target = Tensor::from_vec(vec![seq[t]], vec![1, 1]);
             let pred = head.forward(&h_t, &mut rng);
-            let error = (pred.data[0] as i16 - target).clamp(-127, 127);
-            epoch_loss += (error as i64) * (error as i64);
-            errors.push(error);
+            let (loss, grad) = criterion.forward(&pred, &target);
+            epoch_loss += loss as i64;
+            grads.push(grad);
         }
+
 
         //println!("Epoch loss: {}", epoch_loss);
 
         // BACKWARD PASS
         for t in (0..seq_len).rev() { 
-            let g  = Tensor::from_vec(vec![errors[t]], vec![1, 1]);
-            
+            let g  = &grads[t];
             let gh = head.backward(&g, Some(1)); 
             rnn.backward(&gh, Some(1));          
         }
