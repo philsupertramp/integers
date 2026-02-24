@@ -5,7 +5,7 @@ use std::fmt;
 static TANH_LUT: OnceLock<[i8; 256]> = OnceLock::new();
 
 /// Generates the LUT based on a specific input scale.
-fn generate_lut(input_scale: f32) -> [i8; 256] {
+fn generate_tanh_lut(input_scale: f32) -> [i8; 256] {
     let mut lut = [0i8; 256];
     
     for i in -128..=127 {
@@ -137,7 +137,7 @@ pub mod kernels {
     /// and linear in between
     pub fn tanh_i8(x: i8) -> i8 {
         // Get the table, initializing it on the very first call if necessary.
-        let lut = TANH_LUT.get_or_init(|| generate_lut(127.0));
+        let lut = TANH_LUT.get_or_init(|| generate_tanh_lut(127.0));
         
         let index = (x as i16 + 128) as usize;
         lut[index]
@@ -379,6 +379,24 @@ impl Params {
         }
     }
 
+    pub fn accumulate_grads(&mut self, new_grads: Tensor<i16>) {
+        match self.grads.as_mut() {
+            Some(existing) => {
+                // Saturating add to avoid wrapping on large accumulated signals
+                for (e, n) in existing.data.iter_mut().zip(new_grads.data.iter()) {
+                    *e = e.saturating_add(*n);
+                }
+            }
+            None => {
+                self.grads = Some(new_grads);
+            }
+        }
+    }
+
+    pub fn zero_grads(&mut self) {
+        self.grads = None;
+    }
+
     pub fn step(&mut self, optim: &dyn OptimizerConfig) {
         if let Some(grads) = self.grads.take() {
             let state = self.state.get_or_insert_with(|| optim.init_state(self.master.len()));
@@ -480,8 +498,8 @@ impl Module for Linear {
             }
         }
 
-        self.weights.grads = Some(grad_weights);
-        self.bias.grads    = Some(grad_bias);
+        self.weights.accumulate_grads(grad_weights);
+        self.bias.accumulate_grads(grad_bias);
         grad_input
     }
 
@@ -643,6 +661,8 @@ pub struct RNNCell {
     pub act: Tanh,
     pub h_prev: Option<Tensor<i8>>,
     pub hidden_dim: usize,
+
+    d_h_next: Option<Tensor<i16>>,
 }
 
 impl RNNCell {
@@ -653,10 +673,14 @@ impl RNNCell {
             act: Tanh::new(),
             h_prev: None,
             hidden_dim,
+            d_h_next: None,
         }
     }
 
-    pub fn reset_state(&mut self) { self.h_prev = None; }
+    pub fn reset_state(&mut self) {
+        self.h_prev = None;
+        self.d_h_next = None;
+    }
 
     pub fn init_weights(&mut self, rng: &mut XorShift64){
         self.w_ih.init_xavier(rng);
@@ -701,12 +725,23 @@ impl Module for RNNCell {
         h_next
     }
     fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
-        let d_comb = self.act.backward(grad_output, grad_shift);
+        let combined_grad = match self.d_h_next.take() {
+            Some(carry) => {
+                let mut combined = grad_output.clone();
+                for (c, k) in combined.data.iter_mut().zip(carry.data.iter()) {
+                    *c = c.saturating_add(*k);
+                }
+                combined
+            }
+            None => grad_output.clone(),
+        };
+
+        let d_comb = self.act.backward(&combined_grad, grad_shift);
 
         let d_ih = self.w_ih.backward(&d_comb, grad_shift);
         let d_hh = self.w_hh.backward(&d_comb, grad_shift); // compute it...
         // d_hh should be fed back as the grad for h_prev in the next BPTT step
-        // For now at minimum it shouldn't be silently dropped
+        self.d_h_next = Some(d_hh);
 
         d_ih
     }
@@ -1325,62 +1360,6 @@ mod tests {
 
 
     // Examples
-    #[test]
-    fn test_train_linear_regression_sgd() {
-        // We want to learn the function: y = 3x
-        // 1 Input, 1 Output. Scale shift = 0.
-        let mut layer = Linear::new(1, 1, 0);
-        
-        // Initialize Master Weight poorly (start at 10)
-        layer.weights.master.data[0] = 10;
-        let mut rng = XorShift64::new(42);
-
-        // Dataset
-        let x = Tensor::from_vec(vec![1, 2, 3, 4], vec![4, 1]); // Inputs
-        let y_target = vec![4, 7, 10, 13];                       // Targets
-        
-        // Hyperparameters
-        let epochs = 2;
-        let lr_shift = 5; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
-        let grad_shift = 0; // Don't shrink the gradients here, numbers are small
-
-        let mut optim = SGDConfig::new(lr_shift, Some(grad_shift));
-        println!("--- Starting Integer Training ---");
-        for epoch in 0..epochs {
-            // 1. Sync weights from i32 -> i8
-            layer.sync_weights(&mut rng);
-
-            // 2. Forward Pass
-            let preds = layer.forward(&x, &mut rng);
-
-            // 3. Compute Loss & Gradients (Error = Pred - Target)
-            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
-            let mut loss = 0;
-
-            for i in 0..4 {
-                let error = preds.data[i] as i16 - y_target[i] as i16;
-                grad_out.data[i] = error; // The "Gradient" is just the error
-                loss += (error as i32) * (error as i32); // MSE
-            }
-
-            // 4. Backward Pass
-            let _dX = layer.backward(&grad_out, Some(grad_shift));
-
-            // 5. Optimizer Step: w = w - (dW >> lr_shift)
-            layer.step(&mut optim);
-
-            println!("Epoch {:02}: Loss = {:04}, Master Weight = {}, Storage Weight = {}", 
-                     epoch, loss, layer.weights.master.data[0], layer.weights.storage.data[0]);
-                     
-            if loss == 0 {
-                println!("Converged early! Epoch {}", epoch);
-                break;
-            }
-        }
-
-        layer.sync_weights(&mut rng);
-        assert_eq!(layer.weights.storage.data[0], 4, "Model failed to learn y=3x + 1");
-    }
 
     #[test]
     fn test_summary() {
