@@ -859,7 +859,7 @@ impl Loss for MAE {
         
         for i in 0..preds.data.len() {
             let error = preds.data[i] as i16 - targets.data[i] as i16;
-            loss += error as i32;
+            loss += error.abs() as i32;
             // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
             grad.data[i] = error;
         }
