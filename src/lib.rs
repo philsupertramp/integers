@@ -305,7 +305,7 @@ impl OptimizerConfig for SGDConfig {
                     if decay == 0 && *m != 0 {
                         decay = m.signum();
                     }
-                    *m = m.wrapping_sub(decay).wrapping_add(*g);
+                    *m = checked_add_i16!(m.wrapping_sub(decay), *g, backward_wraps);
                     *w = w.wrapping_sub(*m / lr_div);
                 }
             }
@@ -354,9 +354,8 @@ impl OptimizerConfig for AdamConfig {
                 let g = grads[i];
                 let g_64 = grads[i] as i64;
                 m[i] = m[i].wrapping_sub(m[i] / b1_div).wrapping_add(g);
-                v[i] = v[i]
-                    .wrapping_sub(v[i] / (b2_div as i64))
-                    .wrapping_add(g_64 * g_64);
+                v[i] = checked_add_i16!(v[i]
+                    .wrapping_sub(v[i] / (b2_div as i64)), g_64 * g_64, backward_wraps);
                 let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;
                 weights[i] = weights[i].wrapping_sub((m[i] * self.lr_mult) / denom);
             }
