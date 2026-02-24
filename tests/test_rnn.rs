@@ -72,7 +72,7 @@ fn test_rnn_sin_prediction() {
     const SCALE:       f64   = 100.0;
     const SEQ_LEN:     usize = 128;
     const HIDDEN_DIM:  usize = 16;
-    const SCALE_SHIFT: u32   = 2;
+    const SCALE_SHIFT: u32   = 4;
     const GRAD_SHIFT:  u32   = 0;
     const EPOCHS:      usize = 500;
     const BPTT_STEPS:  usize = 32;
@@ -192,8 +192,8 @@ fn test_rnn_cos_prediction() {
     const SCALE:       f64   = 100.0;
     const SEQ_LEN:     usize = 128;
     const HIDDEN_DIM:  usize = 16;
-    const SCALE_SHIFT: u32   = 2;
-    const GRAD_SHIFT:  u32   = 0;
+    const SCALE_SHIFT: u32   = 4;
+    const GRAD_SHIFT:  u32   = 1;
     const EPOCHS:      usize = 500;
     const BPTT_STEPS:  usize = 32;
 

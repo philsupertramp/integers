@@ -130,6 +130,16 @@ pub mod kernels {
         }
         x
     }
+    pub fn isqrt_64(n: u64) -> u64 {
+        if n == 0 { return 0; }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
+    }
 
     /// Tanh via piecewise linear approximation over i8 domain.
     /// Real tanh saturates at ~ +/- 3, so we map
@@ -201,14 +211,14 @@ pub mod kernels {
 
 
 pub trait OptimizerConfig {
-    fn update(&self, weights: &mut [i32], grads: &[i16], state: &mut OptimizerState);
+    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState);
     fn init_state(&self, len: usize) -> OptimizerState;
 }
 
 pub enum OptimizerState {
     None,
     SGD { velocity: Vec<i32> },
-    Adam { m: Vec<i32>, v: Vec<i32> },
+    Adam { m: Vec<i32>, v: Vec<i64> },
 }
 
 // SGD
@@ -229,7 +239,7 @@ impl OptimizerConfig for SGDConfig {
         }
     }
 
-    fn update(&self, weights: &mut [i32], grads: &[i16], state: &mut OptimizerState) {
+    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState) {
         assert_eq!(
             weights.len(),
             grads.len(),
@@ -245,13 +255,13 @@ impl OptimizerConfig for SGDConfig {
                 for ((w, m), g) in weights.iter_mut().zip(velocity.iter_mut()).zip(grads.iter()) {
                     let mut decay = *m / m_div;
                     if decay == 0 && *m != 0 { decay = m.signum(); }
-                    *m = m.wrapping_sub(decay).wrapping_add(*g as i32);
+                    *m = m.wrapping_sub(decay).wrapping_add(*g);
                     *w = w.wrapping_sub(*m / lr_div);
                 }
             }
             _ => {
                 for (w, g) in weights.iter_mut().zip(grads) {
-                    *w = w.wrapping_sub((*g as i32) / lr_div);
+                    *w = w.wrapping_sub(*g / lr_div);
                 }
             }
         }
@@ -275,19 +285,20 @@ impl AdamConfig {
 
 impl OptimizerConfig for AdamConfig {
     fn init_state(&self, len: usize) -> OptimizerState {
-        OptimizerState::Adam { m: vec![0; len], v: vec![0; len] }
+        OptimizerState::Adam { m: vec![0; len], v: vec![0i64; len] }
     }
 
-    fn update(&self, weights: &mut [i32], grads: &[i16], state: &mut OptimizerState) {
+    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState) {
         if let OptimizerState::Adam {m, v } = state {
             let b1_div = 1 << self.b1_shift;
             let b2_div = 1 << self.b2_shift;
 
             for i in 0..weights.len() {
-                let g = grads[i] as i32;
+                let g = grads[i];
+                let g_64 = grads[i] as i64;
                 m[i] = m[i].wrapping_sub(m[i] / b1_div).wrapping_add(g);
-                v[i] = v[i].wrapping_sub(v[i] / b2_div).wrapping_add(g.wrapping_mul(g));
-                let denom = kernels::isqrt(v[i].max(0) as u32) as i32 + self.eps;
+                v[i] = v[i].wrapping_sub(v[i] / (b2_div as i64)).wrapping_add(g_64 * g_64);
+                let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;
                 weights[i] = weights[i].wrapping_sub((m[i] * self.lr_mult) / denom);
             }
         }
@@ -342,7 +353,7 @@ pub trait Module {
 pub struct Params {
     pub master: Tensor<i32>,
     pub storage: Tensor<i8>,
-    pub grads: Option<Tensor<i16>>,
+    pub grads: Option<Tensor<i32>>,
     pub state: Option<OptimizerState>,
     pub shift: u32,
 }
@@ -384,11 +395,15 @@ impl Params {
             Some(existing) => {
                 // Saturating add to avoid wrapping on large accumulated signals
                 for (e, n) in existing.data.iter_mut().zip(new_grads.data.iter()) {
-                    *e = e.saturating_add(*n);
+                    *e = e.saturating_add(*n as i32);
                 }
             }
             None => {
-                self.grads = Some(new_grads);
+                let mut i32_grads = Tensor::<i32>::new(new_grads.shape.clone());
+                for (i, &n) in new_grads.data.iter().enumerate() {
+                    i32_grads.data[i] = n as i32;
+                }
+                self.grads = Some(i32_grads);
             }
         }
     }
@@ -810,6 +825,45 @@ impl RNN {
         grad_seq[start..].iter().rev()
             .map(|g| self.cell.backward(g, grad_shift))
             .collect()
+    }
+}
+
+pub trait Loss {
+    fn forward(&self, preds: &Tensor<i8>, targets: &Tensor<i8>) -> (i32, Tensor<i16>);
+}
+
+pub struct MSE;
+pub struct MAE;
+
+impl Loss for MSE {
+    fn forward(&self, preds: &Tensor<i8>, targets: &Tensor<i8>) -> (i32, Tensor<i16>) {
+        assert_eq!(preds.len(), targets.len(), "MSE::forward: vector sizes don't match.");
+        let mut loss: i32 = 0;
+        let mut grad = Tensor::<i16>::new(preds.shape.clone());
+        
+        for i in 0..preds.data.len() {
+            let error = preds.data[i] as i16 - targets.data[i] as i16;
+            loss += (error * error) as i32;
+            // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
+            grad.data[i] = error;
+        }
+        (loss, grad)
+    }
+}
+
+impl Loss for MAE {
+    fn forward(&self, preds: &Tensor<i8>, targets: &Tensor<i8>) -> (i32, Tensor<i16>) {
+        assert_eq!(preds.len(), targets.len(), "MAE::forward: vector sizes don't match.");
+        let mut loss: i32 = 0;
+        let mut grad = Tensor::<i16>::new(preds.shape.clone());
+        
+        for i in 0..preds.data.len() {
+            let error = preds.data[i] as i16 - targets.data[i] as i16;
+            loss += error as i32;
+            // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
+            grad.data[i] = error;
+        }
+        (loss / (preds.data.len() as i32), grad)
     }
 }
 
@@ -1266,7 +1320,7 @@ mod tests {
         let preds = l1.forward(&x2, &mut rng);
 
         // 3. Compute Loss & Gradients (Error = Pred - Target)
-        let mut grad_out = Tensor::<i16>::from_vec(vec![126, 2], vec![2, 1]);
+        let mut grad_out = Tensor::<i32>::from_vec(vec![126, 2], vec![2, 1]);
 
         l1.weights.grads = Some(grad_out);
 
