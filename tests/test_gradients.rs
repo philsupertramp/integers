@@ -1,4 +1,5 @@
-use integers::{AdamConfig, Linear, Loss, MSE, Module, RNNCell, SGDConfig, Tensor, XorShift64};
+use integers::nn::{AdamConfig, Linear, Loss, MSE, Module, RNNCell, SGDConfig, Tensor, XorShift64};
+use integers::debug::{get_overflow_stats};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // §1  GRADIENT CHECKING
@@ -85,7 +86,6 @@ fn test_grad_check_linear_sign_agreement() {
     let mut layer = Linear::new(2, 3, 0);
     layer.weights.master.data = vec![15, -10, -8, 12, 6, -14];
 
-    let mut rng = XorShift64::new(42);
     let input = Tensor::from_vec(vec![4i8, -3], vec![1, 2]);
     let pairs = gradient_check_linear(&mut layer, &input, 4, 123);
     let total = pairs.len();
@@ -231,10 +231,11 @@ fn train_copy_task(
     hidden_dim: usize,
     epochs: usize,
     seed: u64,
+    scale_shift: u32,
+    lr_shift: i32,
 ) -> (i64, i64, Vec<i8>) {
     let mut rng = XorShift64::new(seed);
     let mut quant_rng = XorShift64::new(seed + 1000);
-    let scale_shift = 6;
 
     let seq: Vec<i8> = (0..seq_len + delay)
         .map(|i| ((i * 17 + 3) % 41) as i8 - 20)
@@ -250,7 +251,7 @@ fn train_copy_task(
     head.init_xavier(&mut rng);
 
     // FIX 1: Dial back the learning rate so the integer weights don't explode
-    let optim = AdamConfig::new(5);
+    let optim = AdamConfig::new(lr_shift);
 
     let mut first = 0i64;
     let mut last = 0i64;
@@ -288,8 +289,8 @@ fn train_copy_task(
         // BACKWARD PASS
         for t in (0..seq_len).rev() {
             let g = &grads[t];
-            let gh = head.backward(&g, Some(0));
-            rnn.backward(&gh, Some(0));
+            let gh = head.backward(&g, Some(1));
+            rnn.backward(&gh, Some(1));
         }
 
         head.step(&optim);
@@ -308,7 +309,7 @@ fn train_copy_task(
 
 #[test]
 fn test_copy_task_1_step() {
-    let (first, last, seq) = train_copy_task(0, 32, 8, 500, 42);
+    let (first, last, seq) = train_copy_task(0, 32, 8, 500, 42, 5, 5);
     let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
 
     println!(
@@ -331,7 +332,7 @@ fn test_copy_task_1_step() {
 
 #[test]
 fn test_copy_task_4_step_delay() {
-    let (first, last, seq) = train_copy_task(4, 48, 8, 500, 42);
+    let (first, last, seq) = train_copy_task(4, 48, 8, 500, 42, 5, 5);
     let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
 
     println!(
@@ -363,9 +364,11 @@ fn test_copy_task_delay_scaling() {
         let hidden_dim = (delay * 6 + 4).max(8);
         let epochs = 600 + delay * 150;
 
-        let (first, last, seq) = train_copy_task(delay, seq_len, hidden_dim, epochs, 77);
-        let active = seq_len - delay;
+        let (first, last, seq) = train_copy_task(delay, seq_len, hidden_dim, epochs, 77, 8, 1);
         let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
+
+        #[cfg(debug_assertions)]
+        get_overflow_stats();
 
         println!(
             "delay={}: first={} last={} baseline={}",
@@ -432,7 +435,7 @@ fn run_one_epoch(
 
     let mut epoch_loss = 0i64;
     let mut sat_sum = 0.0f64;
-    let mut steps = 0usize;
+    let steps = 0usize;
     let mut errors = Vec::with_capacity(seq_len);
 
     // FORWARD PASS
@@ -703,7 +706,7 @@ fn test_scale_readiness_checklist() {
 
     // [3] 1-step copy
     {
-        let (first, last, seq) = train_copy_task(0, 32, 8, 500, 42);
+        let (first, last, seq) = train_copy_task(0, 32, 8, 500, 42, 8, 5);
         let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
         report.push((
             "1-step copy task converges",
@@ -714,7 +717,7 @@ fn test_scale_readiness_checklist() {
 
     // [4] 4-step delayed copy
     {
-        let (first, last, seq) = train_copy_task(4, 48, 8, 500, 42);
+        let (first, last, seq) = train_copy_task(4, 48, 8, 500, 42, 8, 5);
         let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
         report.push((
             "4-step delayed copy converges",
@@ -838,7 +841,6 @@ fn test_scale_readiness_checklist() {
 fn test_fully_deterministic_bptt_step() {
     // 1. Setup exact, noise-free environment
     let mut rng = XorShift64::new(42);
-    let mut optim = SGDConfig::new(0, None); // No momentum, no LR shift (lr=1)
 
     // 2. Initialize layer with shift=0 (exact integer math)
     let hidden_dim = 2;

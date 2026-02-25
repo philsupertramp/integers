@@ -1,6 +1,4 @@
-mod lib;
-
-use lib::Tensor;
+use integers::nn::Tensor;
 
 fn main() {
     let t1: Tensor<i8> = Tensor::new([1, 2].to_vec());
