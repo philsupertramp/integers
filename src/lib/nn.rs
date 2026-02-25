@@ -1062,8 +1062,9 @@ impl Loss for MSE {
 
         for i in 0..preds.data.len() {
             let error = preds.data[i] as i16 - targets.data[i] as i16;
-            loss += (error * error) as i32;
-            // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
+            // Cast to i32 BEFORE multiplying
+            let error_i32 = error as i32;
+            loss += error_i32 * error_i32;
             grad.data[i] = error;
         }
         (loss, grad)
