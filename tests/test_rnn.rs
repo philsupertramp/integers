@@ -1,4 +1,4 @@
-use integers::{
+use integers::nn::{
     AdamConfig, Linear, Module, RNN, RNNCell, SGDConfig, Sequential, Tensor, XorShift64,
 };
 
@@ -12,8 +12,6 @@ fn test_rnn_in_sequential() {
         .add(Linear::new(8, 1, 2));
 
     let mut rng = XorShift64::new(42);
-    let mut optim = AdamConfig::new(2);
-
     let x = Tensor::new(vec![1, 4]); // single step, batch=1, input_dim=4
 
     model.sync_weights(&mut rng);
@@ -26,7 +24,7 @@ fn test_rnn_in_sequential() {
 fn test_rnn_sequence() {
     let mut rnn = RNN::new(4, 8, 2, 5);
     let mut rng = XorShift64::new(42);
-    let mut optim = SGDConfig {
+    let optim = SGDConfig {
         lr_shift: 4,
         momentum_shift: None,
     };

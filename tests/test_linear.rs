@@ -1,4 +1,4 @@
-use integers::{AdamConfig, Linear, Module, SGDConfig, Tensor, XorShift64};
+use integers::nn::{AdamConfig, Linear, Module, SGDConfig, Tensor, XorShift64};
 
 #[test]
 fn test_train_linear_regression_sgd() {
@@ -39,7 +39,7 @@ fn test_train_linear_regression_sgd() {
         }
 
         // 4. Backward Pass
-        let _dX = layer.backward(&grad_out, Some(grad_shift));
+        let _d_x = layer.backward(&grad_out, Some(grad_shift));
 
         // 5. Optimizer Step: w = w - (dW >> lr_shift)
         layer.step(&mut optim);
@@ -81,7 +81,7 @@ fn test_train_linear_regression_no_bias_adam() {
     let lr_shift = 4; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
     let grad_shift = 0; // Don't shrink the gradients here, numbers are small
 
-    let mut optim = AdamConfig {
+    let optim = AdamConfig {
         lr_mult: lr_shift,
         b1_shift: 3,
         b2_shift: 4,
@@ -106,7 +106,7 @@ fn test_train_linear_regression_no_bias_adam() {
         }
 
         // 4. Backward Pass
-        let _dX = layer.backward(&grad_out, Some(grad_shift));
+        let _d_x = layer.backward(&grad_out, Some(grad_shift));
 
         // 5. Optimizer Step: w = w - (dW >> lr_shift)
         layer.step(&optim);
@@ -150,7 +150,7 @@ fn test_train_linear_regression_with_bias_adam() {
     let lr_shift = 4; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
     let grad_shift = 0; // Don't shrink the gradients here, numbers are small
 
-    let mut optim = AdamConfig {
+    let optim = AdamConfig {
         lr_mult: lr_shift,
         b1_shift: 3,
         b2_shift: 4,
@@ -175,7 +175,7 @@ fn test_train_linear_regression_with_bias_adam() {
         }
 
         // 4. Backward Pass
-        let _dX = layer.backward(&grad_out, Some(grad_shift));
+        let _d_x = layer.backward(&grad_out, Some(grad_shift));
 
         // 5. Optimizer Step: w = w - (dW >> lr_shift)
         layer.step(&optim);
