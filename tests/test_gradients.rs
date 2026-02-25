@@ -1,4 +1,4 @@
-use integers::{AdamConfig, Linear, Loss, MSE, Module, RNNCell, SGDConfig, Tensor, XorShift64};
+use integers::{AdamConfig, Linear, Loss, MSE, Module, RNNCell, SGDConfig, Tensor, XorShift64, get_overflow_stats};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // §1  GRADIENT CHECKING
@@ -366,6 +366,9 @@ fn test_copy_task_delay_scaling() {
         let (first, last, seq) = train_copy_task(delay, seq_len, hidden_dim, epochs, 77);
         let active = seq_len - delay;
         let baseline: i64 = seq.iter().map(|&v| (v as i64).pow(2)).sum();
+
+        #[cfg(debug_assertions)]
+        get_overflow_stats();
 
         println!(
             "delay={}: first={} last={} baseline={}",

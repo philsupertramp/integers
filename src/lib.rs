@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 /// Debug utils
+#[derive(Clone, Copy)]
 pub struct OverflowStats {
     pub forward_wraps:  u64,
     pub backward_wraps: u64,
@@ -19,7 +20,7 @@ thread_local! {
 }
 
 macro_rules! checked_add_i16 {
-    ($acc:expr, $val:expr, $counter:expr) => {{
+    ($acc:expr, $val:expr, $counter:ident) => {{  // <-- ident, not expr
         #[cfg(debug_assertions)]
         {
             if $acc.checked_add($val).is_none() {
@@ -29,7 +30,21 @@ macro_rules! checked_add_i16 {
         $acc.wrapping_add($val)
     }};
 }
+#[cfg(debug_assertions)]
+pub fn get_overflow_stats() -> OverflowStats {
+    OVERFLOW_STATS.with(|s| {
+        let s = s.borrow();
 
+        println!("forward wraps: {}", s.forward_wraps);
+        println!("backward wraps: {}", s.backward_wraps);
+        println!("downcast clamps: {}", s.downcast_clamps);
+        OverflowStats {
+            forward_wraps: s.forward_wraps,
+            backward_wraps: s.backward_wraps,
+            downcast_clamps: s.downcast_clamps,
+        }
+    })
+}
 /// A global reference to our dynamically generated lookup table.
 static TANH_LUT: OnceLock<[i8; 256]> = OnceLock::new();
 
@@ -140,7 +155,7 @@ fn clamp_i8(shifted: i32) -> i8 {
     #[cfg(debug_assertions)]
     {
         if clamp {
-            OVERFLOW_STATS.with(|s| s.borrow_mut().downscale_clamps += 1);
+            OVERFLOW_STATS.with(|s| s.borrow_mut().downcast_clamps += 1);
         }
     }
     val
@@ -214,7 +229,7 @@ pub mod kernels {
 
         let shifted = (val >> shift) + round_bit;
 
-        clamped_i8(shifted)
+        clamp_i8(shifted)
     }
 
     #[cfg(target_arch = "aarch64")]
