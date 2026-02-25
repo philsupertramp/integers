@@ -512,8 +512,8 @@ impl Params {
 
     pub fn init_xavier_uniform(&mut self, rng: &mut XorShift64, fan_in: usize, fan_out: usize) {
         let limit = (6.0 / (fan_in + fan_out) as f64).sqrt();
-        let limit_i8 = (limit * 127.0).round() as i32;
-        let limit_master = limit_i8 * (1 << self.shift);
+        let limit_i32 = (limit * 32767.0).round() as i32;  // ← scale to i32 range directly
+        let limit_master = (limit_i32 >> (self.shift.saturating_sub(1))).max(1);  // avoid zero
         self.init_uniform(rng, limit_master);
     }
 
