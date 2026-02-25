@@ -3,4 +3,14 @@ name = "integers"
 version = "0.1.0"
 edition = "2024"
 
+[[example]]
+name = "mnist"
+path = "examples/mnist.rs"
+
+[[example]]
+name = "iris"
+path = "examples/iris.rs"
+
 [dependencies]
+
+

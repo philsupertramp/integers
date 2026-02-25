@@ -24,6 +24,7 @@ fn generate_tanh_lut(input_scale: f32) -> [i8; 256] {
     lut
 }
 
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tensor<T>
 where
@@ -73,6 +74,60 @@ where
     pub fn memory_bytes(&self) -> usize {
         self.data.len() * std::mem::size_of::<T>()
     }
+}
+pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
+    let axis = axis.unwrap_or(1);
+    
+    // Only supports 2D tensors
+    if tensor.shape.len() != 2 {
+        panic!("argmax requires a 2D tensor, got shape: {:?}", tensor.shape);
+    }
+    
+    let (rows, cols) = (tensor.shape[0], tensor.shape[1]);
+    let mut result = Vec::new();
+    
+    if axis == 1 {
+        // Find argmax along columns (per row)
+        // For each row, find the column index with max value
+        for row_idx in 0..rows {
+            let start = row_idx * cols;
+            let row = &tensor.data[start..start + cols];
+            
+            // Find index of maximum value in this row
+            let (max_idx, _) = row
+                .iter()
+                .enumerate()
+                .max_by_key(|&(_, &v)| v)
+                .unwrap_or((0, &i8::MIN));
+            
+            result.push(max_idx);
+        }
+    } else if axis == 0 {
+        // Find argmax along rows (per column)
+        // For each column, find the row index with max value
+        for col_idx in 0..cols {
+            let (max_idx, _) = (0..rows)
+                .map(|r| (r, tensor.data[r * cols + col_idx]))
+                .max_by_key(|&(_, v)| v)
+                .unwrap_or((0, i8::MIN));
+            
+            result.push(max_idx);
+        }
+    } else {
+        panic!("Invalid axis {}. Expected 0 or 1.", axis);
+    }
+    
+    result
+}
+
+pub fn accuracy(predictions: &[usize], ground_truth: &[u8]) -> f32 {
+    let correct = predictions
+        .iter()
+        .zip(ground_truth)
+        .filter(|(pred, truth)| **pred == **truth as usize)
+        .count();
+    
+    correct as f32 / predictions.len() as f32
 }
 
 pub struct XorShift64 {
@@ -1039,6 +1094,45 @@ impl Loss for MAE {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_argmax_batch() {
+        // Batch of 3 samples, 4 classes each
+        let data = vec![
+            10i8, 5, 3, 2,      // Sample 0: max at index 0
+            2, 15, 8, 1,        // Sample 1: max at index 1
+            1, 2, 20, 5,        // Sample 2: max at index 2
+        ];
+        let tensor = Tensor::from_vec(data, vec![3, 4]);
+        
+        let result = argmax(&tensor, Some(1));
+        assert_eq!(result, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_argmax_axis_0() {
+        // 3 rows, 2 columns
+        let data = vec![
+            10i8, 2,
+            5, 15,
+            3, 1,
+        ];
+        let tensor = Tensor::from_vec(data, vec![3, 2]);
+        
+        let result = argmax(&tensor, Some(0));
+        // Column 0: max is 10 at row 0
+        // Column 1: max is 15 at row 1
+        assert_eq!(result, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_argmax_single_sample() {
+        // Single sample [1, 5]
+        let data = vec![2i8, 8, 5, 3, 1];
+        let tensor = Tensor::from_vec(data, vec![1, 5]);
+        
+        let result = argmax(&tensor, Some(1));
+        assert_eq!(result, vec![1]);  // Max is 8 at index 1
+    }
     // Tensor<T> test suite
     #[test]
     fn test_tensor_new() {

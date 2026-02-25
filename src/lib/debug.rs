@@ -1,5 +1,3 @@
-use std::borrow::Borrow;
-
 /// Debug utils
 #[derive(Clone, Copy)]
 pub struct OverflowStats {
@@ -60,6 +58,12 @@ macro_rules! checked_sub_i16 {
         $acc.wrapping_sub($val)
     }};
 }
+
+pub fn increase_clamp_downcast(){
+    #[cfg(debug_assertions)]
+    crate::debug::OVERFLOW_STATS.with(|s: &std::cell::RefCell<crate::debug::OverflowStats>| { s.borrow_mut().downcast_clamps += 1; });
+}
+
 #[cfg(debug_assertions)]
 pub fn get_overflow_stats() -> OverflowStats {
     crate::debug::OVERFLOW_STATS.with(|s: &std::cell::RefCell<crate::debug::OverflowStats>| {
@@ -76,8 +80,3 @@ pub fn get_overflow_stats() -> OverflowStats {
     })
 }
 
-
-pub fn increase_clamp_downcast(){
-    #[cfg(debug_assertions)]
-    crate::debug::OVERFLOW_STATS.with(|s: &std::cell::RefCell<crate::debug::OverflowStats>| { s.borrow_mut().downcast_clamps += 1; });
-}
