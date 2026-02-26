@@ -1,4 +1,4 @@
-use crate::debug::{increase_clamp_downcast, OverflowStats};
+use crate::debug::{increase_clamp_downcast};
 use crate::{checked_sub_i16, checked_add_i16};
 
 use std::fmt;
