@@ -1,6 +1,7 @@
 use integers::*;
 use integers::nn::*;
 use integers::nn::losses::*;
+use integers::nn::activations::{ReLU};
 use integers::data::{load_mnist, shuffled_indices};
 #[cfg(debug_assertions)]
 use integers::debug::{reset_overflow_stats, get_overflow_stats};

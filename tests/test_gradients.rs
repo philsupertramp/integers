@@ -1,5 +1,6 @@
 use integers::{Tensor, XorShift64};
-use integers::nn::{Linear, Module, RNNCell};
+use integers::nn::{Linear, Module};
+use integers::nn::rnn::{RNNCell};
 use integers::nn::losses::*;
 use integers::nn::optim::{AdamConfig, SGDConfig};
 #[cfg(debug_assertions)]

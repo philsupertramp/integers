@@ -1,7 +1,8 @@
 use integers::{Tensor, XorShift64};
 use integers::nn::{
-    Linear, Module, RNN, RNNCell, Sequential,
+    Linear, Module, Sequential,
 };
+use integers::nn::rnn::{RNN, RNNCell};
 use integers::nn::optim::{SGDConfig, AdamConfig};
 
 // RNNCell is just another module — drop it into Sequential for

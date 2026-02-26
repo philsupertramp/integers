@@ -1,6 +1,7 @@
 use integers::*;
 use integers::nn::*;
 use integers::nn::losses::*;
+use integers::nn::activations::{ReLU};
 use integers::dataset_loaders::*;
 use integers::debug::*;
 use integers::nn::optim::{SGDConfig};
