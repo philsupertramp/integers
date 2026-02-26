@@ -1,4 +1,4 @@
-use crate::nn::{Linear, ModuleInfo, Module};
+use crate::nn::{Linear, ModuleInfo, Module, HasWeights};
 use crate::nn::activations::{Tanh};
 use crate::nn::optim::{OptimizerConfig};
 use crate::{Tensor, XorShift64, checked_add_i16};
@@ -49,6 +49,16 @@ impl RNNCell {
         let xavier_limit_master = xavier_limit_i8 * (1 << self.w_hh.weights.shift);
         let range = xavier_limit_master.min(spectral_cap_master);
         self.w_hh.weights.init_uniform(rng, range);
+    }
+
+    pub fn init_weights_auto(&mut self, rng: &mut XorShift64) {
+        self.init_weights(rng);
+
+        let inferred_shift = self.infer_scale_shift();
+        self.w_ih.weights.shift = inferred_shift;
+        self.w_ih.bias.shift = inferred_shift;
+        self.w_hh.weights.shift = inferred_shift;
+        self.w_hh.bias.shift = inferred_shift;
     }
 }
 
@@ -133,6 +143,16 @@ impl Module for RNNCell {
 
     fn init(&mut self, rng: &mut XorShift64) {
         self.init_weights(rng);
+    }
+}
+impl HasWeights for RNNCell {
+    fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
+        vec![
+            &self.w_ih.weights.master,
+            &self.w_ih.bias.master,
+            &self.w_hh.weights.master,
+            &self.w_hh.bias.master,
+        ]
     }
 }
 

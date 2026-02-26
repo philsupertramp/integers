@@ -26,21 +26,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ─── RECOMMENDED HYPERPARAMETERS ──────────────────────────────────────
     // 
     // CONSERVATIVE (most reliable):
-    //   scale_shift = 5  (increased from 4, reduces forward saturation)
     //   grad_shift = 8   (increased from 6, handles 3-layer gradient cascade)
     //   batch_size = 16  (reduced from 32, higher variance helps exploration)
     //   epochs = 100     (increased from 50, integer training is noisier)
     //   optimizer = AdamConfig::new(4)  (slower learning, more stable)
     //
     // AGGRESSIVE (faster, needs monitoring):
-    //   scale_shift = 6
     //   grad_shift = 7
     //   batch_size = 32
     //   epochs = 150
     //   optimizer = AdamConfig::new(2)
     //
     // SGD+MOMENTUM (often best for integer nets):
-    //   scale_shift = 5
     //   grad_shift = 7
     //   batch_size = 32
     //   epochs = 150
@@ -48,31 +45,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Start with CONSERVATIVE, monitor diagnostics below ↓
     
-    let scale_shift = 3u32;      // ← INCREASED from 4
-    let grad_shift = 2u32;       // ← INCREASED from 6
-    let batch_size = 64usize;    // ← REDUCED from 32
+    let grad_shift = 3u32;       // ← INCREASED from 6
+    let batch_size = 16usize;    // ← REDUCED from 32
     let epochs = 100i32;         // ← INCREASED from 50
     let lr_shift = 0.5;
 
     println!("Model Configuration (RECOMMENDED):");
-    println!("  scale_shift = {} (prevents forward saturation)", scale_shift);
     println!("  grad_shift = {} (handles 3-layer gradient cascade)", grad_shift);
     println!("  batch_size = {}", batch_size);
     println!("  epochs = {}\n", epochs);
+    let mut rng = XorShift64::new(42);
 
+    let mut l1 = Linear::new(784, 128, 1);
+    l1.init(&mut rng);
+    let mut l2 = Linear::new(128, 10, 1);
+    l2.init(&mut rng);
     let mut model = Sequential::new();
     model
-        .add(Linear::new(784, 128, scale_shift))
+        .add(l1)
         .add(ReLU::new())
-        .add(Linear::new(128, 10, scale_shift));
+        .add(l2);
 
     let optim = AdamConfig {
         lr_shift: 0,
         b1_shift: 3,
         b2_shift: 4,
-        eps: 1
+        eps: 2
     };
-    let mut rng = XorShift64::new(42);
     
     // Print architecture
     println!("Architecture:");

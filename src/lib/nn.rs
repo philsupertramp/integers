@@ -165,7 +165,40 @@ impl Params {
 }
 
 pub trait HasWeights {
-    fn get_weights(&self) -> &Tensor<i32>;
+    /// Get all weight parameters (master i32 tensors) in this module.
+    /// Useful for analysis, initialization, and automatic shift detection.
+    fn get_all_weights(&self) -> Vec<&Tensor<i32>>;
+    
+    /// Infer an appropriate scale_shift based on weight magnitudes.
+    /// Returns a shift value in the range [1, 8].
+    fn infer_scale_shift(&self) -> u32 {
+        let all_weights = self.get_all_weights();
+        if all_weights.is_empty() {
+            return 4; // default middle ground
+        }
+        
+        // Find max magnitude across all weight tensors
+        let max_magnitude = all_weights
+            .iter()
+            .flat_map(|t| &t.data)
+            .map(|&w| w.abs() as u32)
+            .max()
+            .unwrap_or(1);
+        
+        if max_magnitude == 0 {
+            return 4; // weights not yet initialized
+        }
+        
+        // Find minimum shift such that (max_magnitude >> shift) ≤ 127
+        let mut shift = 0u32;
+        while (max_magnitude >> shift) > 127 && shift < 8 {
+            shift += 1;
+        }
+
+        println!("Setting shift = {}", shift.clamp(1, 8));
+        
+        shift.clamp(1, 8)
+    }
 }
 
 pub struct Linear {
@@ -306,12 +339,17 @@ impl Module for Linear {
 
     fn init(&mut self, rng: &mut XorShift64) {
         self.init_xavier(rng);
+
+        // After initialization, infer the appropriate shift
+        let inferred_shift = self.infer_scale_shift();
+        self.weights.shift = inferred_shift;
+        self.bias.shift = inferred_shift;
     }
 }
 
 impl HasWeights for Linear {
-    fn get_weights(&self) -> &Tensor<i32> {
-        &self.weights.master
+    fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
+        vec![&self.weights.master, &self.bias.master]
     }
 }
 
@@ -446,7 +484,29 @@ mod tests {
         assert_eq!(lin.weights.storage.data[2], 0);
         assert_eq!(lin.weights.storage.data[3], 1);
     }
-
+    #[test]
+    fn test_auto_scale_shift_detection() {
+        let mut rng = XorShift64::new(42);
+        let mut layer = Linear::new(10, 5, 0); // start with shift=0
+        
+        // Initialize with Xavier distribution
+        layer.init_xavier(&mut rng);
+        
+        // Auto-detect appropriate shift
+        let detected_shift = layer.infer_scale_shift();
+        println!("Detected shift: {}", detected_shift);
+        
+        layer.weights.shift = detected_shift;
+        layer.bias.shift = detected_shift;
+        
+        // Now safely quantize
+        layer.sync_weights(&mut rng);
+        
+        // Verify all weights fit in i8 range
+        for &w in &layer.weights.storage.data {
+            assert!(w >= -128 && w <= 127);
+        }
+    }
     #[test]
     fn test_linear_forward() {
         let mut lin = Linear::new(2, 2, 0);
