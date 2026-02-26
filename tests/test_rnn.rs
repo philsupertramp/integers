@@ -1,6 +1,8 @@
+use integers::{Tensor, XorShift64};
 use integers::nn::{
-    AdamConfig, Linear, Module, RNN, RNNCell, SGDConfig, Sequential, Tensor, XorShift64,
+    Linear, Module, RNN, RNNCell, Sequential,
 };
+use integers::nn::optim::{SGDConfig, AdamConfig};
 
 // RNNCell is just another module — drop it into Sequential for
 // a simple sequence classifier
@@ -203,7 +205,7 @@ fn test_rnn_cos_prediction() {
     const SCALE: f64 = 100.0;
     const SEQ_LEN: usize = 128;
     const HIDDEN_DIM: usize = 16;
-    const SCALE_SHIFT: u32 = 4;
+    const SCALE_SHIFT: u32 = 5;
     const GRAD_SHIFT: u32 = 1;
     const EPOCHS: usize = 500;
     const BPTT_STEPS: usize = 32;

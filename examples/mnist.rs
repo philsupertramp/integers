@@ -1,7 +1,11 @@
-use integers::data::{load_mnist, shuffled_indices};
+use integers::*;
 use integers::nn::*;
+use integers::nn::losses::*;
+use integers::data::{load_mnist, shuffled_indices};
 #[cfg(debug_assertions)]
 use integers::debug::{reset_overflow_stats, get_overflow_stats};
+use integers::nn::optim::{SGDConfig, AdamConfig};
+
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

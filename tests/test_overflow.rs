@@ -66,8 +66,11 @@
 //! Activations are kept in a sane range by the shifts, so no truncation wrapping
 //! occurs. All layers receive directional gradient signal with comparable magnitude.
 
+#[cfg(debug_assertions)]
 use integers::debug::{get_overflow_stats, reset_overflow_stats};
-use integers::nn::{Linear, Module, Tensor, XorShift64, SGDConfig};
+use integers::nn::{Linear, Module};
+use integers::nn::optim::{SGDConfig};
+use integers::{Tensor, XorShift64};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
