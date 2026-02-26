@@ -271,7 +271,7 @@ fn test_overflow_weight_update_is_wrong_at_depth() {
         let mut rng = XorShift64::new(0xDEAD_BEEF);
         // lr_shift=0 means lr=1 — maximises the visible weight delta so
         // even tiny gradients produce measurable (or not) updates.
-        let optim = SGDConfig::new(0, None);
+        let optim = SGDConfig::new().with_learn_rate(0.5);
 
         let mut l1 = Linear::new(4, 8, scale_shift);
         let mut l2 = Linear::new(8, 8, scale_shift);

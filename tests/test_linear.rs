@@ -17,11 +17,11 @@ fn test_train_linear_regression_sgd() {
     let y_target = vec![4, 7, 10, 13]; // Targets
 
     // Hyperparameters
-    let epochs = 2;
-    let lr_shift = 5; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
-    let grad_shift = 0; // Don't shrink the gradients here, numbers are small
+    let epochs = 8;
+    let lr_shift = 0.125; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
+    let grad_shift = 2; // Don't shrink the gradients here, numbers are small
 
-    let mut optim = SGDConfig::new(lr_shift, Some(grad_shift));
+    let mut optim = SGDConfig::new().with_learn_rate(lr_shift);
     println!("--- Starting Integer Training ---");
     for epoch in 0..epochs {
         // 1. Sync weights from i32 -> i8
@@ -47,8 +47,8 @@ fn test_train_linear_regression_sgd() {
         layer.step(&mut optim);
 
         println!(
-            "Epoch {:02}: Loss = {:04}, Master Weight = {}, Storage Weight = {}",
-            epoch, loss, layer.weights.master.data[0], layer.weights.storage.data[0]
+            "Epoch {:02}: Loss = {:04}, Grad = {:?}, Master Weight = {}, Storage Weight = {}",
+            epoch, loss, grad_out, layer.weights.master.data[0], layer.weights.storage.data[0]
         );
 
         if loss == 0 {
@@ -80,14 +80,14 @@ fn test_train_linear_regression_no_bias_adam() {
 
     // Hyperparameters
     let epochs = 300;
-    let lr_shift = 4; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
+    let lr_shift = 0; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
     let grad_shift = 0; // Don't shrink the gradients here, numbers are small
 
     let optim = AdamConfig {
-        lr_mult: lr_shift,
+        lr_shift: lr_shift,
         b1_shift: 3,
         b2_shift: 4,
-        eps: 32,
+        eps: 2,
     };
     println!("--- Starting Integer Training ---");
     println!(
@@ -153,14 +153,14 @@ fn test_train_linear_regression_with_bias_adam() {
 
     // Hyperparameters
     let epochs = 300;
-    let lr_shift = 6; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
+    let lr_shift = 0; // Shift right by 4 (approx learning rate of 1/16 = 0.0625)
     let grad_shift = 0; // Don't shrink the gradients here, numbers are small
 
     let optim = AdamConfig {
-        lr_mult: lr_shift,
+        lr_shift: lr_shift,
         b1_shift: 3,
         b2_shift: 4,
-        eps: 32,
+        eps: 3,
     };
     println!("--- Starting Integer Training ---");
     for epoch in 0..epochs {

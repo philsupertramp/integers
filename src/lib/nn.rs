@@ -78,11 +78,20 @@ pub struct Params {
     pub storage: Tensor<i8>,
     pub grads: Option<Tensor<i32>>,
     pub state: Option<OptimizerState>,
+
+    /// Determines the quantization bits used when scaling from master -> storage
+    /// Typical range: 3-7 (shift values 3-7)
+    ///
+    /// Examples:
+    ///     shift = 4 // for single-layer networks
+    ///     shift = 5 // for 2-3 layer networks
+    ///     shift = 6 // for deeper networks
     pub shift: u32,
 }
 
 impl Params {
     pub fn new(shape: Vec<usize>, shift: u32) -> Self {
+        assert!(shift >= 0 && shift <= 8, "Weight shift must be 1-8, got {}", shift);
         Self {
             master: Tensor::new(shape.clone()),
             storage: Tensor::new(shape),
@@ -827,7 +836,7 @@ mod tests {
     fn test_linear_step() {
         let mut rng = XorShift64::new(777);
         let mut l1 = Linear::new(2, 1, 1);
-        let mut optim = SGDConfig::new(0, None);
+        let mut optim = SGDConfig::new().with_learn_rate(1.0);
         l1.weights.master.data[0] = 111;
         l1.weights.master.data[1] = 222;
         l1.sync_weights(&mut rng);
@@ -875,7 +884,7 @@ mod tests {
     #[test]
     fn test_linear_step_with_shifting() {
         let mut l1 = Linear::new(2, 1, 2);
-        let mut optim = SGDConfig::new(0, None);
+        let mut optim = SGDConfig::new().with_learn_rate(0.75);
         l1.weights.master.data[0] = 111;
         l1.weights.master.data[1] = 222;
 
@@ -994,7 +1003,7 @@ mod tests {
             modules: vec![Box::new(l1), Box::new(ReLU::new()), Box::new(l2)],
         };
 
-        let mut optim = SGDConfig::new(4, Some(2));
+        let mut optim = SGDConfig::new().with_learn_rate(0.25).with_momentum(0.2);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 
@@ -1038,11 +1047,11 @@ mod tests {
     fn test_train_xor_adam() {
         let mut rng = XorShift64::new(777);
 
-        let mut l1 = Linear::new(2, 8, 2);
-        let mut l2 = Linear::new(8, 1, 2);
+        let mut l1 = Linear::new(2, 8, 0);
+        let mut l2 = Linear::new(8, 1, 0);
 
         for w in l1.weights.master.data.iter_mut() {
-            *w = (rng.gen_range(60) as i32) - 30;
+            *w = (rng.gen_range(30) as i32) - 15;
         }
         for w in l2.weights.master.data.iter_mut() {
             *w = (rng.gen_range(60) as i32) - 30;
@@ -1057,7 +1066,7 @@ mod tests {
 
         // NEW: Instantiate our Integer Adam!
         // We set the learning rate multiplier to 2.
-        let mut optim = AdamConfig::new(2);
+        let mut optim = AdamConfig::new().with_learn_rate(0.5);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 

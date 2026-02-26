@@ -3,7 +3,7 @@ use integers::nn::*;
 use integers::nn::losses::*;
 use integers::dataset_loaders::*;
 use integers::debug::*;
-use integers::nn::optim::{SGDConfig, AdamConfig};
+use integers::nn::optim::{SGDConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const EPOCHS: i32 = 8000;
     const SCALE_SHIFT: u32 = 5;
     const GRAD_SHIFT: u32 = 3;
-    let optim = SGDConfig::new(3, Some(2));  // lr_shift=3, momentum_shift=2
+    let optim = SGDConfig::new().with_learn_rate(0.0625).with_momentum(0.75);  // lr_shift=3, momentum_shift=2
 
     let mut l1 = Linear::new(4, 8, SCALE_SHIFT);
     l1.init_xavier(&mut sync_rng);

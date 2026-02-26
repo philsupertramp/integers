@@ -47,12 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Start with CONSERVATIVE, monitor diagnostics below ↓
     
-    let scale_shift = 1u32;      // ← INCREASED from 4
+    let scale_shift = 3u32;      // ← INCREASED from 4
     let grad_shift = 2u32;       // ← INCREASED from 6
     let batch_size = 64usize;    // ← REDUCED from 32
     let epochs = 100i32;         // ← INCREASED from 50
-    let lr_shift = 5i32;
-    
+    let lr_shift = 0.5;
+
     println!("Model Configuration (RECOMMENDED):");
     println!("  scale_shift = {} (prevents forward saturation)", scale_shift);
     println!("  grad_shift = {} (handles 3-layer gradient cascade)", grad_shift);
@@ -65,7 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(ReLU::new())
         .add(Linear::new(128, 10, scale_shift));
 
-    let optim = AdamConfig::new(lr_shift);  // ← CHANGED from 2 (slower learning rate)
+    let optim = AdamConfig {
+        lr_shift: 0,
+        b1_shift: 3,
+        b2_shift: 4,
+        eps: 1
+    };
     let mut rng = XorShift64::new(42);
     
     // Print architecture
