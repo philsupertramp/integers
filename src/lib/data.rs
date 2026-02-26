@@ -21,7 +21,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 
-use crate::nn::Tensor;
+use crate::Tensor;
 
 // ─── Error type ──────────────────────────────────────────────────────────────
 
@@ -427,14 +427,14 @@ pub fn load_iris(path: impl AsRef<Path>) -> DataResult<Dataset> {
 ///
 /// ```no_run
 /// use integers::data::shuffled_indices;
-/// use integers::nn::XorShift64;
+/// use integers::XorShift64;
 /// let mut rng = XorShift64::new(42);
 /// let idx = shuffled_indices(1000, &mut rng);
 /// for batch in idx.chunks(32) {
 ///     // train on batch
 /// }
 /// ```
-pub fn shuffled_indices(n: usize, rng: &mut crate::nn::XorShift64) -> Vec<usize> {
+pub fn shuffled_indices(n: usize, rng: &mut crate::XorShift64) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..n).collect();
     for i in (1..n).rev() {
         let j = rng.gen_range((i + 1) as u32) as usize;
@@ -448,7 +448,7 @@ pub fn shuffled_indices(n: usize, rng: &mut crate::nn::XorShift64) -> Vec<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nn::XorShift64;
+    use crate::XorShift64;
 
     // ── Iris ─────────────────────────────────────────────────────────────────
 

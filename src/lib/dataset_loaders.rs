@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::nn::Tensor;
+use crate::Tensor;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 

@@ -1,427 +1,16 @@
-use crate::debug::{increase_clamp_downcast, OverflowStats};
-use crate::{checked_sub_i16, checked_add_i16};
+#[path = "nn/losses.rs"]
+pub mod losses;
+#[path = "nn/kernels.rs"]
+pub mod kernels;
+#[path = "nn/optim.rs"]
+pub mod optim;
+#[path = "nn/rnn.rs"]
+pub mod rnn;
+#[path = "nn/activations.rs"]
+pub mod activations;
 
-use std::fmt;
-use std::sync::OnceLock;
-
-/// A global reference to our dynamically generated lookup table.
-static TANH_LUT: OnceLock<[i8; 256]> = OnceLock::new();
-
-/// Generates the LUT based on a specific input scale.
-fn generate_tanh_lut(input_scale: f32) -> [i8; 256] {
-    let mut lut = [0i8; 256];
-
-    for i in -128..=127 {
-        // De-quantize, calculate, and re-quantize
-        let float_x = (i as f32) / input_scale;
-        let float_y = float_x.tanh();
-
-        // Scale to [-127, 127] and clamp
-        let int_y = (float_y * 127.0).round() as i32;
-        lut[(i + 128) as usize] = int_y.clamp(-128, 127) as i8;
-    }
-
-    lut
-}
-
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default,
-{
-    /// Flattened data storage (Row-Major contiguous layout)
-    pub data: Vec<T>,
-    /// Dimension of the tensor, e.g. [batch, input_dim]
-    pub shape: Vec<usize>,
-}
-
-impl<T> Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default,
-{
-    pub fn new(shape: Vec<usize>) -> Self {
-        let mut total_elements: usize = 0;
-
-        if !shape.is_empty() {
-            total_elements = shape.iter().product();
-        }
-        Self {
-            data: vec![T::default(); total_elements],
-            shape,
-        }
-    }
-
-    pub fn from_vec(data: Vec<T>, shape: Vec<usize>) -> Self {
-        let mut expected = 0;
-        if !shape.is_empty() {
-            expected = shape.iter().product();
-        }
-        assert_eq!(
-            data.len(),
-            expected,
-            "Tensor::from_vec: Shape {:?} does not match data len {}",
-            shape,
-            data.len()
-        );
-        Self { data, shape }
-    }
-
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    pub fn memory_bytes(&self) -> usize {
-        self.data.len() * std::mem::size_of::<T>()
-    }
-}
-pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
-    let axis = axis.unwrap_or(1);
-    
-    // Only supports 2D tensors
-    if tensor.shape.len() != 2 {
-        panic!("argmax requires a 2D tensor, got shape: {:?}", tensor.shape);
-    }
-    
-    let (rows, cols) = (tensor.shape[0], tensor.shape[1]);
-    let mut result = Vec::new();
-    
-    if axis == 1 {
-        // Find argmax along columns (per row)
-        // For each row, find the column index with max value
-        for row_idx in 0..rows {
-            let start = row_idx * cols;
-            let row = &tensor.data[start..start + cols];
-            
-            // Find index of maximum value in this row
-            let (max_idx, _) = row
-                .iter()
-                .enumerate()
-                .max_by_key(|&(_, &v)| v)
-                .unwrap_or((0, &i8::MIN));
-            
-            result.push(max_idx);
-        }
-    } else if axis == 0 {
-        // Find argmax along rows (per column)
-        // For each column, find the row index with max value
-        for col_idx in 0..cols {
-            let (max_idx, _) = (0..rows)
-                .map(|r| (r, tensor.data[r * cols + col_idx]))
-                .max_by_key(|&(_, v)| v)
-                .unwrap_or((0, i8::MIN));
-            
-            result.push(max_idx);
-        }
-    } else {
-        panic!("Invalid axis {}. Expected 0 or 1.", axis);
-    }
-    
-    result
-}
-
-pub fn accuracy(predictions: &[usize], ground_truth: &[u8]) -> f32 {
-    let correct = predictions
-        .iter()
-        .zip(ground_truth)
-        .filter(|(pred, truth)| **pred == **truth as usize)
-        .count();
-    
-    correct as f32 / predictions.len() as f32
-}
-
-pub struct XorShift64 {
-    pub state: u64,
-}
-
-impl XorShift64 {
-    pub fn new(seed: u64) -> Self {
-        // edge case handleing for state = 0
-        let state = if seed == 0 { 0xCAFEBABE } else { seed };
-        Self { state }
-    }
-
-    pub fn next(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
-
-    /// Random value generator for value in range [0, range)
-    #[inline(always)]
-    pub fn gen_range(&mut self, range: u32) -> u32 {
-        (self.next() as u32) % range
-    }
-}
-
-fn clamp_i8(shifted: i32) -> i8 {
-    let mut val = shifted as i8;
-    let mut clamp = true;
-    if shifted > 127 {
-        val = 127;
-    } else if shifted < -128 {
-        val = -128
-    } else { clamp = false; }
-
-    #[cfg(debug_assertions)]
-    {
-        if clamp {
-            increase_clamp_downcast();
-        }
-    }
-    val
-}
-
-pub mod kernels {
-    use super::*;
-
-    pub fn mul_mixed_scalar(a: i16, b: i8) -> i32 {
-        (a as i32) * (b as i32)
-    }
-
-    pub fn dot_product_scalar(a: &[i8], b: &[i8]) -> i32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| (x as i32) * (y as i32))
-            .sum()
-    }
-
-    pub fn dot_product_mixed_scalar(a: &[i8], b: &[i16]) -> i32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| (x as i32) * (y as i32))
-            .sum()
-    }
-
-    /// Newton-Raphson Method
-    pub fn isqrt(n: u32) -> u32 {
-        if n == 0 {
-            return 0;
-        }
-        let mut x = n;
-        let mut y = x.div_ceil(2);
-        while y < x {
-            x = y;
-            y = (x + n / x) / 2;
-        }
-        x
-    }
-    pub fn isqrt_64(n: u64) -> u64 {
-        if n == 0 {
-            return 0;
-        }
-        let mut x = n;
-        let mut y = x.div_ceil(2);
-        while y < x {
-            x = y;
-            y = (x + n / x) / 2;
-        }
-        x
-    }
-
-    /// Tanh via piecewise linear approximation over i8 domain.
-    /// Real tanh saturates at ~ +/- 3, so we map
-    /// |x| >= 64 (i8 scale) -> +/- 127
-    /// and linear in between
-    pub fn tanh_i8(x: i8) -> i8 {
-        // Get the table, initializing it on the very first call if necessary.
-        let lut = TANH_LUT.get_or_init(|| generate_tanh_lut(127.0));
-
-        let index = (x as i16 + 128) as usize;
-        lut[index]
-    }
-
-    pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i8 {
-        let mask = (1 << shift) - 1;
-        let frac = val & mask;
-
-        let thresh = rng.gen_range(1 << shift) as i32;
-        let round_bit = if frac.abs() > thresh { 1 } else { 0 };
-
-        let shifted = (val >> shift) + round_bit;
-
-        clamp_i8(shifted)
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    pub mod arm_neon {
-        use std::arch::aarch64::*;
-
-        pub unsafe fn dot_product_neon_raw(a: &[i8], b: &[i8]) -> i32 {
-            // 1. Initialize accumulator to zero
-            let mut sum_vec = vdupq_n_s32(0);
-
-            let mut ptr_a = a.as_ptr();
-            let mut ptr_b = b.as_ptr();
-            let len = a.len();
-
-            // 2. Main Loop: Process 16 elements (128 bits) per iteration
-            for _ in (0..len).step_by(16) {
-                let va = vld1q_s8(ptr_a);
-                let vb = vld1q_s8(ptr_b);
-
-                // Widening Multiply (The stable workaround for SDOT)
-                // Split 128-bit regs into low/high halves
-                let va_lo = vget_low_s8(va);
-                let vb_lo = vget_low_s8(vb);
-                let va_hi = vget_high_s8(va);
-                let vb_hi = vget_high_s8(vb);
-
-                // Multiply i8 -> i16
-                let prod_lo = vmull_s8(va_lo, vb_lo);
-                let prod_hi = vmull_s8(va_hi, vb_hi);
-
-                // Accumulate i16 -> i32
-                sum_vec = vpadalq_s16(sum_vec, prod_lo);
-                sum_vec = vpadalq_s16(sum_vec, prod_hi);
-
-                ptr_a = ptr_a.add(16);
-                ptr_b = ptr_b.add(16);
-            }
-
-            // 3. Horizontal Sum (Reduce vector to scalar)
-            vaddvq_s32(sum_vec)
-        }
-    }
-}
-
-pub trait OptimizerConfig {
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState);
-    fn init_state(&self, len: usize) -> OptimizerState;
-}
-
-pub enum OptimizerState {
-    None,
-    SGD { velocity: Vec<i32> },
-    Adam { m: Vec<i32>, v: Vec<i64> },
-}
-
-// SGD
-pub struct SGDConfig {
-    pub lr_shift: u32,
-    pub momentum_shift: Option<u32>,
-}
-
-impl SGDConfig {
-    pub fn new(lr_shift: u32, momentum_shift: Option<u32>) -> Self {
-        Self {
-            lr_shift,
-            momentum_shift,
-        }
-    }
-}
-
-impl OptimizerConfig for SGDConfig {
-    fn init_state(&self, len: usize) -> OptimizerState {
-        match self.momentum_shift {
-            Some(_) => OptimizerState::SGD {
-                velocity: vec![0; len],
-            },
-            None => OptimizerState::None,
-        }
-    }
-
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState) {
-        assert_eq!(
-            weights.len(),
-            grads.len(),
-            "Weights and Gradients must match length! Got {} vs. {}",
-            weights.len(),
-            grads.len(),
-        );
-        let lr_div = 1 << self.lr_shift;
-
-        match (self.momentum_shift, state) {
-            (Some(m_shift), OptimizerState::SGD { velocity }) => {
-                let m_div = 1 << m_shift;
-                for ((w, m), g) in weights
-                    .iter_mut()
-                    .zip(velocity.iter_mut())
-                    .zip(grads.iter())
-                {
-                    let mut decay = *m / m_div;
-                    if decay == 0 && *m != 0 {
-                        decay = m.signum();
-                    }
-                    *m = m.wrapping_sub(decay).wrapping_add(*g);
-                    *w = checked_sub_i16!(
-                        w,
-                        *m / lr_div,
-                        backward_wraps
-                    );
-                }
-            }
-            _ => {
-                for (w, g) in weights.iter_mut().zip(grads) {
-                    *w = checked_sub_i16!(
-                        w,
-                        *g / lr_div,
-                        backward_wraps
-                    );
-                }
-            }
-        }
-    }
-}
-
-// Adam
-pub struct AdamConfig {
-    pub lr_mult: i32,
-    pub b1_shift: u32,
-    pub b2_shift: u32,
-    pub eps: i32,
-}
-
-impl AdamConfig {
-    pub fn new(lr_mult: i32) -> Self {
-        Self {
-            lr_mult,
-            b1_shift: 3,
-            b2_shift: 4,
-            eps: 1,
-        }
-    }
-}
-
-impl OptimizerConfig for AdamConfig {
-    fn init_state(&self, len: usize) -> OptimizerState {
-        OptimizerState::Adam {
-            m: vec![0; len],
-            v: vec![0i64; len],
-        }
-    }
-
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState) {
-        if let OptimizerState::Adam { m, v } = state {
-            let b1_div = 1 << self.b1_shift;
-            let b2_div = 1 << self.b2_shift;
-
-            for i in 0..weights.len() {
-                let g = grads[i];
-                let g_64 = grads[i] as i64;
-                m[i] = checked_add_i16!(
-                    m[i].wrapping_sub(m[i] / b1_div),
-                    g,
-                    backward_wraps
-                );
-                v[i] = checked_add_i16!(
-                    v[i].wrapping_sub(v[i] / (b2_div as i64)),
-                    g_64 * g_64,
-                    backward_wraps
-                );
-                let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;
-                weights[i] = checked_sub_i16!(
-                    weights[i],
-                    (m[i] * self.lr_mult) / denom,
-                    backward_wraps
-                );
-            }
-        }
-    }
-}
+use crate::{Tensor, XorShift64};
+use crate::nn::optim::{OptimizerConfig, OptimizerState};
 
 // Module trait
 // Every building block needs to implement this.
@@ -453,6 +42,8 @@ pub trait Module {
 
     /// quantize i32 master weights -> i8 storage. No-op for non-parameterized modules.
     fn sync_weights(&mut self, _rng: &mut XorShift64) {}
+
+    fn init(&mut self, _rng: &mut XorShift64) {}
 
     /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
     fn step(&mut self, _optim: &dyn OptimizerConfig) {}
@@ -488,11 +79,20 @@ pub struct Params {
     pub storage: Tensor<i8>,
     pub grads: Option<Tensor<i32>>,
     pub state: Option<OptimizerState>,
+
+    /// Determines the quantization bits used when scaling from master -> storage
+    /// Typical range: 3-7 (shift values 3-7)
+    ///
+    /// Examples:
+    ///     shift = 4 // for single-layer networks
+    ///     shift = 5 // for 2-3 layer networks
+    ///     shift = 6 // for deeper networks
     pub shift: u32,
 }
 
 impl Params {
     pub fn new(shape: Vec<usize>, shift: u32) -> Self {
+        assert!(shift >= 0 && shift <= 8, "Weight shift must be 1-8, got {}", shift);
         Self {
             master: Tensor::new(shape.clone()),
             storage: Tensor::new(shape),
@@ -500,6 +100,11 @@ impl Params {
             state: None,
             shift,
         }
+    }
+
+    pub fn with_shift(mut self, shift: u32) -> Self {
+        self.shift = shift;
+        self
     }
 
     pub fn init_uniform(&mut self, rng: &mut XorShift64, range: i32) {
@@ -512,8 +117,8 @@ impl Params {
 
     pub fn init_xavier_uniform(&mut self, rng: &mut XorShift64, fan_in: usize, fan_out: usize) {
         let limit = (6.0 / (fan_in + fan_out) as f64).sqrt();
-        let limit_i8 = (limit * 127.0).round() as i32;
-        let limit_master = limit_i8 * (1 << self.shift);
+        let limit_i32 = (limit * 32767.0).round() as i32;  // ← scale to i32 range directly
+        let limit_master = (limit_i32 >> (self.shift.saturating_sub(1))).max(1);  // avoid zero
         self.init_uniform(rng, limit_master);
     }
 
@@ -557,6 +162,10 @@ impl Params {
     pub fn memory_bytes(&self) -> usize {
         self.master.memory_bytes() + self.storage.memory_bytes()
     }
+}
+
+pub trait HasWeights {
+    fn get_weights(&self) -> &Tensor<i32>;
 }
 
 pub struct Linear {
@@ -694,120 +303,18 @@ impl Module for Linear {
             children: vec![],
         }
     }
-}
 
-pub struct ReLU {
-    pub cache: Vec<Tensor<i8>>,
-}
-
-impl Default for ReLU {
-    fn default() -> Self {
-        Self::new()
+    fn init(&mut self, rng: &mut XorShift64) {
+        self.init_xavier(rng);
     }
 }
 
-impl ReLU {
-    pub fn new() -> Self {
-        Self { cache: Vec::new() }
+impl HasWeights for Linear {
+    fn get_weights(&self) -> &Tensor<i32> {
+        &self.weights.master
     }
 }
 
-impl Module for ReLU {
-    fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
-        self.cache.push(input.clone());
-        let mut output = Tensor::<i8>::new(input.shape.clone());
-        for idx in 0..input.data.len() {
-            output.data[idx] = if input.data[idx] > 0 {
-                input.data[idx]
-            } else {
-                0
-            };
-        }
-        output
-    }
-    fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
-        let input = self
-            .cache
-            .pop()
-            .expect("ReLU::backward: No state registered. Perform forward pass first!");
-        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
-        for o in 0..grad_output.data.len() {
-            output.data[o] = if input.data[o] > 0 {
-                grad_output.data[o]
-            } else {
-                0
-            };
-        }
-        output
-    }
-    fn memory_report(&self) -> (usize, usize) {
-        let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
-        (0, dyn_)
-    }
-
-    fn describe(&self) -> ModuleInfo {
-        ModuleInfo {
-            name: "ReLU",
-            params: 0,
-            static_bytes: 0,
-            children: vec![],
-        }
-    }
-}
-
-pub struct Tanh {
-    cache: Vec<Tensor<i8>>,
-}
-
-impl Default for Tanh {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Tanh {
-    pub fn new() -> Self {
-        Self { cache: Vec::new() }
-    }
-}
-
-impl Module for Tanh {
-    fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
-        self.cache.push(input.clone());
-        let mut output = Tensor::<i8>::new(input.shape.clone());
-        for (o, &x) in output.data.iter_mut().zip(&input.data) {
-            *o = kernels::tanh_i8(x);
-        }
-        output
-    }
-    fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
-        let input = self
-            .cache
-            .pop()
-            .expect("Tanh::backward: No state registered. Perform forward pass first!");
-        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
-        for o in 0..grad_output.data.len() {
-            let t = kernels::tanh_i8(input.data[o]) as i32;
-            let dtanh = (127 * 127 - t * t) / 127;
-            output.data[o] =
-                ((grad_output.data[o] as i32 * dtanh) / 128).clamp(-32768, 32767) as i16;
-        }
-        output
-    }
-    fn memory_report(&self) -> (usize, usize) {
-        let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
-        (0, dyn_)
-    }
-
-    fn describe(&self) -> ModuleInfo {
-        ModuleInfo {
-            name: "Tanh",
-            params: 0,
-            static_bytes: 0,
-            children: vec![],
-        }
-    }
-}
 
 pub struct Sequential {
     pub modules: Vec<Box<dyn Module>>,
@@ -827,6 +334,16 @@ impl Sequential {
     pub fn add(&mut self, m: impl Module + 'static) -> &mut Self {
         self.modules.push(Box::new(m));
         self
+    }
+
+    pub fn init_all(&mut self, rng: &mut XorShift64) {
+        for module in &mut self.modules {
+            module.init(rng);
+        }
+    }
+
+    pub fn analyze_scale_shifts(&self) {
+
     }
 }
 
@@ -873,502 +390,10 @@ impl Module for Sequential {
     }
 }
 
-pub struct RNNCell {
-    pub w_ih: Linear,
-    pub w_hh: Linear,
-    pub act: Tanh,
-    pub h_prev: Option<Tensor<i8>>,
-    pub hidden_dim: usize,
-
-    d_h_next: Option<Tensor<i16>>,
-}
-
-impl RNNCell {
-    pub fn new(input_dim: usize, hidden_dim: usize, scale_shift: u32) -> Self {
-        Self {
-            w_ih: Linear::new(input_dim, hidden_dim, scale_shift),
-            w_hh: Linear::new(hidden_dim, hidden_dim, scale_shift),
-            act: Tanh::new(),
-            h_prev: None,
-            hidden_dim,
-            d_h_next: None,
-        }
-    }
-
-    pub fn reset_state(&mut self) {
-        self.h_prev = None;
-        self.d_h_next = None;
-
-        self.w_ih.cache.clear();
-        self.w_hh.cache.clear();
-        self.act.cache.clear();
-    }
-
-    pub fn init_weights(&mut self, rng: &mut XorShift64) {
-        self.w_ih.init_xavier(rng);
-
-        let hidden_dim = self.w_hh.weights.master.shape[0];
-        let spectral_cap_i8 = kernels::isqrt(16129 / (hidden_dim as u32)) as i32;
-        let spectral_cap_master = spectral_cap_i8 * (1 << self.w_hh.weights.shift);
-
-        let fan_in = self.w_hh.weights.master.shape[1];
-        let fan_out = self.w_hh.weights.master.shape[0];
-        let xavier_limit_i8 = kernels::isqrt(96774 / (fan_in + fan_out) as u32) as i32;
-
-        let xavier_limit_master = xavier_limit_i8 * (1 << self.w_hh.weights.shift);
-        let range = xavier_limit_master.min(spectral_cap_master);
-        self.w_hh.weights.init_uniform(rng, range);
-    }
-}
-
-impl Module for RNNCell {
-    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
-        let batch = input.shape[0];
-
-        let h = self
-            .h_prev
-            .get_or_insert_with(|| Tensor::new(vec![batch, self.hidden_dim]));
-
-        // h_t = tanh(W_ih * x_t + W_hh * h_{t-1})
-        // We do both linear transforms, add elementwise, then tanh.
-        // Simplest: pass through w_ih, add w_hh output, apply tanh.
-        //
-        // Note: adding two i8 tensors before tanh risks overflow.
-        // Accumulate in i16, then downcast before tanh.
-        let ih = self.w_ih.forward(input, rng);
-        let hh = self.w_hh.forward(h, rng);
-
-        let mut comb = Tensor::<i8>::new(vec![batch, self.hidden_dim]);
-        for i in 0..comb.data.len() {
-            let sum = checked_add_i16!(ih.data[i] as i16, hh.data[i] as i16, forward_wraps);
-            comb.data[i] = sum.clamp(-128, 127) as i8;
-        }
-
-        let h_next = self.act.forward(&comb, rng);
-        self.h_prev = Some(h_next.clone());
-        h_next
-    }
-    fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
-        let combined_grad = match self.d_h_next.take() {
-            Some(carry) => {
-                let mut combined = grad_output.clone();
-                for (c, k) in combined.data.iter_mut().zip(carry.data.iter()) {
-                    *c = c.saturating_add(*k);
-                }
-                combined
-            }
-            None => grad_output.clone(),
-        };
-
-        let d_comb = self.act.backward(&combined_grad, grad_shift);
-
-        let d_ih = self.w_ih.backward(&d_comb, grad_shift);
-        let d_hh = self.w_hh.backward(&d_comb, grad_shift); // compute it...
-        // d_hh should be fed back as the grad for h_prev in the next BPTT step
-        self.d_h_next = Some(d_hh);
-
-        d_ih
-    }
-    fn sync_weights(&mut self, rng: &mut XorShift64) {
-        self.w_ih.sync_weights(rng);
-        self.w_hh.sync_weights(rng);
-    }
-
-    fn step(&mut self, optim: &dyn OptimizerConfig) {
-        self.w_ih.step(optim);
-        self.w_hh.step(optim);
-    }
-
-    fn memory_report(&self) -> (usize, usize) {
-        let (s1, d1) = self.w_ih.memory_report();
-        let (s2, d2) = self.w_hh.memory_report();
-        let h_mem = self.h_prev.as_ref().map_or(0, |t| t.memory_bytes());
-        (s1 + s2, d1 + d2 + h_mem)
-    }
-
-    fn describe(&self) -> ModuleInfo {
-        let children = vec![
-            self.w_ih.describe(),
-            self.w_hh.describe(),
-            self.act.describe(),
-        ];
-        ModuleInfo {
-            name: "RNNCell",
-            params: children.iter().map(|e| e.params).sum(),
-            static_bytes: 0,
-            children,
-        }
-    }
-}
-
-pub struct RNN {
-    pub cell: RNNCell,
-    pub bptt_steps: usize,
-}
-
-impl RNN {
-    pub fn new(input_dim: usize, hidden_dim: usize, scale_shift: u32, bptt_steps: usize) -> Self {
-        Self {
-            cell: RNNCell::new(input_dim, hidden_dim, scale_shift),
-            bptt_steps,
-        }
-    }
-
-    pub fn reset_state(&mut self) {
-        self.cell.reset_state();
-    }
-
-    pub fn forward_seq(
-        &mut self,
-        input_seq: &[Tensor<i8>],
-        rng: &mut XorShift64,
-    ) -> Vec<Tensor<i8>> {
-        input_seq
-            .iter()
-            .map(|x| self.cell.forward(x, rng))
-            .collect()
-    }
-
-    pub fn backward_seq(
-        &mut self,
-        grad_seq: &[Tensor<i16>],
-        grad_shift: Option<u32>,
-    ) -> Vec<Tensor<i16>> {
-        let start = grad_seq.len().saturating_sub(self.bptt_steps);
-        grad_seq[start..]
-            .iter()
-            .rev()
-            .map(|g| self.cell.backward(g, grad_shift))
-            .collect()
-    }
-}
-
-pub trait Loss {
-    fn forward(&self, preds: &Tensor<i8>, targets: &Tensor<i8>) -> (i32, Tensor<i16>);
-}
-
-pub struct MSE;
-pub struct MAE;
-
-impl Loss for MSE {
-    fn forward(&self, preds: &Tensor<i8>, targets: &Tensor<i8>) -> (i32, Tensor<i16>) {
-        assert_eq!(
-            preds.len(),
-            targets.len(),
-            "MSE::forward: vector sizes don't match."
-        );
-        let mut loss: i32 = 0;
-        let mut grad = Tensor::<i16>::new(preds.shape.clone());
-
-        for i in 0..preds.data.len() {
-            let error = preds.data[i] as i16 - targets.data[i] as i16;
-            // Cast to i32 BEFORE multiplying
-            let error_i32 = error as i32;
-            loss += error_i32 * error_i32;
-            grad.data[i] = error;
-        }
-        (loss, grad)
-    }
-}
-
-impl Loss for MAE {
-    fn forward(&self, preds: &Tensor<i8>, targets: &Tensor<i8>) -> (i32, Tensor<i16>) {
-        assert_eq!(
-            preds.len(),
-            targets.len(),
-            "MAE::forward: vector sizes don't match."
-        );
-        let mut loss: i32 = 0;
-        let mut grad = Tensor::<i16>::new(preds.shape.clone());
-
-        for i in 0..preds.data.len() {
-            let error = preds.data[i] as i16 - targets.data[i] as i16;
-            loss += error.abs() as i32;
-            // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
-            grad.data[i] = error;
-        }
-        (loss / (preds.data.len() as i32), grad)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_argmax_batch() {
-        // Batch of 3 samples, 4 classes each
-        let data = vec![
-            10i8, 5, 3, 2,      // Sample 0: max at index 0
-            2, 15, 8, 1,        // Sample 1: max at index 1
-            1, 2, 20, 5,        // Sample 2: max at index 2
-        ];
-        let tensor = Tensor::from_vec(data, vec![3, 4]);
-        
-        let result = argmax(&tensor, Some(1));
-        assert_eq!(result, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn test_argmax_axis_0() {
-        // 3 rows, 2 columns
-        let data = vec![
-            10i8, 2,
-            5, 15,
-            3, 1,
-        ];
-        let tensor = Tensor::from_vec(data, vec![3, 2]);
-        
-        let result = argmax(&tensor, Some(0));
-        // Column 0: max is 10 at row 0
-        // Column 1: max is 15 at row 1
-        assert_eq!(result, vec![0, 1]);
-    }
-
-    #[test]
-    fn test_argmax_single_sample() {
-        // Single sample [1, 5]
-        let data = vec![2i8, 8, 5, 3, 1];
-        let tensor = Tensor::from_vec(data, vec![1, 5]);
-        
-        let result = argmax(&tensor, Some(1));
-        assert_eq!(result, vec![1]);  // Max is 8 at index 1
-    }
-    // Tensor<T> test suite
-    #[test]
-    fn test_tensor_new() {
-        let t: Tensor<i32> = Tensor::new(vec![2, 4]);
-
-        assert_eq!(t.shape[0], 2);
-        assert_eq!(t.shape[1], 4);
-        assert_eq!(t.data.len(), 8);
-    }
-
-    #[test]
-    fn test_tensor_new_empty_vec() {
-        let t: Tensor<i32> = Tensor::new(vec![]);
-
-        assert_eq!(t.shape.len(), 0);
-        assert_eq!(t.data.len(), 0);
-    }
-
-    #[test]
-    fn test_tensor_from_vec() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![2, 1], vec![2, 1]);
-        assert_eq!(t.data.len(), t.shape[0] * t.shape[1]);
-    }
-
-    #[test]
-    fn test_tensor_from_vec_empty_vec() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![], vec![]);
-        assert_eq!(t.shape.len(), 0);
-        assert_eq!(t.data.len(), 0);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "assertion `left == right` failed: Tensor::from_vec: Shape [2, 1] does not match data len 3\n  left: 3\n right: 2"
-    )]
-    fn test_tensor_from_vec_wrong_shape_for_data() {
-        let _t: Tensor<i32> = Tensor::from_vec(vec![2, 1, 3], vec![2, 1]);
-    }
-
-    #[test]
-    fn test_tensor_len() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![2, 1], vec![2, 1]);
-
-        assert_eq!(t.len(), 2);
-    }
-    #[test]
-    fn test_tensor_len_empty() {
-        let t: Tensor<i32> = Tensor::new(vec![]);
-
-        assert_eq!(t.len(), 0, "{:?}", t);
-    }
-
-    #[test]
-    fn test_tensor_memory_bytes() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![2], vec![1, 1]);
-
-        assert_eq!(t.len(), 1);
-        assert_eq!(t.memory_bytes(), 4);
-    }
-
-    // XorShift64 tests
-    #[test]
-    fn test_xorshift_new() {
-        let rng1 = XorShift64::new(12345);
-        assert_eq!(rng1.state, 12345);
-        let rng2 = XorShift64::new(0);
-        assert_eq!(rng2.state, 0xCAFEBABE);
-    }
-
-    #[test]
-    fn test_xorshift_next() {
-        let mut rng = XorShift64::new(1);
-
-        assert_eq!(rng.next(), 1082269761);
-        assert_eq!(rng.state, 1082269761);
-    }
-
-    #[test]
-    fn test_xorshift_determinism() {
-        let mut rng1 = XorShift64::new(12345);
-        let mut rng2 = XorShift64::new(12345);
-
-        assert_eq!(rng1.next(), rng2.next());
-        assert_eq!(rng1.next(), rng2.next());
-        assert_eq!(rng1.next(), rng2.next());
-    }
-
-    #[test]
-    fn test_xorshift_gen_range() {
-        let mut rng = XorShift64::new(1);
-
-        for _i in 0..1000 {
-            let val = rng.gen_range(12) + 1;
-            assert!(val <= 12);
-            assert!(val > 0);
-        }
-    }
-
-    // Kernel tests
-    #[test]
-    fn test_kernel_mul_mixed_scalar() {
-        assert_eq!(kernels::mul_mixed_scalar(5 as i16, 3 as i8), 15 as i32);
-    }
-
-    #[test]
-    fn test_kernel_dot_product_scalar() {
-        let vec1 = [1, 1, 1];
-        let vec2 = [1, 1, 1];
-
-        let res = kernels::dot_product_scalar(&vec1, &vec2);
-
-        assert_eq!(res, 3);
-    }
-
-    #[test]
-    fn test_kernel_dot_product_mixed_scalar() {
-        let vec1: &[i8] = &[1, 1, 1];
-        let vec2: &[i16] = &[1, 1, 1];
-
-        let res = kernels::dot_product_mixed_scalar(&vec1, &vec2);
-
-        assert_eq!(res, 3);
-    }
-
-    #[test]
-    fn test_kernel_isqrt() {
-        assert_eq!(kernels::isqrt(9), 3);
-        assert_eq!(kernels::isqrt(8), 2);
-        assert_eq!(kernels::isqrt(7), 2);
-        assert_eq!(kernels::isqrt(6), 2);
-        assert_eq!(kernels::isqrt(5), 2);
-        assert_eq!(kernels::isqrt(4), 2);
-        assert_eq!(kernels::isqrt(3), 1);
-        assert_eq!(kernels::isqrt(2), 1);
-        assert_eq!(kernels::isqrt(1), 1);
-    }
-
-    #[test]
-    fn test_kernel_stochastic_downcast_deterministic() {
-        let mut rng = XorShift64::new(999);
-
-        // Case 1: Exact integer (no fraction)
-        // 10.0 (shifted by 1 -> 5)
-        let val = 10;
-        let shift = 1;
-        let res = kernels::stochastic_downcast(val, shift, &mut rng);
-        assert_eq!(res, 5, "10 >> 1 should always be 5");
-
-        // Case 2: Zero
-        let res = kernels::stochastic_downcast(0, 5, &mut rng);
-        assert_eq!(res, 0);
-    }
-
-    #[test]
-    fn test_kernel_stochastic_downcast_saturation() {
-        let mut rng = XorShift64::new(111);
-
-        // Value: 1000. Shift: 0. Should clamp to 127.
-        let res = kernels::stochastic_downcast(1000, 0, &mut rng);
-        assert_eq!(res, 127);
-
-        // Value: -1000. Shift: 0. Should clamp to -128.
-        let res = kernels::stochastic_downcast(-1000, 0, &mut rng);
-        assert_eq!(res, -128);
-    }
-
-    #[test]
-    fn test_kernel_stochastic_downcast_statistics() {
-        let mut rng = XorShift64::new(777);
-        let n_runs = 100_000;
-
-        // Scenario: Value 5 (binary 101). Shift 1.
-        // Real value is 2.5.
-        // We expect ~50% 2s and ~50% 3s.
-        // Average should be ~2.5.
-        let val = 5;
-        let shift = 1;
-
-        let mut sum: i64 = 0;
-        for _ in 0..n_runs {
-            sum += kernels::stochastic_downcast(val, shift, &mut rng) as i64;
-        }
-
-        let avg = sum as f64 / n_runs as f64;
-        println!("Average for 2.5 was: {}", avg);
-
-        // Allow a small margin of error (Standard Error ~ 1/sqrt(N))
-        assert!(
-            avg > 2.49 && avg < 2.51,
-            "Average {} was too far from 2.5",
-            avg
-        );
-    }
-
-    #[test]
-    fn test_kernel_stochastic_downcast_negative_statistics() {
-        let mut rng = XorShift64::new(888);
-        let n_runs = 100_000;
-
-        // Scenario: Value -5 (binary ...11111011). Shift 1.
-        // Integer division -5 >> 1 is -3.
-        // Real value is -2.5.
-        // We expect -3 and -2 mixed.
-        let val = -5;
-        let shift = 1;
-
-        let mut sum: i64 = 0;
-        for _ in 0..n_runs {
-            sum += kernels::stochastic_downcast(val, shift, &mut rng) as i64;
-        }
-
-        let avg = sum as f64 / n_runs as f64;
-        println!("Average for -2.5 was: {}", avg);
-
-        assert!(
-            avg > -2.51 && avg < -2.49,
-            "Average {} was too far from -2.5",
-            avg
-        );
-    }
-
-    #[test]
-    #[cfg(target_arch = "aarch64")]
-    fn test_kernel_dot_product_neon() {
-        let vec1 = [1i8; 16];
-        let vec2 = [1i8; 16];
-
-        let res = unsafe { kernels::arm_neon::dot_product_neon_raw(&vec1, &vec2) };
-
-        assert_eq!(res, 16);
-
-        let vec3 = [-1i8; 16];
-        let res_neg = unsafe { kernels::arm_neon::dot_product_neon_raw(&vec1, &vec3) };
-        assert_eq!(res_neg, -16);
-    }
+    use crate::nn::optim::*;
 
     // Linear tests
     #[test]
@@ -1560,7 +585,7 @@ mod tests {
     fn test_linear_step() {
         let mut rng = XorShift64::new(777);
         let mut l1 = Linear::new(2, 1, 1);
-        let mut optim = SGDConfig::new(0, None);
+        let mut optim = SGDConfig::new().with_learn_rate(1.0);
         l1.weights.master.data[0] = 111;
         l1.weights.master.data[1] = 222;
         l1.sync_weights(&mut rng);
@@ -1608,7 +633,7 @@ mod tests {
     #[test]
     fn test_linear_step_with_shifting() {
         let mut l1 = Linear::new(2, 1, 2);
-        let mut optim = SGDConfig::new(0, None);
+        let mut optim = SGDConfig::new().with_learn_rate(0.75);
         l1.weights.master.data[0] = 111;
         l1.weights.master.data[1] = 222;
 
@@ -1622,7 +647,7 @@ mod tests {
 
     #[test]
     fn test_relu_forward() {
-        let mut relu = ReLU::new();
+        let mut relu = activations::ReLU::new();
         let mut input = Tensor::<i8>::new(vec![4, 1]);
         let mut rng = XorShift64::new(42);
 
@@ -1640,7 +665,7 @@ mod tests {
 
     #[test]
     fn test_relu_backward() {
-        let mut relu = ReLU::new();
+        let mut relu = activations::ReLU::new();
         let mut input = Tensor::<i8>::new(vec![4, 1]);
         let mut rng = XorShift64::new(42);
 
@@ -1667,14 +692,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "ReLU::backward: No state registered. Perform forward pass first!")]
     fn test_relu_backward_without_forward_call() {
-        let mut relu = ReLU::new();
+        let mut relu = activations::ReLU::new();
         let input = Tensor::<i16>::new(vec![4, 1]);
         let _res = relu.backward(&input, Some(2));
     }
 
     #[test]
     fn test_relu_memory_report() {
-        let mut relu = ReLU::new();
+        let mut relu = activations::ReLU::new();
 
         let (mut stat, mut dyna) = relu.memory_report();
 
@@ -1698,7 +723,7 @@ mod tests {
         let model = Sequential {
             modules: vec![
                 Box::new(Linear::new(2, 8, 2)),
-                Box::new(ReLU::new()),
+                Box::new(activations::ReLU::new()),
                 Box::new(Linear::new(8, 1, 2)),
             ],
         };
@@ -1724,10 +749,10 @@ mod tests {
         }
 
         let mut model = Sequential {
-            modules: vec![Box::new(l1), Box::new(ReLU::new()), Box::new(l2)],
+            modules: vec![Box::new(l1), Box::new(activations::ReLU::new()), Box::new(l2)],
         };
 
-        let mut optim = SGDConfig::new(4, Some(2));
+        let mut optim = SGDConfig::new().with_learn_rate(0.25).with_momentum(0.2);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 
@@ -1771,11 +796,11 @@ mod tests {
     fn test_train_xor_adam() {
         let mut rng = XorShift64::new(777);
 
-        let mut l1 = Linear::new(2, 8, 2);
-        let mut l2 = Linear::new(8, 1, 2);
+        let mut l1 = Linear::new(2, 8, 0);
+        let mut l2 = Linear::new(8, 1, 0);
 
         for w in l1.weights.master.data.iter_mut() {
-            *w = (rng.gen_range(60) as i32) - 30;
+            *w = (rng.gen_range(30) as i32) - 15;
         }
         for w in l2.weights.master.data.iter_mut() {
             *w = (rng.gen_range(60) as i32) - 30;
@@ -1785,12 +810,12 @@ mod tests {
         }
 
         let mut model = Sequential {
-            modules: vec![Box::new(l1), Box::new(ReLU::new()), Box::new(l2)],
+            modules: vec![Box::new(l1), Box::new(activations::ReLU::new()), Box::new(l2)],
         };
 
         // NEW: Instantiate our Integer Adam!
         // We set the learning rate multiplier to 2.
-        let mut optim = AdamConfig::new(2);
+        let mut optim = AdamConfig::new().with_learn_rate(0.5);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 

@@ -1,6 +1,9 @@
+use integers::{Tensor, XorShift64};
 use integers::nn::{
-    AdamConfig, Linear, Module, RNN, RNNCell, SGDConfig, Sequential, Tensor, XorShift64,
+    Linear, Module, Sequential,
 };
+use integers::nn::rnn::{RNN, RNNCell};
+use integers::nn::optim::{SGDConfig, AdamConfig};
 
 // RNNCell is just another module — drop it into Sequential for
 // a simple sequence classifier
@@ -96,7 +99,7 @@ fn test_rnn_sin_prediction() {
     rnn.init_weights(&mut rng);
     head.init_xavier(&mut rng);
 
-    let optim = AdamConfig::new(3);
+    let optim = AdamConfig::new().with_learn_rate(0.0625);
 
     let mut first_epoch_loss = 0i64;
     let mut last_epoch_loss = 0i64;
@@ -203,7 +206,7 @@ fn test_rnn_cos_prediction() {
     const SCALE: f64 = 100.0;
     const SEQ_LEN: usize = 128;
     const HIDDEN_DIM: usize = 16;
-    const SCALE_SHIFT: u32 = 4;
+    const SCALE_SHIFT: u32 = 6;
     const GRAD_SHIFT: u32 = 1;
     const EPOCHS: usize = 500;
     const BPTT_STEPS: usize = 32;
@@ -228,10 +231,10 @@ fn test_rnn_cos_prediction() {
     head.init_xavier(&mut rng);
 
     let optim = AdamConfig {
-        lr_mult: 4,
+        lr_shift: 0,
         b1_shift: 3,
         b2_shift: 4,
-        eps: 4,
+        eps: 1,
     };
 
     let mut first_epoch_loss = 0i64;

@@ -1,18 +1,23 @@
+use integers::*;
 use integers::nn::*;
+use integers::nn::losses::*;
+use integers::nn::activations::{ReLU};
 use integers::dataset_loaders::*;
 use integers::debug::*;
+use integers::nn::optim::{SGDConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
-    const EPOCHS: i32 = 4000;
+    let mut sync_rng = XorShift64::new(42);
+    const EPOCHS: i32 = 8000;
     const SCALE_SHIFT: u32 = 5;
     const GRAD_SHIFT: u32 = 3;
-    let optim = SGDConfig::new(3, Some(2));  // lr_shift=3, momentum_shift=2
+    let optim = SGDConfig::new().with_learn_rate(0.0625).with_momentum(0.75);  // lr_shift=3, momentum_shift=2
 
-    let mut l1 = Linear::new(4, 16, SCALE_SHIFT);
-    l1.init_xavier(&mut rng);
-    let mut l2 = Linear::new(16, 3, SCALE_SHIFT);
-    l2.init_xavier(&mut rng);
+    let mut l1 = Linear::new(4, 8, SCALE_SHIFT);
+    l1.init_xavier(&mut sync_rng);
+    let mut l2 = Linear::new(8, 3, SCALE_SHIFT);
+    l2.init_xavier(&mut sync_rng);
     
     // Build model for Iris: 4 input features → 3 output classes
     let mut model = Sequential::new();
@@ -43,11 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
 
     for epoch in 0..EPOCHS {
-        model.sync_weights(&mut rng);
-        // reset_state also clears d_h_next so there is no stale carry
-        // from the previous epoch's last backward call.
-        //rnn.reset_state();
-
+        model.sync_weights(&mut sync_rng);
         let mut epoch_loss: i64 = 0;
 
         for t in 0..(train_ds.len()) {
@@ -56,7 +57,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let pred = model.forward(&x_t, &mut rng);
 
-            // ← DELETE all the argmax + error stuff, use:
             let mse = MSE;
             let (loss, grad_out) = mse.forward(&pred, &target);
             epoch_loss += loss as i64;
@@ -65,16 +65,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model.step(&optim);
         }
         if epoch % 100 == 0 {
-            get_overflow_stats();
-            reset_overflow_stats();
+            #[cfg(debug_assertions)]
+            {
+                get_overflow_stats();
+                reset_overflow_stats();
+            }
             println!("Epoch {:>4}: loss = {}", epoch, epoch_loss);
         }
     }
+    #[cfg(debug_assertions)]
     get_overflow_stats();
 
     // ── Evaluation ────────────────────────────────────────────────────────────
-    model.sync_weights(&mut rng);
-    //model.reset_state();
+    model.sync_weights(&mut sync_rng);
 
     println!(
         "\n{:<6} {:>10} {:>10} {:>8}",
@@ -92,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Eval  total  MSE : {}", eval_loss);
 
     // Get a batch of test samples
-    let test_indices: Vec<usize> = (0..test_ds.len().min(20)).collect();
+    let test_indices: Vec<usize> = (0..test_ds.len()).collect();
     let (test_inputs, _test_targets) = test_ds.minibatch(&test_indices);
     
     // Forward pass

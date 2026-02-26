@@ -1,6 +1,12 @@
-use integers::data::{load_mnist, shuffled_indices};
+use integers::*;
 use integers::nn::*;
+use integers::nn::losses::*;
+use integers::nn::activations::{ReLU};
+use integers::data::{load_mnist, shuffled_indices};
+#[cfg(debug_assertions)]
 use integers::debug::{reset_overflow_stats, get_overflow_stats};
+use integers::nn::optim::{SGDConfig, AdamConfig};
+
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,15 +23,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Train: {} samples, {} features", train_ds.len(), train_ds.n_features());
     println!("  Test:  {} samples, {} features\n", test_ds.len(), test_ds.n_features());
 
-    // ─── Build Model ──────────────────────────────────────────────────────
-    let scale_shift = 4u32;
-    let grad_shift = 6u32;
-    let batch_size = 32usize;
-    let epochs = 50i32;
+    // ─── RECOMMENDED HYPERPARAMETERS ──────────────────────────────────────
+    // 
+    // CONSERVATIVE (most reliable):
+    //   scale_shift = 5  (increased from 4, reduces forward saturation)
+    //   grad_shift = 8   (increased from 6, handles 3-layer gradient cascade)
+    //   batch_size = 16  (reduced from 32, higher variance helps exploration)
+    //   epochs = 100     (increased from 50, integer training is noisier)
+    //   optimizer = AdamConfig::new(4)  (slower learning, more stable)
+    //
+    // AGGRESSIVE (faster, needs monitoring):
+    //   scale_shift = 6
+    //   grad_shift = 7
+    //   batch_size = 32
+    //   epochs = 150
+    //   optimizer = AdamConfig::new(2)
+    //
+    // SGD+MOMENTUM (often best for integer nets):
+    //   scale_shift = 5
+    //   grad_shift = 7
+    //   batch_size = 32
+    //   epochs = 150
+    //   optimizer = SGDConfig::new(4, Some(2))
+    //
+    // Start with CONSERVATIVE, monitor diagnostics below ↓
     
-    println!("Model Configuration:");
-    println!("  scale_shift = {}", scale_shift);
-    println!("  grad_shift = {}", grad_shift);
+    let scale_shift = 3u32;      // ← INCREASED from 4
+    let grad_shift = 2u32;       // ← INCREASED from 6
+    let batch_size = 64usize;    // ← REDUCED from 32
+    let epochs = 100i32;         // ← INCREASED from 50
+    let lr_shift = 0.5;
+
+    println!("Model Configuration (RECOMMENDED):");
+    println!("  scale_shift = {} (prevents forward saturation)", scale_shift);
+    println!("  grad_shift = {} (handles 3-layer gradient cascade)", grad_shift);
     println!("  batch_size = {}", batch_size);
     println!("  epochs = {}\n", epochs);
 
@@ -35,7 +66,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(ReLU::new())
         .add(Linear::new(128, 10, scale_shift));
 
-    let optim = AdamConfig::new(2);
+    let optim = AdamConfig {
+        lr_shift: 0,
+        b1_shift: 3,
+        b2_shift: 4,
+        eps: 1
+    };
     let mut rng = XorShift64::new(42);
     
     // Print architecture
@@ -52,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for epoch in 0..epochs {
         let epoch_start = Instant::now();
+        #[cfg(debug_assertions)]
         reset_overflow_stats();
 
         // Shuffle
@@ -60,13 +97,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut epoch_loss: i64 = 0;
         let mut batches_processed = 0;
 
+        model.sync_weights(&mut rng);
         // Minibatches
         for batch_start in (0..train_ds.len()).step_by(batch_size) {
             let batch_end = (batch_start + batch_size).min(train_ds.len());
             let batch_indices = &indices[batch_start..batch_end];
             let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
 
-            model.sync_weights(&mut rng);
             let preds = model.forward(&batch_inputs, &mut rng);
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
@@ -78,11 +115,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // ─── Evaluation ────────────────────────────────────────────────────
+        model.sync_weights(&mut rng);
         let mut correct: usize = 0;
         for t in 0..test_ds.len().min(1000) {
             let x = test_ds.get_input(t);
             let target_cls = test_ds.labels[t];
-            model.sync_weights(&mut rng);
             let pred = model.forward(&x, &mut rng);
             let pred_cls = argmax(&pred, Some(1))[0] as u8;
             if pred_cls == target_cls {
@@ -91,16 +128,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let accuracy = correct as f32 / 1000.0;
 
-        let overflow_stats = get_overflow_stats();
-        let elapsed = epoch_start.elapsed().as_secs_f32();
+        #[cfg(debug_assertions)]
+        {
+            let overflow_stats = get_overflow_stats();
+            let elapsed = epoch_start.elapsed().as_secs_f32();
 
-        println!("{:>6} {:>12} {:>11.1}% {:>10.2} {:>8}",
-            epoch,
-            epoch_loss / batches_processed as i64,
-            accuracy * 100.0,
-            elapsed,
-            overflow_stats.downcast_clamps
-        );
+            println!("{:>6} {:>12} {:>11.1}% {:>10.2} {:>8}",
+                epoch,
+                epoch_loss / batches_processed as i64,
+                accuracy * 100.0,
+                elapsed,
+                overflow_stats.downcast_clamps
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let elapsed = epoch_start.elapsed().as_secs_f32();
+
+            println!("{:>6} {:>12} {:>11.1}% {:>10.2} {:>8}",
+                epoch,
+                epoch_loss / batches_processed as i64,
+                accuracy * 100.0,
+                elapsed,
+                -1
+            );
+        }
 
         // Early stopping
         if epoch > 5 && accuracy > 0.95 {
