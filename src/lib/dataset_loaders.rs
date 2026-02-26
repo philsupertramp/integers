@@ -5,6 +5,11 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::Tensor;
+use parquet::file::reader::FileReader;
+use parquet::file::reader::SerializedFileReader;
+use arrow::record_batch::RecordBatch;
+use parquet::record::Field;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -12,6 +17,7 @@ use crate::Tensor;
 pub enum FileFormat {
     CSV,
     TSV,
+    Parquet,
 }
 
 #[derive(Clone, Debug)]
@@ -27,7 +33,7 @@ pub enum QuantizationMethod {
 /// Configuration for loading a dataset from any supported format.
 #[derive(Clone, Debug)]
 pub struct DatasetConfig {
-    /// CSV, TSV, etc.
+    /// CSV, TSV, Parquet, etc.
     pub format: FileFormat,
     /// Which columns contain features (0-indexed). None = all except label.
     pub feature_columns: Option<Vec<usize>>,
@@ -98,6 +104,13 @@ impl DatasetBuilder {
         }
     }
 
+    pub fn new_parquet(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            config: DatasetConfig::default_format(FileFormat::Parquet),
+        }
+    }
+
     pub fn format(mut self, format: FileFormat) -> Self {
         self.config.format = format;
         self
@@ -136,6 +149,7 @@ impl DatasetBuilder {
     pub fn load(self) -> crate::data::DataResult<crate::data::Dataset> {
         match self.config.format {
             FileFormat::CSV | FileFormat::TSV => load_csv(&self.path, self.config),
+            FileFormat::Parquet => load_parquet(&self.path, self.config),
         }
     }
 }
@@ -185,6 +199,7 @@ fn load_csv(
     let delimiter = match config.format {
         FileFormat::CSV => ',',
         FileFormat::TSV => '\t',
+        FileFormat::Parquet => todo!("error"),
     };
 
     let mut raw_features: Vec<Vec<f32>> = Vec::new();
@@ -320,6 +335,163 @@ fn load_csv(
         n_classes,
     })
 }
+
+// ─── Parquet Loader ───────────────────────────────────────────────────────────
+
+fn load_parquet(
+    path: &Path,
+    config: DatasetConfig,
+) -> crate::data::DataResult<crate::data::Dataset> {
+    let file = File::open(path)?;
+    let reader = SerializedFileReader::new(file)
+        .map_err(|e| crate::data::DataError::ParseError(format!("Failed to read parquet: {}", e)))?;
+
+    let mut raw_features: Vec<Vec<f32>> = Vec::new();
+    let mut labels: Vec<u8> = Vec::new();
+    let mut label_string_map: HashMap<String, u8> = config.class_mapping.clone().unwrap_or_default();
+    let mut next_class_id = label_string_map.len() as u8;
+
+    // Read records using the parquet record reader
+    let record_iter = reader
+        .get_row_iter(None)
+        .map_err(|e| crate::data::DataError::ParseError(format!("Failed to get row iterator: {}", e)))?;
+
+    for record_result in record_iter {
+        let record = record_result
+            .map_err(|e| crate::data::DataError::ParseError(format!("Error reading record: {}", e)))?;
+
+        // Determine which columns are features
+        let feature_cols: Vec<usize> = if let Some(ref cols) = config.feature_columns {
+            cols.clone()
+        } else {
+            // All fields except label column
+            (0..record.len())
+                .filter(|i| *i != config.label_column)
+                .collect()
+        };
+
+        // Extract features from this record
+        let mut row = Vec::with_capacity(feature_cols.len());
+        for (idx, (name, value)) in record.get_column_iter().enumerate() {
+            if !feature_cols.contains(&idx) {
+                continue;
+            }
+            let float_val = match value {
+                parquet::record::Field::Float(f) => *f as f32,
+                parquet::record::Field::Double(d) => *d as f32,
+                parquet::record::Field::Int(i) => *i as f32,
+                parquet::record::Field::Long(l) => *l as f32,
+                parquet::record::Field::UByte(ub) => *ub as f32,
+                parquet::record::Field::UInt(ui) => *ui as f32,
+                parquet::record::Field::ULong(ul) => *ul as f32,
+                other => {
+                    return Err(crate::data::DataError::ParseError(format!(
+                        "Unsupported field type: {:?}",
+                        other
+                    )))
+                }
+            };
+            row.push(float_val);
+        }
+
+        // Extract label
+        let mut label_field = &Field::Null;
+        for (idx, (name, value)) in record.get_column_iter().enumerate() {
+            if idx == config.label_column {
+                label_field = value;
+            }
+        }
+
+        let label = match label_field {
+            parquet::record::Field::Str(s) => {
+                // String label — map to numeric id
+                let label_str = s.clone();
+                if !label_string_map.contains_key(&label_str) {
+                    label_string_map.insert(label_str.clone(), next_class_id);
+                    next_class_id += 1;
+                }
+                label_string_map[&label_str]
+            }
+            parquet::record::Field::UByte(ub) => *ub,
+            parquet::record::Field::Int(i) => *i as u8,
+            parquet::record::Field::Long(l) => *l as u8,
+            parquet::record::Field::UInt(ui) => *ui as u8,
+            parquet::record::Field::ULong(ul) => *ul as u8,
+            other => {
+                return Err(crate::data::DataError::ParseError(format!(
+                    "Unsupported label type: {:?}",
+                    other
+                )))
+            }
+        };
+
+        raw_features.push(row);
+        labels.push(label);
+    }
+
+    if labels.is_empty() {
+        return Err(crate::data::DataError::EmptyDataset);
+    }
+
+    // Finalize dataset (quantize and create tensors)
+    finalize_dataset(raw_features, labels, config)
+}
+
+// ─── Common finalization ──────────────────────────────────────────────────────
+
+fn finalize_dataset(
+    raw_features: Vec<Vec<f32>>,
+    labels: Vec<u8>,
+    config: DatasetConfig,
+) -> crate::data::DataResult<crate::data::Dataset> {
+    let n_samples = labels.len();
+    let n_features = if raw_features.is_empty() {
+        0
+    } else {
+        raw_features[0].len()
+    };
+    let n_classes = config
+        .num_classes
+        .unwrap_or(labels.iter().max().map(|&x| x as usize + 1).unwrap_or(0));
+
+    // Quantize per-column
+    let mut columns: Vec<Vec<i8>> = Vec::with_capacity(n_features);
+    for feat_idx in 0..n_features {
+        let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
+        let quantized = match config.quantization {
+            QuantizationMethod::MinMax => minmax_quantize(&col),
+            QuantizationMethod::StandardScore => standard_score_quantize(&col),
+            QuantizationMethod::Custom => {
+                return Err(crate::data::DataError::ParseError(
+                    "Custom quantization not yet implemented".to_string(),
+                ))
+            }
+        };
+        columns.push(quantized);
+    }
+
+    // Re-interleave into row-major layout [n, n_features]
+    let mut inp_data = vec![0i8; n_samples * n_features];
+    for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
+        for (feat_idx, cell) in row.iter_mut().enumerate() {
+            *cell = columns[feat_idx][sample_idx];
+        }
+    }
+
+    // One-hot targets
+    let mut tgt_data = vec![0i8; n_samples * n_classes];
+    for (i, &lbl) in labels.iter().enumerate() {
+        tgt_data[i * n_classes + lbl as usize] = 96;
+    }
+
+    Ok(crate::data::Dataset {
+        inputs: Tensor::from_vec(inp_data, vec![n_samples, n_features]),
+        labels,
+        targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
+        n_classes,
+    })
+}
+
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

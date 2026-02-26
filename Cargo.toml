@@ -12,5 +12,7 @@ name = "iris"
 path = "examples/iris.rs"
 
 [dependencies]
+arrow = "58.0.0"
+parquet = "58.0.0"
 
 

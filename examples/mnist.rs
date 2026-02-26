@@ -6,6 +6,7 @@ use integers::data::{load_mnist, shuffled_indices};
 #[cfg(debug_assertions)]
 use integers::debug::{reset_overflow_stats, get_overflow_stats};
 use integers::nn::optim::{SGDConfig, AdamConfig};
+use integers::dataset_loaders::{QuantizationMethod, DatasetBuilder, FileFormat};
 
 use std::time::Instant;
 
@@ -17,8 +18,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ─── Load Data ─────────────────────────────────────────────────────────
     println!("Loading datasets...");
     let train_start = Instant::now();
-    let train_ds = load_mnist("data/mnist", "train", Some(10000))?;
-    let test_ds = load_mnist("data/mnist", "test", None)?;
+    let train_ds = DatasetBuilder::new("data/mnist_train.parquet")
+        .format(FileFormat::Parquet)
+        .with_features((0..784).collect())
+        .with_label_column(784)
+        .with_num_classes(10)
+        .with_quantization(QuantizationMethod::StandardScore)
+        .load()?;
+    let test_ds = DatasetBuilder::new("data/mnist_test.parquet")
+        .format(FileFormat::Parquet)
+        .with_features((0..784).collect())
+        .with_label_column(784)
+        .with_num_classes(10)
+        .with_quantization(QuantizationMethod::StandardScore)
+        .load()?;
     println!("✓ Loaded in {:.2}s", train_start.elapsed().as_secs_f32());
     println!("  Train: {} samples, {} features", train_ds.len(), train_ds.n_features());
     println!("  Test:  {} samples, {} features\n", test_ds.len(), test_ds.n_features());
@@ -45,10 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Start with CONSERVATIVE, monitor diagnostics below ↓
     
-    let grad_shift = 3u32;       // ← INCREASED from 6
+    let grad_shift = 1u32;       // ← INCREASED from 6
     let batch_size = 16usize;    // ← REDUCED from 32
     let epochs = 100i32;         // ← INCREASED from 50
-    let lr_shift = 0.5;
 
     println!("Model Configuration (RECOMMENDED):");
     println!("  grad_shift = {} (handles 3-layer gradient cascade)", grad_shift);
@@ -67,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(l2);
 
     let optim = AdamConfig {
-        lr_shift: 0,
+        lr_shift: 3,
         b1_shift: 3,
         b2_shift: 4,
         eps: 2
