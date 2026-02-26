@@ -43,6 +43,8 @@ pub trait Module {
     /// quantize i32 master weights -> i8 storage. No-op for non-parameterized modules.
     fn sync_weights(&mut self, _rng: &mut XorShift64) {}
 
+    fn init(&mut self, _rng: &mut XorShift64) {}
+
     /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
     fn step(&mut self, _optim: &dyn OptimizerConfig) {}
 
@@ -100,6 +102,11 @@ impl Params {
         }
     }
 
+    pub fn with_shift(mut self, shift: u32) -> Self {
+        self.shift = shift;
+        self
+    }
+
     pub fn init_uniform(&mut self, rng: &mut XorShift64, range: i32) {
         let range = range.max(1);
         let spread = (2 * range) as u32;
@@ -155,6 +162,10 @@ impl Params {
     pub fn memory_bytes(&self) -> usize {
         self.master.memory_bytes() + self.storage.memory_bytes()
     }
+}
+
+pub trait HasWeights {
+    fn get_weights(&self) -> &Tensor<i32>;
 }
 
 pub struct Linear {
@@ -292,6 +303,16 @@ impl Module for Linear {
             children: vec![],
         }
     }
+
+    fn init(&mut self, rng: &mut XorShift64) {
+        self.init_xavier(rng);
+    }
+}
+
+impl HasWeights for Linear {
+    fn get_weights(&self) -> &Tensor<i32> {
+        &self.weights.master
+    }
 }
 
 
@@ -313,6 +334,16 @@ impl Sequential {
     pub fn add(&mut self, m: impl Module + 'static) -> &mut Self {
         self.modules.push(Box::new(m));
         self
+    }
+
+    pub fn init_all(&mut self, rng: &mut XorShift64) {
+        for module in &mut self.modules {
+            module.init(rng);
+        }
+    }
+
+    pub fn analyze_scale_shifts(&self) {
+
     }
 }
 

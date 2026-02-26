@@ -130,6 +130,10 @@ impl Module for RNNCell {
             children,
         }
     }
+
+    fn init(&mut self, rng: &mut XorShift64) {
+        self.init_weights(rng);
+    }
 }
 
 pub struct RNN {
