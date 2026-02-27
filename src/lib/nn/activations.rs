@@ -19,7 +19,7 @@ impl ReLU {
 }
 
 impl Module for ReLU {
-    fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
+    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
         self.cache.push(input.clone());
         let mut output = Tensor::<i8>::new(input.shape.clone());
         for idx in 0..input.data.len() {
@@ -78,7 +78,7 @@ impl Tanh {
 }
 
 impl Module for Tanh {
-    fn forward(&mut self, input: &Tensor<i8>, _rng: &mut XorShift64) -> Tensor<i8> {
+    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
         self.cache.push(input.clone());
         let mut output = Tensor::<i8>::new(input.shape.clone());
         for (o, &x) in output.data.iter_mut().zip(&input.data) {

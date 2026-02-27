@@ -37,7 +37,7 @@ impl ModuleInfo {
     }
 }
 pub trait Module {
-    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8>;
+    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8>;
     fn backward(&mut self, grad: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16>;
 
     /// quantize i32 master weights -> i8 storage. No-op for non-parameterized modules.
@@ -47,6 +47,10 @@ pub trait Module {
 
     /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
     fn step(&mut self, _optim: &dyn OptimizerConfig) {}
+
+    fn get_output_shift(&self) -> u32 {
+        0
+    }
 
     fn memory_report(&self) -> (usize, usize) {
         (0, 0)
@@ -88,6 +92,10 @@ pub struct Params {
     ///     shift = 5 // for 2-3 layer networks
     ///     shift = 6 // for deeper networks
     pub shift: u32,
+
+    /// Automatically tracks what shift was applied to inputs
+    pub input_shift: Option<u32>,
+    pub output_shift: Option<u32>,
 }
 
 impl Params {
@@ -99,6 +107,8 @@ impl Params {
             grads: None,
             state: None,
             shift,
+            input_shift: None,
+            output_shift: None,
         }
     }
 
@@ -164,6 +174,14 @@ impl Params {
     }
 }
 
+fn compute_shift_for_max(max_magnitude: u32) -> u32 {
+    let mut shift: u32 = 0;
+    while (max_magnitude >> shift) > 127 && shift < 8 {
+        shift += 1;
+    }
+    shift.max(1).min(8)
+}
+
 pub trait HasWeights {
     /// Get all weight parameters (master i32 tensors) in this module.
     /// Useful for analysis, initialization, and automatic shift detection.
@@ -189,15 +207,7 @@ pub trait HasWeights {
             return 4; // weights not yet initialized
         }
         
-        // Find minimum shift such that (max_magnitude >> shift) ≤ 127
-        let mut shift = 0u32;
-        while (max_magnitude >> shift) > 127 && shift < 8 {
-            shift += 1;
-        }
-
-        println!("Setting shift = {}", shift.clamp(1, 8));
-        
-        shift.clamp(1, 8)
+        compute_shift_for_max(max_magnitude)
     }
 }
 
@@ -233,7 +243,11 @@ impl Module for Linear {
         self.bias.sync(rng);
     }
 
-    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+    fn get_output_shift(&self) -> u32 {
+        self.weights.output_shift.unwrap_or(0)
+    }
+
+    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
         assert_eq!(
             input.shape[1], self.weights.storage.shape[1],
             "Linear::forward: Input in wrong dimension for weights! {} vs {}",
@@ -243,8 +257,10 @@ impl Module for Linear {
         let input_dim = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
 
+
         self.cache.push(input.clone());
         let mut out = Tensor::new(vec![batch, output_dim]);
+        let mut out_raw = Tensor::<i32>::new(vec![batch, output_dim]);
 
         for b in 0..batch {
             let in_row = &input.data[b * input_dim..(b + 1) * input_dim];
@@ -261,19 +277,32 @@ impl Module for Linear {
                 #[cfg(not(target_arch = "aarch64"))]
                 let raw_val = kernels::dot_product_scalar(in_row, w_row);
                 let acc = raw_val + self.bias.storage.data[o] as i32;
-                out.data[b * output_dim + o] =
-                    kernels::stochastic_downcast(acc, self.weights.shift, rng);
+                out_raw.data[b * output_dim + o] = acc;
             }
         }
+
+        let max_val = out_raw.data.iter().map(|x| x.abs()).max().unwrap_or(1);
+        let output_shift = compute_shift_for_max(max_val as u32);
+
+        self.weights.input_shift = Some(input_shift);
+        self.weights.output_shift = Some(output_shift);
+
+        for (raw_out_val, out_val) in out_raw.data.iter().zip(&mut out.data) {
+            *out_val = kernels::stochastic_downcast(*raw_out_val, output_shift, rng);
+        }
+
         out
     }
 
-    fn backward(&mut self, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
-        let input = self.cache.pop().expect("Backward called without forward");
+    fn backward(&mut self, grad_output: &Tensor<i16>, _gradient_shift: Option<u32>) -> Tensor<i16> {
+        let input = self.cache.pop().expect("Linear::backward: Backward called without forward");
+        let input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
+        let output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
+        let weight_shift = self.weights.shift;
+
         let batch = input.shape[0];
         let input_dim = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
-        let gshift = gradient_shift.unwrap_or(8);
 
         // Mathematically required for the chain rule:
         let wshift = self.weights.shift;
@@ -290,22 +319,39 @@ impl Module for Linear {
                 }
 
                 // Bias update is an accumulator, so apply gshift
-                let g_shifted = if gshift > 0 { g >> gshift } else { g };
+                let bias_grad_shift = output_shift;
+                let g_shifted = if bias_grad_shift > 0 { g >> bias_grad_shift } else { g };
                 grad_bias.data[o] = grad_bias.data[o].saturating_add(g_shifted);
 
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
+
                     let dw = kernels::mul_mixed_scalar(g, x);
+
+                    // --- Weight Gradient ---
+                    // dL/dw = grad_output * input_i8
+                    // Both terms are quantized:
+                    //  grad_output is quantized by output_shift
+                    //  input_i8 is quantized by input_shift
+                    let weight_grad_shift = output_shift.saturating_add(input_shift);
+                    let dw_shifted = dw >> weight_grad_shift;
                     // Weight update is an accumulator, so apply gshift
                     grad_weights.data[o * input_dim + i] =
-                        grad_weights.data[o * input_dim + i].saturating_add((dw >> gshift) as i16);
+                        grad_weights.data[o * input_dim + i].saturating_add(dw_shifted as i16);
 
                     let w = self.weights.storage.data[o * input_dim + i];
+
+                    // --- Input Gradient ---
+                    // dL/d(input) = grad_output * weight_i8
+                    // Both terms are quantized:
+                    //  grad_output is quantized by output_shift
+                    //  input_i8 is quantized by weight_shift
                     let dx = kernels::mul_mixed_scalar(g, w);
 
+                    let input_grad_shift = output_shift.saturating_add(weight_shift);
                     // Input gradient flows back through the network, apply wshift!
                     grad_input.data[b * input_dim + i] =
-                        grad_input.data[b * input_dim + i].saturating_add((dx >> wshift) as i16);
+                        grad_input.data[b * input_dim + i].saturating_add((dx >> input_grad_shift) as i16);
                 }
             }
         }
@@ -386,10 +432,11 @@ impl Sequential {
 }
 
 impl Module for Sequential {
-    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+    fn forward(&mut self, input: &Tensor<i8>, mut input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
         let mut output = input.clone();
         for m in self.modules.iter_mut() {
-            output = m.forward(&output, rng);
+            output = m.forward(&output, input_shift, rng);
+            input_shift = m.get_output_shift();
         }
         output
     }

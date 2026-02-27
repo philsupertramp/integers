@@ -58,9 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Start with CONSERVATIVE, monitor diagnostics below ↓
     
-    let grad_shift = 1u32;       // ← INCREASED from 6
-    let batch_size = 16usize;    // ← REDUCED from 32
-    let epochs = 100i32;         // ← INCREASED from 50
+    let input_shift: u32 = 1;
+    let grad_shift: u32 = 9;       // ← INCREASED from 6
+    let batch_size: usize = 32;    // ← REDUCED from 32
+    let epochs = 150i32;         // ← INCREASED from 50
 
     println!("Model Configuration (RECOMMENDED):");
     println!("  grad_shift = {} (handles 3-layer gradient cascade)", grad_shift);
@@ -79,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(l2);
 
     let optim = AdamConfig {
-        lr_shift: 3,
+        lr_shift: 1,
         b1_shift: 3,
         b2_shift: 4,
         eps: 2
@@ -115,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_indices = &indices[batch_start..batch_end];
             let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
 
-            let preds = model.forward(&batch_inputs, &mut rng);
+            let preds = model.forward(&batch_inputs, input_shift, &mut rng);
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
             epoch_loss += loss as i64;
@@ -131,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for t in 0..test_ds.len().min(1000) {
             let x = test_ds.get_input(t);
             let target_cls = test_ds.labels[t];
-            let pred = model.forward(&x, &mut rng);
+            let pred = model.forward(&x, 0, &mut rng);
             let pred_cls = argmax(&pred, Some(1))[0] as u8;
             if pred_cls == target_cls {
                 correct += 1;
@@ -187,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let x = test_ds.get_input(t);
         let target_cls = test_ds.labels[t] as usize;
         model.sync_weights(&mut rng);
-        let pred = model.forward(&x, &mut rng);
+        let pred = model.forward(&x, input_shift, &mut rng);
         let pred_cls = argmax(&pred, Some(1))[0] as usize;
 
         if pred_cls == target_cls {

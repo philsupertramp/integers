@@ -63,7 +63,10 @@ impl RNNCell {
 }
 
 impl Module for RNNCell {
-    fn forward(&mut self, input: &Tensor<i8>, rng: &mut XorShift64) -> Tensor<i8> {
+    fn get_output_shift(&self) -> u32 {
+        self.w_hh.weights.output_shift.unwrap_or(0)
+    }
+    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
         let batch = input.shape[0];
 
         let h = self
@@ -76,8 +79,8 @@ impl Module for RNNCell {
         //
         // Note: adding two i8 tensors before tanh risks overflow.
         // Accumulate in i16, then downcast before tanh.
-        let ih = self.w_ih.forward(input, rng);
-        let hh = self.w_hh.forward(h, rng);
+        let ih = self.w_ih.forward(input, input_shift, rng);
+        let hh = self.w_hh.forward(h, self.w_ih.weights.output_shift.expect("Expected output shift"), rng);
 
         let mut comb = Tensor::<i8>::new(vec![batch, self.hidden_dim]);
         for i in 0..comb.data.len() {
@@ -85,7 +88,7 @@ impl Module for RNNCell {
             comb.data[i] = sum.clamp(-128, 127) as i8;
         }
 
-        let h_next = self.act.forward(&comb, rng);
+        let h_next = self.act.forward(&comb, self.w_hh.weights.output_shift.expect("Expected output shift"), rng);
         self.h_prev = Some(h_next.clone());
         h_next
     }
@@ -176,11 +179,12 @@ impl RNN {
     pub fn forward_seq(
         &mut self,
         input_seq: &[Tensor<i8>],
+        input_shift: u32,
         rng: &mut XorShift64,
     ) -> Vec<Tensor<i8>> {
         input_seq
             .iter()
-            .map(|x| self.cell.forward(x, rng))
+            .map(|x| self.cell.forward(x, input_shift, rng))
             .collect()
     }
 
