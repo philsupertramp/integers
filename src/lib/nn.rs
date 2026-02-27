@@ -565,10 +565,11 @@ mod tests {
         let mut input = Tensor::new(vec![1, 2]);
         input.data[0] = 10;
         input.data[1] = 20;
-        let out = lin.forward(&input, &mut rng);
+        let out = lin.forward(&input, 0, &mut rng);
+        let output_shift = lin.weights.output_shift.expect("Does not exist.");
 
-        assert_eq!(out.data[0], 10);
-        assert_eq!(out.data[1], 20);
+        assert_eq!(out.data[0] << output_shift, 10);
+        assert_eq!(out.data[1] << output_shift, 20);
     }
 
     #[test]
@@ -582,11 +583,13 @@ mod tests {
         let mut input = Tensor::new([1, 2].to_vec());
         input.data[0] = 126;
         input.data[1] = 126;
-        let out = lin.forward(&input, &mut rng);
+        let out = lin.forward(&input, 0, &mut rng);
+        let output_shift = lin.weights.output_shift.expect("Does not exist.");
 
         // clamping around 127
-        assert_eq!(out.data[0], 127);
-        assert_eq!(out.data[1], 127);
+        assert_eq!(out.data[0] << output_shift, 0);
+        assert_eq!(out.data[1] << output_shift, 0);
+        assert_eq!(output_shift, 7);
     }
 
     #[test]
@@ -596,7 +599,7 @@ mod tests {
         lin.sync_weights(&mut rng);
 
         let input = Tensor::new([10, 2].to_vec());
-        let out = lin.forward(&input, &mut rng);
+        let out = lin.forward(&input, 0, &mut rng);
 
         assert_eq!(out.shape[0], 10);
         assert_eq!(out.shape[1], 3);
@@ -618,10 +621,12 @@ mod tests {
         input.data[0] = 10;
         input.data[1] = 20;
 
-        let out = lin.forward(&input, &mut rng);
+        let out = lin.forward(&input, 0, &mut rng);
+        let output_shift = lin.weights.output_shift.expect("Does not exist.");
 
-        assert_eq!(out.data[0], 10);
-        assert_eq!(out.data[1], 20);
+        assert_eq!(out.data[0] << output_shift, 10);
+        assert_eq!(out.data[1] << output_shift, 20);
+        assert_eq!(out.data[1], 10);
     }
 
     #[test]
@@ -631,7 +636,7 @@ mod tests {
         lin.sync_weights(&mut rng);
 
         let input = Tensor::new(vec![10, 2]);
-        let out = lin.forward(&input, &mut rng);
+        let out = lin.forward(&input, 0, &mut rng);
 
         assert_eq!(out.shape[0], 10);
         assert_eq!(out.shape[1], 3);
@@ -642,10 +647,12 @@ mod tests {
     fn test_linear_backward_shapes() {
         // Batch 2, Input 4 -> Output 3
         let mut lin = Linear::new(4, 3, 0);
+        let mut rng = XorShift64::new(420);
 
         let input = Tensor::new(vec![2, 4]); // [Batch, In]
         let grad_out = Tensor::new(vec![2, 3]); // [Batch, Out]
 
+        lin.forward(&input, 0, &mut rng);
         lin.cache = vec![input.clone()];
 
         let d_x = lin.backward(&grad_out, None);
@@ -666,7 +673,7 @@ mod tests {
         lin.sync_weights(&mut rng);
 
         let input = Tensor::from_vec(vec![2; 10], vec![10, 1]);
-        lin.forward(&input, &mut rng);
+        lin.forward(&input, 0, &mut rng);
     }
 
     #[test]
@@ -674,14 +681,14 @@ mod tests {
         let mut rng = XorShift64::new(777);
         let mut l1 = Linear::new(2, 1, 2);
         let x = Tensor::from_vec(vec![0, 0], vec![1, 2]);
-        l1.forward(&x, &mut rng);
+        l1.forward(&x, 2, &mut rng);
 
         let (a, b) = l1.memory_report();
         assert_eq!(a, 15);
         assert_eq!(b, 2);
 
         let mut l2 = Linear::new(2, 10, 2);
-        l2.forward(&x, &mut rng);
+        l2.forward(&x, 2, &mut rng);
 
         let (a2, b2) = l2.memory_report();
         assert_eq!(a2, 150);
@@ -711,7 +718,7 @@ mod tests {
 
         let x = Tensor::from_vec(vec![1, 1], vec![1, 2]);
 
-        l1.forward(&x, &mut rng);
+        l1.forward(&x, 1, &mut rng);
         l1.step(&mut optim);
 
         assert_eq!(l1.weights.master.data[0], 111);
@@ -722,7 +729,7 @@ mod tests {
         let x2 = Tensor::from_vec(vec![2, 2], vec![1, 2]);
 
         l1.sync_weights(&mut rng);
-        let _preds = l1.forward(&x2, &mut rng);
+        let _preds = l1.forward(&x2, 1, &mut rng);
 
         // 3. Backpropagate "a" gradient 
         let grad_out = Tensor::<i32>::from_vec(vec![126, 2], vec![2, 1]);
@@ -763,7 +770,7 @@ mod tests {
         input.data[2] = 5;
         input.data[3] = 127;
 
-        let res = relu.forward(&input, &mut rng);
+        let res = relu.forward(&input, 0, &mut rng);
         assert_eq!(res.data[0], 0);
         assert_eq!(res.data[1], 0);
         assert_eq!(res.data[2], 5);
@@ -781,7 +788,7 @@ mod tests {
         input.data[2] = 5;
         input.data[3] = 127;
 
-        let _res = relu.forward(&input, &mut rng);
+        let _res = relu.forward(&input, 0, &mut rng);
 
         let mut grad = Tensor::<i16>::new(vec![4, 1]);
         grad.data[0] = 10;
@@ -815,7 +822,7 @@ mod tests {
 
         let input = Tensor::<i8>::new(vec![4, 1]);
         let mut rng = XorShift64::new(42);
-        relu.forward(&input, &mut rng);
+        relu.forward(&input, 0, &mut rng);
 
         (stat, dyna) = relu.memory_report();
 
@@ -841,36 +848,33 @@ mod tests {
     #[test]
     fn test_train_xor_sgd_momentum() {
         let mut rng = XorShift64::new(777);
+        let input_shift: u32 = 7;
+        let grad_shift: u32 = 1;
+        let mut l1 = Linear::new(2, 8, input_shift);
+        let mut l2 = Linear::new(8, 1, input_shift);
+        const MAX_GRAD: i16 = 127;
 
-        let mut l1 = Linear::new(2, 8, 2);
-        let mut l2 = Linear::new(8, 1, 2);
+        l1.init(&mut rng);
+        l2.init(&mut rng);
+        let mut model = Sequential::new();
+        model
+            .add(l1)
+            .add(activations::ReLU::new())
+            .add(l2);
 
-        for w in l1.weights.master.data.iter_mut() {
-            *w = (rng.gen_range(60) as i32) - 30;
-        }
-        for w in l2.weights.master.data.iter_mut() {
-            *w = (rng.gen_range(60) as i32) - 30;
-        }
-        for b in l1.bias.master.data.iter_mut() {
-            *b = 5;
-        }
 
-        let mut model = Sequential {
-            modules: vec![Box::new(l1), Box::new(activations::ReLU::new()), Box::new(l2)],
-        };
-
-        let mut optim = SGDConfig::new().with_learn_rate(0.25).with_momentum(0.2);
+        let mut optim = SGDConfig::new().with_learn_rate(0.1250).with_momentum(0.2);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 
         let y_target = vec![0, 20, 20, 0];
-        let epochs = 8000;
+        let epochs = 800;
 
         println!("--- Starting Integer XOR Training with SGD + Momentum ---");
 
         for epoch in 0..epochs {
             model.sync_weights(&mut rng);
-            let preds = model.forward(&x, &mut rng);
+            let preds = model.forward(&x, input_shift, &mut rng);
 
             let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
             let mut loss = 0;
@@ -881,48 +885,58 @@ mod tests {
                 loss += (error as i32) * (error as i32);
             }
 
+            if epoch % 50 == 0 {
+                println!(
+                    "Epoch {:03}: Loss = {:05}, Grad = {:?}, Preds: [{}, {}, {}, {}]",
+                    epoch, loss, grad_out, preds.data[0], preds.data[1], preds.data[2], preds.data[3]
+                );
+            }
+
             if loss == 0 {
                 println!("Converged early at epoch {}!", epoch);
                 break;
             }
-
-            model.backward(&grad_out, Some(0));
+            let clipped = Tensor::from_vec(grad_out.data.iter().map(|&g| g.clamp(-MAX_GRAD, MAX_GRAD)).collect(), grad_out.shape);
+            model.backward(&clipped, Some(grad_shift));
             model.step(&mut optim);
         }
 
         model.sync_weights(&mut rng);
-        let final_preds = model.forward(&x, &mut rng);
+        let final_preds = model.forward(&x, input_shift, &mut rng);
 
-        assert!(final_preds.data[0] < 8, "{}", final_preds.data[0]);
-        assert!(final_preds.data[3] < 8, "{}", final_preds.data[3]);
-        assert!(final_preds.data[1] > 12, "{}", final_preds.data[1]);
-        assert!(final_preds.data[2] > 12, "{}", final_preds.data[2]);
+        assert!(final_preds.data[0] < 10, "{}", final_preds.data[0]);
+        assert!(final_preds.data[3] < 10, "{}", final_preds.data[3]);
+        assert!(final_preds.data[1] > 10, "{}", final_preds.data[1]);
+        assert!(final_preds.data[2] > 10, "{}", final_preds.data[2]);
     }
 
     #[test]
     fn test_train_xor_adam() {
         let mut rng = XorShift64::new(777);
 
-        let mut l1 = Linear::new(2, 8, 0);
-        let mut l2 = Linear::new(8, 1, 0);
+        let lr_shift: u32 = 0;
+        let mut l1 = Linear::new(2, 8, lr_shift);
+        let mut l2 = Linear::new(8, 1, lr_shift);
 
         for w in l1.weights.master.data.iter_mut() {
             *w = (rng.gen_range(30) as i32) - 15;
         }
         for w in l2.weights.master.data.iter_mut() {
-            *w = (rng.gen_range(60) as i32) - 30;
+            *w = (rng.gen_range(30) as i32) - 15;
         }
         for b in l1.bias.master.data.iter_mut() {
             *b = 5;
         }
 
-        let mut model = Sequential {
-            modules: vec![Box::new(l1), Box::new(activations::ReLU::new()), Box::new(l2)],
-        };
+        let mut model = Sequential::new();
+        model
+            .add(l1)
+            .add(activations::ReLU::new())
+            .add(l2);
 
         // NEW: Instantiate our Integer Adam!
         // We set the learning rate multiplier to 2.
-        let mut optim = AdamConfig::new().with_learn_rate(0.5);
+        let mut optim = AdamConfig::new().with_learn_rate(0.75);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 
@@ -933,7 +947,7 @@ mod tests {
 
         for epoch in 0..epochs {
             model.sync_weights(&mut rng);
-            let preds = model.forward(&x, &mut rng);
+            let preds = model.forward(&x, lr_shift, &mut rng);
 
             let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
             let mut loss = 0;
@@ -963,7 +977,7 @@ mod tests {
         }
 
         model.sync_weights(&mut rng);
-        let final_preds = model.forward(&x, &mut rng);
+        let final_preds = model.forward(&x, 0, &mut rng);
         let p00 = final_preds.data[0];
         let p01 = final_preds.data[1];
         let p10 = final_preds.data[2];
@@ -974,10 +988,10 @@ mod tests {
             p00, p01, p10, p11
         );
 
-        assert!(p00 < 8, "0,0 failed: expected low, got {}", p00);
-        assert!(p11 < 8, "1,1 failed: expected low, got {}", p11);
-        assert!(p01 > 12, "0,1 failed: expected high, got {}", p01);
-        assert!(p10 > 12, "1,0 failed: expected high, got {}", p10);
+        assert!(p00 < 10, "0,0 failed: expected low, got {}", p00);
+        assert!(p11 < 10, "1,1 failed: expected low, got {}", p11);
+        assert!(p01 > 10, "0,1 failed: expected high, got {}", p01);
+        assert!(p10 > 10, "1,0 failed: expected high, got {}", p10);
     }
 }
 

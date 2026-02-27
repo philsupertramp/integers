@@ -18,7 +18,7 @@ fn test_rnn_in_sequential() {
     let x = Tensor::new(vec![1, 4]); // single step, batch=1, input_dim=4
 
     model.sync_weights(&mut rng);
-    let out = model.forward(&x, &mut rng);
+    let out = model.forward(&x, 2, &mut rng);
     assert_eq!(out.shape, vec![1, 1]);
 }
 
@@ -36,7 +36,7 @@ fn test_rnn_sequence() {
     rnn.reset_state();
 
     let seq: Vec<Tensor<i8>> = (0..10).map(|_| Tensor::new(vec![2, 4])).collect();
-    let outputs = rnn.forward_seq(&seq, &mut rng);
+    let outputs = rnn.forward_seq(&seq, 2, &mut rng);
     assert_eq!(outputs.len(), 10);
     assert_eq!(outputs[0].shape, vec![2, 8]);
 
@@ -119,8 +119,8 @@ fn test_rnn_sin_prediction() {
             let target = samples[t + 1] as i16;
 
             // Forward every step so the hidden state evolves continuously.
-            let h_t = rnn.forward(&x_t, &mut rng);
-            let pred = head.forward(&h_t, &mut rng);
+            let h_t = rnn.forward(&x_t, SCALE_SHIFT, &mut rng);
+            let pred = head.forward(&h_t, rnn.w_hh.weights.output_shift.expect("No forward callled."), &mut rng);
 
             // Clamp error before backward to avoid i8 overflow in the
             // backward path when prediction is far from target early in training.
@@ -168,8 +168,8 @@ fn test_rnn_sin_prediction() {
     for t in 0..(SEQ_LEN - 1) {
         let x_t = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
         let target = samples[t + 1] as i16;
-        let h_t = rnn.forward(&x_t, &mut rng);
-        let pred = head.forward(&h_t, &mut rng);
+        let h_t = rnn.forward(&x_t, SCALE_SHIFT, &mut rng);
+        let pred = head.forward(&h_t, rnn.w_hh.weights.output_shift.expect("No forward called.") ,&mut rng);
         let error = pred.data[0] as i16 - target;
         eval_loss += (error as i64) * (error as i64);
         println!("{:<6} {:>10} {:>10} {:>8}", t, target, pred.data[0], error);
@@ -250,8 +250,8 @@ fn test_rnn_cos_prediction() {
         for t in 0..(SEQ_LEN - 1) {
             let x_t = Tensor::from_vec(vec![samples[t]], vec![1, 1]);
             let target = samples[t + 1] as i16;
-            let h_t = rnn.forward(&x_t, &mut rng);
-            let pred = head.forward(&h_t, &mut rng);
+            let h_t = rnn.forward(&x_t, SCALE_SHIFT, &mut rng);
+            let pred = head.forward(&h_t, rnn.w_hh.weights.output_shift.expect("No forward called."), &mut rng);
 
             let error = (pred.data[0] as i16 - target).clamp(-127, 127);
             epoch_loss += (error as i64) * (error as i64);

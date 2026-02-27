@@ -28,7 +28,7 @@ pub fn reset_overflow_stats() {
     });
 }
 #[macro_export]
-macro_rules! checked_add_i16 {
+macro_rules! checked_add_counting {
     ($acc:expr, $val:expr, $counter:ident) => {{
         #[cfg(debug_assertions)]
         {
@@ -44,7 +44,7 @@ macro_rules! checked_add_i16 {
 }
 
 #[macro_export]
-macro_rules! checked_sub_i16 {
+macro_rules! checked_sub_counting {
     ($acc:expr, $val:expr, $counter:ident) => {{
         #[cfg(debug_assertions)]
         {

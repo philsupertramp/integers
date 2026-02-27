@@ -130,9 +130,9 @@ fn run_scenario(
     l2.sync_weights(&mut rng);
     l3.sync_weights(&mut rng);
 
-    let h1 = l1.forward(input, &mut rng);
-    let h2 = l2.forward(&h1, &mut rng);
-    let _  = l3.forward(&h2, &mut rng);
+    let h1 = l1.forward(&input, scale_shift, &mut rng);
+    let h2 = l2.forward(&h1, l1.weights.output_shift.expect("No forward called."), &mut rng);
+    let _  = l3.forward(&h2, l2.weights.output_shift.expect("No forward called."), &mut rng);
 
     let g2 = l3.backward(grad_out, Some(grad_shift));
     let g1 = l2.backward(&g2,      Some(grad_shift));
@@ -287,9 +287,9 @@ fn test_overflow_weight_update_is_wrong_at_depth() {
         l2.sync_weights(&mut rng);
         l3.sync_weights(&mut rng);
 
-        let h1 = l1.forward(&input, &mut rng);
-        let h2 = l2.forward(&h1, &mut rng);
-        let _  = l3.forward(&h2, &mut rng);
+        let h1 = l1.forward(&input, scale_shift, &mut rng);
+        let h2 = l2.forward(&h1, l1.weights.output_shift.expect("No forward called."), &mut rng);
+        let _  = l3.forward(&h2, l2.weights.output_shift.expect("No forward called."), &mut rng);
 
         let g2 = l3.backward(&grad_out, Some(grad_shift));
         let g1 = l2.backward(&g2,       Some(grad_shift));

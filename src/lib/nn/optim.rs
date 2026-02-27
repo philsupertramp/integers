@@ -1,119 +1,8 @@
 use crate::nn::kernels;
-use crate::{checked_sub_i16, checked_add_i16};
+use crate::{checked_sub_counting, checked_add_counting};
 
 use std::fmt;
 
-/// Weight Quantization Configuration
-///
-/// Configure how to scale weights from i32 (master) to i8 (storage).
-///
-#[derive(Clone, Copy, Debug)]
-pub enum WeightQuantization {
-    Bits(u32),
-    Scale(f32),
-    ActivationRange(f32)
-}
-
-impl WeightQuantization {
-    pub fn to_shift(self) -> u32 {
-        match self {
-            WeightQuantization::Bits(n) => {
-                assert!(n >= 1 && n <= 8, "Bits must be in 1-8, got {}", n);
-                n
-            }
-            WeightQuantization::Scale(scale) => {
-                assert!(scale > 0.0, "Scale must be positive, got {}", scale);
-                let inv = 1.0 / scale;
-                let shift = inv.log2().round() as u32;
-                assert!(shift >= 1 && shift <= 8, "Scale {} gives shift {}, must be in 1-8", scale, shift);
-                shift
-            }
-            WeightQuantization::ActivationRange(max) => {
-                assert!(max > 0.0, "ActivationRange must be positive, got {}", max);
-                let shift = (127.0 / max).log2().ceil() as u32;
-                assert!(shift >= 1 && shift <= 8, "Range {} gives shift {}, must be in range 1-8", max, shift);
-                shift
-            }
-        }
-    }
-
-    pub fn scale_factor(self) -> f32 {
-        1.0 / (2_u32.pow(self.to_shift()) as f32)
-    }
-
-    pub fn shift(self) -> u32 {
-        self.to_shift()
-    }
-}
-
-impl fmt::Display for WeightQuantization {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WeightQuantization::Bits(n) => write!(f, "{}B quantization", n),
-            WeightQuantization::Scale(s) => write!(f, "1/{:.0} scale", 1.0/s),
-            WeightQuantization::ActivationRange(m) => write!(f, "range ±{:.1}", m),
-        }
-    }
-}
-
-/// Gradient Scaling Configuration
-///
-/// Configure how to scale gradients during a backward pass.
-///
-/// In deep networks, gradients multiply through layers and can overflow i16
-/// This controls the divide-by-2^N applied to all gradients.
-#[derive(Clone, Copy, Debug)]
-pub enum GradientScaling {
-    DivideBy(u32),
-
-    ForDepth(usize),
-}
-
-impl GradientScaling {
-    pub fn to_shift(self) -> u32 {
-        match self {
-            GradientScaling::DivideBy(divisor) => {
-                let shift = divisor.next_power_of_two().trailing_zeros();
-                assert!(shift >= 4 && shift <= 10, "DivideBy {} gives shift {}, must be in 4-10.", divisor, shift);
-                shift
-            }
-            GradientScaling::ForDepth(depth) => {
-                let shift = 5 + (depth as u32);
-
-                if shift > 30 {
-                    eprintln!(
-                        "WARNING: GradientScaling::ForDepth({}) gives shift={}\n
-                         Dividing gradients by 2^{} (very aggressive).\n
-                         This may indicate you need architectural changes like:\n
-                         - Batch normalization\n
-                         - Layer normalization\n
-                         - Residual connections\n
-                         - Or explicitly use GradientScaling::DivideBy() if intentional",
-                        depth, shift, shift
-                    )
-                }
-                shift
-            }
-        }
-    }
-
-    pub fn divisor(self) -> u32 {
-        2_u32.pow(self.to_shift())
-    }
-
-    pub fn shift(self) -> u32 {
-        self.to_shift()
-    }
-}
-
-impl fmt::Display for GradientScaling {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GradientScaling::DivideBy(div) => write!(f, "÷{}", div),
-            GradientScaling::ForDepth(d) => write!(f, "auto(depth={})", d),
-        }
-    }
-}
 pub trait OptimizerConfig {
     fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState);
     fn init_state(&self, len: usize) -> OptimizerState;
@@ -201,7 +90,7 @@ impl OptimizerConfig for SGDConfig {
                         decay = m.signum();
                     }
                     *m = m.wrapping_sub(decay).wrapping_add(*g);
-                    *w = checked_sub_i16!(
+                    *w = checked_sub_counting!(
                         w,
                         *m / lr_div,
                         backward_wraps
@@ -210,7 +99,7 @@ impl OptimizerConfig for SGDConfig {
             }
             _ => {
                 for (w, g) in weights.iter_mut().zip(grads) {
-                    *w = checked_sub_i16!(
+                    *w = checked_sub_counting!(
                         w,
                         *g / lr_div,
                         backward_wraps
@@ -293,18 +182,18 @@ impl OptimizerConfig for AdamConfig {
             for i in 0..weights.len() {
                 let g = grads[i];
                 let g_64 = grads[i] as i64;
-                m[i] = checked_add_i16!(
+                m[i] = checked_add_counting!(
                     m[i].wrapping_sub(m[i] / b1_div),
-                    g,
+                    g / b1_div,
                     backward_wraps
                 );
-                v[i] = checked_add_i16!(
+                v[i] = checked_add_counting!(
                     v[i].wrapping_sub(v[i] / (b2_div as i64)),
-                    g_64 * g_64,
+                    g_64 * g_64 / b2_div as i64,
                     backward_wraps
                 );
                 let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;
-                weights[i] = checked_sub_i16!(
+                weights[i] = checked_sub_counting!(
                     weights[i],
                     (m[i] / lr_div) / denom,
                     backward_wraps

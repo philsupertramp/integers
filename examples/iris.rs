@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let x_t = train_ds.get_input(t);
             let target = train_ds.get_target(t);
 
-            let pred = model.forward(&x_t, &mut rng);
+            let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
 
             let mse = MSE;
             let (loss, grad_out) = mse.forward(&pred, &target);
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for t in 0..test_ds.len() {
         let x_t = test_ds.get_input(t);
         let target = test_ds.get_target(t);
-        let pred = model.forward(&x_t, &mut rng);
+        let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
         let pred_cls = argmax(&pred, Some(1));
         let error = pred_cls[0] as i8 - target.data[0];
         eval_loss += (error as i64) * (error as i64);
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (test_inputs, _test_targets) = test_ds.minibatch(&test_indices);
     
     // Forward pass
-    let predictions_tensor = model.forward(&test_inputs, &mut rng);
+    let predictions_tensor = model.forward(&test_inputs, SCALE_SHIFT, &mut rng);
     
     // Get predicted classes [batch_size]
     let predicted_classes = argmax(&predictions_tensor, Some(1));

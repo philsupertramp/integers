@@ -1,7 +1,7 @@
-use crate::nn::{Linear, ModuleInfo, Module, HasWeights};
+use crate::nn::{Linear, ModuleInfo, Module, HasWeights, compute_shift_for_max};
 use crate::nn::activations::{Tanh};
 use crate::nn::optim::{OptimizerConfig};
-use crate::{Tensor, XorShift64, checked_add_i16};
+use crate::{Tensor, XorShift64, checked_add_counting};
 use crate::nn::kernels;
 
 pub struct RNNCell {
@@ -12,6 +12,8 @@ pub struct RNNCell {
     pub hidden_dim: usize,
 
     d_h_next: Option<Tensor<i16>>,
+
+    pub output_shift: Option<u32>,
 }
 
 impl RNNCell {
@@ -23,12 +25,14 @@ impl RNNCell {
             h_prev: None,
             hidden_dim,
             d_h_next: None,
+            output_shift: None,
         }
     }
 
     pub fn reset_state(&mut self) {
         self.h_prev = None;
         self.d_h_next = None;
+        self.output_shift = None;
 
         self.w_ih.cache.clear();
         self.w_hh.cache.clear();
@@ -64,7 +68,7 @@ impl RNNCell {
 
 impl Module for RNNCell {
     fn get_output_shift(&self) -> u32 {
-        self.w_hh.weights.output_shift.unwrap_or(0)
+        self.output_shift.unwrap_or(0)
     }
     fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
         let batch = input.shape[0];
@@ -84,11 +88,14 @@ impl Module for RNNCell {
 
         let mut comb = Tensor::<i8>::new(vec![batch, self.hidden_dim]);
         for i in 0..comb.data.len() {
-            let sum = checked_add_i16!(ih.data[i] as i16, hh.data[i] as i16, forward_wraps);
+            let sum = checked_add_counting!(ih.data[i] as i16, hh.data[i] as i16, forward_wraps);
             comb.data[i] = sum.clamp(-128, 127) as i8;
         }
 
         let h_next = self.act.forward(&comb, self.w_hh.weights.output_shift.expect("Expected output shift"), rng);
+        let max_magnitude = h_next.data.iter().map(|x| x.abs() as u32).max().unwrap_or(1);
+        self.output_shift = Some(compute_shift_for_max(max_magnitude));
+
         self.h_prev = Some(h_next.clone());
         h_next
     }

@@ -28,7 +28,7 @@ fn test_train_linear_regression_sgd() {
         layer.sync_weights(&mut rng);
 
         // 2. Forward Pass
-        let preds = layer.forward(&x, &mut rng);
+        let preds = layer.forward(&x, 0, &mut rng);
 
         // 3. Compute Loss & Gradients (Error = Pred - Target)
         let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
@@ -99,7 +99,7 @@ fn test_train_linear_regression_no_bias_adam() {
         layer.sync_weights(&mut rng);
 
         // 2. Forward Pass
-        let preds = layer.forward(&x, &mut rng);
+        let preds = layer.forward(&x, 0, &mut rng);
 
         // 3. Compute Loss & Gradients (Error = Pred - Target)
         let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
@@ -131,7 +131,7 @@ fn test_train_linear_regression_no_bias_adam() {
     layer.sync_weights(&mut rng);
     let inp = Tensor::from_vec(vec![1], vec![1, 1]);
     assert_eq!(
-        layer.forward(&inp, &mut rng).data[0] as i16,
+        layer.forward(&inp, 0, &mut rng).data[0] as i16,
         3,
         "Model failed to learn y=3x"
     );
@@ -168,7 +168,7 @@ fn test_train_linear_regression_with_bias_adam() {
         layer.sync_weights(&mut rng);
 
         // 2. Forward Pass
-        let preds = layer.forward(&x, &mut rng);
+        let preds = layer.forward(&x, 0, &mut rng);
 
         // 3. Compute Loss & Gradients (Error = Pred - Target)
         let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
@@ -200,7 +200,7 @@ fn test_train_linear_regression_with_bias_adam() {
     layer.sync_weights(&mut rng);
     let inp = Tensor::from_vec(vec![1], vec![1, 1]);
     assert_eq!(
-        layer.forward(&inp, &mut rng).data[0] as i16,
+        layer.forward(&inp, 0, &mut rng).data[0] as i16,
         4,
         "Model failed to learn y=3x + 1"
     );
