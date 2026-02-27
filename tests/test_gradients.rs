@@ -276,6 +276,9 @@ fn train_copy_task(
         for t in 0..seq_len {
             let x_t = Tensor::from_vec(vec![seq[t]], vec![1, 1]);
             let h_t = rnn.forward(&x_t, scale_shift, &mut rng);
+            if t == 0 {
+                println!("H_T: {:?}", h_t.data);
+            }
             let pred = head.forward(&h_t, rnn.get_output_shift(), &mut rng);
 
             if t >= delay {
@@ -291,7 +294,8 @@ fn train_copy_task(
             }
         }
 
-        if epoch == 0 {
+        if epoch % 100 == 0 {
+            println!("RNN h_t input_shift: {}", rnn.w_ih.weights.input_shift.unwrap_or(u32::MAX));
             println!("RNN h_t output_shift: {}", rnn.get_output_shift());
             println!("Head input_shift: {}", head.weights.input_shift.unwrap_or(u32::MAX));
             println!("Head output_shift: {}", head.weights.output_shift.unwrap_or(u32::MAX));
@@ -299,20 +303,48 @@ fn train_copy_task(
 
         //println!("Epoch loss: {}", epoch_loss);
         // BACKWARD PASS
+        let head_gshift = gradient_shift + (seq_len.ilog2() as u32).saturating_sub(1);
+
         for t in (0..seq_len).rev() {
             let g = &grads[t];
-            let gh = head.backward(&g, Some(gradient_shift));
-            rnn.backward(&gh, Some(gradient_shift));
+            let gh = head.backward(&g, Some(head_gshift));  // normalized for seq_len
+            rnn.backward(&gh, Some(gradient_shift));         // unchanged — attenuation handles it
         }
-        if epoch == 0 {
+        if epoch % 100 == 0 {
            println!("Head weight grads: {:?}", head.weights.grads.as_ref().map(|g| g.data[0..2].to_vec()));
            println!("RNN w_ih grads: {:?}", rnn.w_ih.weights.grads);
            println!("RNN w_hh grads: {:?}", rnn.w_hh.weights.grads);
         }
+        let max_w = rnn.w_hh.weights.master.data.iter().map(|w| w.abs()).max().unwrap();
+        println!("w_hh max magnitude: {}", max_w);
 
         head.step(&optim);
         rnn.step(&optim);
 
+        // Normalize each row of w_hh so its L1 norm in storage space ≤ 127.
+        // Individual weights look fine (max=255 → storage=31), but 8 units × 31 = 248
+        // which saturates tanh completely regardless of input.
+        // Target: sum(|w_storage[row]|) ≤ 127  →  sum(|w_master[row]|) ≤ 127 << scale_shift
+        let row_l1_limit = 127i32 << scale_shift;  // 1016 for scale_shift=3
+        let hidden_dim = rnn.hidden_dim;
+        let weights = &mut rnn.w_hh.weights.master.data;
+        for row in 0..hidden_dim {
+            let row_start = row * hidden_dim;
+            let l1: i32 = weights[row_start..row_start + hidden_dim]
+                .iter()
+                .map(|w| w.abs())
+                .sum();
+            if l1 > row_l1_limit {
+                // Scale down entire row: multiply each weight by (limit / l1)
+                // Use integer: w = w * limit / l1  (safe since limit < l1 here)
+                for w in weights[row_start..row_start + hidden_dim].iter_mut() {
+                    *w = (*w) * row_l1_limit / l1;
+                }
+            }
+        }
+        for b in rnn.w_hh.bias.master.data.iter_mut() {
+            *b = 0;
+        }
         if epoch == 0 {
             first = epoch_loss;
         }
@@ -376,13 +408,13 @@ fn test_copy_task_delay_scaling() {
     // than delay=1, gradient is vanishing through the d_h_next carry.
     let mut results = Vec::new();
     let seed = 77;
-    let learn_rate = 0.7;
-    let scale_shift = 1;
+    let learn_rate = 0.13;
+    let scale_shift = 4;
     let grad_shift = 1;
 
     for &delay in &[1usize, 2, 4] {
         let seq_len = delay * 16 + 8;
-        let hidden_dim = 2 << (delay + 1);
+        let hidden_dim = 2 << (delay + 2);
         let epochs = 1800 + delay * 150;
 
         let (first, last, seq) = train_copy_task(delay, seq_len, hidden_dim, epochs, seed, scale_shift, grad_shift, learn_rate);
@@ -703,7 +735,7 @@ fn test_scale_readiness_checklist() {
         let mut layer = Linear::new(1, 1, 0);
         layer.weights.master.data[0] = 4; // Drop from 50 to prevent 50 * 10 = 500 clamping to 127
         let mut rng = XorShift64::new(42);
-        let optim = SGDConfig::new().with_learn_rate(0.125);
+        let optim = SGDConfig::new().with_learn_rate(0.0125);
         let x = Tensor::from_vec(vec![2i8], vec![1, 1]);
         let target = 4i16;
 

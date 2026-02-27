@@ -125,10 +125,9 @@ impl Module for Tanh {
         let mut output = Tensor::<i16>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
             let t = kernels::tanh_i8(input.data[o]) as i32;
-            let dtanh = ((127 * 127) - (t * t)) / 127;
-
+            let dtanh_num = (127 * 127) - (t * t); // [0, 16129]
             let grad = grad_output.data[o] as i32;
-            let dout = grad * dtanh / (127 * 127);
+            let dout = (grad * dtanh_num) >> 14;
             let adjusted = dout >> (output_shift.saturating_sub(input_shift));
             output.data[o] = adjusted.clamp(-32768, 32767) as i16;
         }

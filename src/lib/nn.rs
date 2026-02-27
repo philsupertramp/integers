@@ -127,9 +127,8 @@ impl Params {
 
     pub fn init_xavier_uniform(&mut self, rng: &mut XorShift64, fan_in: usize, fan_out: usize) {
         let limit = (6.0 / (fan_in + fan_out) as f64).sqrt();
-        let limit_i32 = (limit * 32767.0).round() as i32;  // ← scale to i32 range directly
-        let limit_master = (limit_i32 >> (self.shift.saturating_sub(1))).max(1);  // avoid zero
-        self.init_uniform(rng, limit_master);
+        let limit_i8 = (limit * 127.0).round() as i32;
+        self.init_uniform(rng, limit_i8.max(1));
     }
 
     pub fn sync(&mut self, rng: &mut XorShift64) {
@@ -162,10 +161,20 @@ impl Params {
 
     pub fn step(&mut self, optim: &dyn OptimizerConfig) {
         if let Some(grads) = self.grads.take() {
+            // Clip before applying: output_shift varies 4-8 (16× range),
+            // causing weight_grad_shift to swing by 4 bits between epochs.
+            // Without clipping, a single low-shift epoch produces updates
+            // larger than the initial weight magnitude, destroying convergence.
+            // 256 ≈ 2× the max safe per-epoch gradient given typical lr_shift=3.
+            const GRAD_CLIP: i32 = 128;
+            let mut clipped = grads;
+            for g in clipped.data.iter_mut() {
+                *g = (*g).clamp(-GRAD_CLIP, GRAD_CLIP);
+            }
             let state = self
                 .state
                 .get_or_insert_with(|| optim.init_state(self.master.len()));
-            optim.update(&mut self.master.data, &grads.data, state);
+            optim.update(&mut self.master.data, &clipped.data, state);
         }
     }
 
@@ -216,6 +225,8 @@ pub struct Linear {
     pub weights: Params,
     pub bias: Params,
     pub cache: Vec<Tensor<i8>>,
+
+    smoothed_output_shift: Option<f32>,
 }
 
 impl Linear {
@@ -224,6 +235,7 @@ impl Linear {
             weights: Params::new(vec![output_dim, input_dim], scale_shift),
             bias: Params::new(vec![output_dim], scale_shift),
             cache: Vec::new(),
+            smoothed_output_shift: None,
         }
     }
 
@@ -282,8 +294,13 @@ impl Module for Linear {
         }
 
         let max_val = out_raw.data.iter().map(|x| x.abs()).max().unwrap_or(1);
-        let output_shift = compute_shift_for_max(max_val as u32);
-
+        let raw_shift = compute_shift_for_max(max_val as u32) as f32;
+        let smoothed = match self.smoothed_output_shift {
+            Some(prev) => 0.9 * prev + 0.1 * raw_shift,
+            None => raw_shift,
+        };
+        self.smoothed_output_shift = Some(smoothed);
+        let output_shift = smoothed.round() as u32;
         self.weights.input_shift = Some(input_shift);
         self.weights.output_shift = Some(output_shift);
 
@@ -294,18 +311,18 @@ impl Module for Linear {
         out
     }
 
-    fn backward(&mut self, grad_output: &Tensor<i16>, _gradient_shift: Option<u32>) -> Tensor<i16> {
+    fn backward(&mut self, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward");
         let input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
         let output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
+
+        // Mathematically required for the chain rule:
         let weight_shift = self.weights.shift;
+        let gshift = gradient_shift.unwrap_or(0);
 
         let batch = input.shape[0];
         let input_dim = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
-
-        // Mathematically required for the chain rule:
-        let wshift = self.weights.shift;
 
         let mut grad_input = Tensor::<i16>::new(vec![batch, input_dim]);
         let mut grad_weights = Tensor::<i16>::new(vec![output_dim, input_dim]);
@@ -321,7 +338,8 @@ impl Module for Linear {
                 // Bias update is an accumulator, so apply gshift
                 let bias_grad_shift = output_shift;
                 let g_shifted = if bias_grad_shift > 0 { g >> bias_grad_shift } else { g };
-                grad_bias.data[o] = grad_bias.data[o].saturating_add(g_shifted);
+                let g_bias = if g_shifted > 0 { g_shifted >> gshift } else { g_shifted };
+                grad_bias.data[o] = grad_bias.data[o].saturating_add(g_bias);
 
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
@@ -334,7 +352,7 @@ impl Module for Linear {
                     //  grad_output is quantized by output_shift
                     //  input_i8 is quantized by input_shift
                     let weight_grad_shift = output_shift.saturating_add(input_shift);
-                    let dw_shifted = dw >> weight_grad_shift;
+                    let dw_shifted = (dw >> weight_grad_shift) >> gshift;
                     // Weight update is an accumulator, so apply gshift
                     grad_weights.data[o * input_dim + i] =
                         grad_weights.data[o * input_dim + i].saturating_add(dw_shifted as i16);
@@ -848,11 +866,10 @@ mod tests {
     #[test]
     fn test_train_xor_sgd_momentum() {
         let mut rng = XorShift64::new(777);
-        let input_shift: u32 = 7;
-        let grad_shift: u32 = 1;
+        let input_shift: u32 = 0;
+        let grad_shift: u32 = 0;
         let mut l1 = Linear::new(2, 8, input_shift);
         let mut l2 = Linear::new(8, 1, input_shift);
-        const MAX_GRAD: i16 = 127;
 
         l1.init(&mut rng);
         l2.init(&mut rng);
@@ -863,12 +880,12 @@ mod tests {
             .add(l2);
 
 
-        let mut optim = SGDConfig::new().with_learn_rate(0.1250).with_momentum(0.2);
+        let mut optim = SGDConfig::new().with_learn_rate(0.011).with_momentum(0.5);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 
-        let y_target = vec![0, 20, 20, 0];
-        let epochs = 800;
+        let y_target = vec![0, 30, 30, 0];
+        let epochs = 8000;
 
         println!("--- Starting Integer XOR Training with SGD + Momentum ---");
 
@@ -896,8 +913,7 @@ mod tests {
                 println!("Converged early at epoch {}!", epoch);
                 break;
             }
-            let clipped = Tensor::from_vec(grad_out.data.iter().map(|&g| g.clamp(-MAX_GRAD, MAX_GRAD)).collect(), grad_out.shape);
-            model.backward(&clipped, Some(grad_shift));
+            model.backward(&grad_out, Some(grad_shift));
             model.step(&mut optim);
         }
 

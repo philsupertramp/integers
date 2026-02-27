@@ -7,9 +7,7 @@ use std::path::Path;
 use crate::Tensor;
 use parquet::file::reader::FileReader;
 use parquet::file::reader::SerializedFileReader;
-use arrow::record_batch::RecordBatch;
 use parquet::record::Field;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 

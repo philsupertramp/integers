@@ -250,7 +250,13 @@ mod tests {
 
     // accuracy tests
     // TODO
+    #[test]
+    fn test_accuracy(){
+        let preds: &[usize] = &[0, 1, 0, 1];
+        let ground_truth: &[u8] = &[0, 1, 0, 1];
 
+        assert_eq!(accuracy(preds, ground_truth), 1.0);
+    }
 
 
     // XorShift64 tests

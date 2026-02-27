@@ -203,3 +203,39 @@ impl OptimizerConfig for AdamConfig {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sgd_init() {
+        let optim = SGDConfig::new();
+
+        assert_eq!(optim.lr_shift, 2);
+    }
+
+    #[test]
+    fn test_sgd_with_learn_rate() {
+        let mut optim = SGDConfig::new();
+
+        assert_eq!(optim.lr_shift, 2);
+
+        let samples = vec![
+            2.0, 0.25, 0.125,
+            0.0625, 0.03125, 0.015625,
+            0.0078125, 0.00390625,
+        ];
+        let expected_values = vec![
+            0, 2, 3,
+            4, 5, 6,
+            7, 8,
+        ];
+
+        for (val, expected_f32) in samples.iter().zip(expected_values) {
+            optim = optim.with_learn_rate(*val);
+            assert_eq!(optim.lr_shift, expected_f32);
+        }
+        
+    }
+}
