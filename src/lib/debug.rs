@@ -80,3 +80,9 @@ pub fn get_overflow_stats() -> OverflowStats {
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+}
+

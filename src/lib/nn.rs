@@ -16,6 +16,7 @@ use crate::nn::optim::{OptimizerConfig, OptimizerState};
 // Every building block needs to implement this.
 // Containers delegate; primitives do work.
 //
+#[derive(PartialEq, Debug)]
 pub struct ModuleInfo {
     pub name: &'static str,
     pub params: usize,
@@ -37,6 +38,59 @@ impl ModuleInfo {
     }
 }
 pub trait Module {
+    /// Implements a forward pass for the module.
+    ///
+    /// Must keep track of internal scale shifts
+    /// 1. track `input_shift` for backward pass
+    /// 2. track `output_shift` to reconstruct the actual result values in i32
+    /// 
+    /// # Arguments
+    ///
+    /// * `input`: Input vector scaled to i8 using `input_shift`
+    /// * `input_shift`: The shift scale used to compress the input to i8
+    /// * `rng`: RNG state
+    ///
+    ///
+    /// # Examples
+    /// ```
+    /// use integers::nn::{Module};
+    /// use integers::{Tensor, XorShift64};
+    ///
+    /// struct XPlusN {
+    ///     n: i8,
+    ///     input_shift: Option<u32>,
+    ///     output_shift: Option<u32>,
+    /// }
+    ///
+    /// impl Module for XPlusN {
+    ///     fn backward(&mut self, grad: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
+    ///         grad.clone()
+    ///     }
+    ///     fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i8>{
+    ///         self.input_shift = Some(input_shift);
+    ///         self.output_shift = Some(input_shift);
+    ///
+    ///         let mut output = Tensor::new(input.shape.clone());
+    ///
+    ///         for (val, o) in input.data.iter().zip(output.data.iter_mut()) {
+    ///             *o = val + self.n;
+    ///         }
+    ///         output
+    ///     }
+    /// }
+    ///
+    /// let mut mymod = XPlusN{n: 1, input_shift: None, output_shift: None};
+    /// let input = Tensor::from_vec(vec![1, 2, 3], vec![3, 1]);
+    /// let mut rng = XorShift64::new(420);
+    ///
+    ///
+    /// let output = mymod.forward(&input, 0, &mut rng);
+    ///
+    /// assert_eq!(output.shape, vec![3, 1]);
+    /// assert_eq!(output.data[0], 2);
+    /// assert_eq!(output.data[1], 3);
+    /// assert_eq!(output.data[2], 4);
+    /// ```
     fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8>;
     fn backward(&mut self, grad: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16>;
 
@@ -91,7 +145,7 @@ pub struct Params {
     ///     shift = 4 // for single-layer networks
     ///     shift = 5 // for 2-3 layer networks
     ///     shift = 6 // for deeper networks
-    pub shift: u32,
+    pub quant_shift: u32,
 
     /// Automatically tracks what shift was applied to inputs
     pub input_shift: Option<u32>,
@@ -100,20 +154,21 @@ pub struct Params {
 
 impl Params {
     pub fn new(shape: Vec<usize>, shift: u32) -> Self {
-        assert!(shift >= 0 && shift <= 8, "Weight shift must be 1-8, got {}", shift);
+        // shift >= 0 given due to u32
+        assert!(shift <= 8, "Weight shift must be 1-8, got {}", shift);
         Self {
             master: Tensor::new(shape.clone()),
             storage: Tensor::new(shape),
             grads: None,
             state: None,
-            shift,
+            quant_shift: shift,
             input_shift: None,
             output_shift: None,
         }
     }
 
     pub fn with_shift(mut self, shift: u32) -> Self {
-        self.shift = shift;
+        self.quant_shift = shift;
         self
     }
 
@@ -133,7 +188,7 @@ impl Params {
 
     pub fn sync(&mut self, rng: &mut XorShift64) {
         for (m, s) in self.master.data.iter().zip(self.storage.data.iter_mut()) {
-            *s = kernels::stochastic_downcast(*m, self.shift, rng);
+            *s = kernels::stochastic_downcast(*m, self.quant_shift, rng);
         }
     }
 
@@ -161,20 +216,10 @@ impl Params {
 
     pub fn step(&mut self, optim: &dyn OptimizerConfig) {
         if let Some(grads) = self.grads.take() {
-            // Clip before applying: output_shift varies 4-8 (16× range),
-            // causing weight_grad_shift to swing by 4 bits between epochs.
-            // Without clipping, a single low-shift epoch produces updates
-            // larger than the initial weight magnitude, destroying convergence.
-            // 256 ≈ 2× the max safe per-epoch gradient given typical lr_shift=3.
-            const GRAD_CLIP: i32 = 128;
-            let mut clipped = grads;
-            for g in clipped.data.iter_mut() {
-                *g = (*g).clamp(-GRAD_CLIP, GRAD_CLIP);
-            }
             let state = self
                 .state
                 .get_or_insert_with(|| optim.init_state(self.master.len()));
-            optim.update(&mut self.master.data, &clipped.data, state);
+            optim.update(&mut self.master.data, &grads.data, state);
         }
     }
 
@@ -188,7 +233,7 @@ fn compute_shift_for_max(max_magnitude: u32) -> u32 {
     while (max_magnitude >> shift) > 127 && shift < 8 {
         shift += 1;
     }
-    shift.max(1).min(8)
+    shift.max(0).min(8)
 }
 
 pub trait HasWeights {
@@ -225,8 +270,6 @@ pub struct Linear {
     pub weights: Params,
     pub bias: Params,
     pub cache: Vec<Tensor<i8>>,
-
-    smoothed_output_shift: Option<f32>,
 }
 
 impl Linear {
@@ -235,7 +278,6 @@ impl Linear {
             weights: Params::new(vec![output_dim, input_dim], scale_shift),
             bias: Params::new(vec![output_dim], scale_shift),
             cache: Vec::new(),
-            smoothed_output_shift: None,
         }
     }
 
@@ -293,14 +335,14 @@ impl Module for Linear {
             }
         }
 
-        let max_val = out_raw.data.iter().map(|x| x.abs()).max().unwrap_or(1);
-        let raw_shift = compute_shift_for_max(max_val as u32) as f32;
-        let smoothed = match self.smoothed_output_shift {
-            Some(prev) => 0.9 * prev + 0.1 * raw_shift,
-            None => raw_shift,
-        };
-        self.smoothed_output_shift = Some(smoothed);
-        let output_shift = smoothed.round() as u32;
+        let max_val = out_raw.data
+            .iter()
+            .map(|x| x.abs() as u32)
+            .max()
+            // TODO: (SHIFT#1) Potentially an issue. Empty input is shifted?
+            .unwrap_or(0);
+
+        let output_shift = compute_shift_for_max(max_val);
         self.weights.input_shift = Some(input_shift);
         self.weights.output_shift = Some(output_shift);
 
@@ -317,7 +359,7 @@ impl Module for Linear {
         let output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
 
         // Mathematically required for the chain rule:
-        let weight_shift = self.weights.shift;
+        let weight_shift = self.weights.quant_shift;
         let gshift = gradient_shift.unwrap_or(0);
 
         let batch = input.shape[0];
@@ -337,8 +379,8 @@ impl Module for Linear {
 
                 // Bias update is an accumulator, so apply gshift
                 let bias_grad_shift = output_shift;
-                let g_shifted = if bias_grad_shift > 0 { g >> bias_grad_shift } else { g };
-                let g_bias = if g_shifted > 0 { g_shifted >> gshift } else { g_shifted };
+                let g_shifted = g >> bias_grad_shift;
+                let g_bias = g_shifted >> gshift;
                 grad_bias.data[o] = grad_bias.data[o].saturating_add(g_bias);
 
                 for i in 0..input_dim {
@@ -406,8 +448,8 @@ impl Module for Linear {
 
         // After initialization, infer the appropriate shift
         let inferred_shift = self.infer_scale_shift();
-        self.weights.shift = inferred_shift;
-        self.bias.shift = inferred_shift;
+        self.weights.quant_shift = inferred_shift;
+        self.bias.quant_shift = inferred_shift;
     }
 }
 
@@ -506,7 +548,7 @@ mod tests {
         assert_eq!(lin.weights.master.len(), 4 * 8);
         assert_eq!(lin.weights.storage.len(), 4 * 8);
         assert_eq!(lin.bias.master.len(), 8);
-        assert_eq!(lin.weights.shift, 2);
+        assert_eq!(lin.weights.quant_shift, 2);
         assert_eq!(lin.cache, Vec::new());
         assert_eq!(lin.weights.grads, None);
         assert_eq!(lin.bias.grads, None);
@@ -525,7 +567,7 @@ mod tests {
         assert_eq!(lin.weights.storage.data[2], 0);
         assert_eq!(lin.weights.storage.data[3], 10);
 
-        lin.weights.shift = 1;
+        lin.weights.quant_shift = 1;
         lin.sync_weights(&mut rng);
 
         assert_eq!(lin.weights.storage.data[0], 5);
@@ -533,7 +575,7 @@ mod tests {
         assert_eq!(lin.weights.storage.data[2], 0);
         assert_eq!(lin.weights.storage.data[3], 5);
 
-        lin.weights.shift = 2;
+        lin.weights.quant_shift = 2;
         lin.sync_weights(&mut rng);
 
         assert_eq!(lin.weights.storage.data[0], 2);
@@ -541,7 +583,7 @@ mod tests {
         assert_eq!(lin.weights.storage.data[2], 0);
         assert_eq!(lin.weights.storage.data[3], 2);
 
-        lin.weights.shift = 3;
+        lin.weights.quant_shift = 3;
         lin.sync_weights(&mut rng);
 
         assert_eq!(lin.weights.storage.data[0], 2);
@@ -561,8 +603,8 @@ mod tests {
         let detected_shift = layer.infer_scale_shift();
         println!("Detected shift: {}", detected_shift);
         
-        layer.weights.shift = detected_shift;
-        layer.bias.shift = detected_shift;
+        layer.weights.quant_shift = detected_shift;
+        layer.bias.quant_shift = detected_shift;
         
         // Now safely quantize
         layer.sync_weights(&mut rng);
@@ -635,16 +677,48 @@ mod tests {
         let mut rng = XorShift64::new(420);
         lin.sync_weights(&mut rng);
 
-        let mut input = Tensor::new(vec![1, 2]);
-        input.data[0] = 10;
-        input.data[1] = 20;
+        let mut input = Tensor::from_vec(vec![10, 20], vec![1, 2]);
 
         let out = lin.forward(&input, 0, &mut rng);
         let output_shift = lin.weights.output_shift.expect("Does not exist.");
 
         assert_eq!(out.data[0] << output_shift, 10);
         assert_eq!(out.data[1] << output_shift, 20);
-        assert_eq!(out.data[1], 10);
+        assert_eq!(out.data[0], 10);
+        assert_eq!(out.data[1], 20);
+    }
+
+    #[test]
+    fn test_linear_forward_identity_with_shift() {
+        // Linear 2->2, Scale 0 (Identity mapping potential)
+        let mut lin = Linear::new(2, 2, 0);
+
+        // Identity Matrix in Master Weights [2, 0] / [0, 2]
+        lin.weights.master.data[0] = 2;
+        lin.weights.master.data[3] = 2;
+
+        let mut rng = XorShift64::new(420);
+        lin.sync_weights(&mut rng);
+
+        let mut input = Tensor::from_vec(vec![127, -128], vec![1, 2]);
+
+        let out = lin.forward(&input, 0, &mut rng);
+        let output_shift = lin.weights.output_shift.expect("Does not exist.");
+
+        assert_eq!(out.data[0] << output_shift, 0);
+        assert_eq!(out.data[1] << output_shift, 0);
+        assert_eq!(out.data[0], 64);
+        assert_eq!(out.data[1], -64);
+
+        input = Tensor::from_vec(vec![127, 64], vec![1, 2]);
+
+        let out = lin.forward(&input, 0, &mut rng);
+        let output_shift = lin.weights.output_shift.expect("Does not exist.");
+
+        assert_eq!(out.data[0] << output_shift, -2);
+        assert_eq!(out.data[1] << output_shift, -128);
+        assert_eq!(out.data[0], 127);
+        assert_eq!(out.data[1], 64);
     }
 
     #[test]
@@ -866,10 +940,10 @@ mod tests {
     #[test]
     fn test_train_xor_sgd_momentum() {
         let mut rng = XorShift64::new(777);
-        let input_shift: u32 = 0;
-        let grad_shift: u32 = 0;
-        let mut l1 = Linear::new(2, 8, input_shift);
-        let mut l2 = Linear::new(8, 1, input_shift);
+        let input_shift: u32 = 3;
+        let grad_shift: u32 = 3;
+        let mut l1 = Linear::new(2, 8, 0);
+        let mut l2 = Linear::new(8, 1, 0);
 
         l1.init(&mut rng);
         l2.init(&mut rng);
@@ -880,11 +954,11 @@ mod tests {
             .add(l2);
 
 
-        let mut optim = SGDConfig::new().with_learn_rate(0.011).with_momentum(0.5);
+        let mut optim = SGDConfig::new().with_learn_rate(0.015625).with_momentum(0.2);
 
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 
-        let y_target = vec![0, 30, 30, 0];
+        let y_target = vec![0, 20, 20, 0];
         let epochs = 8000;
 
         println!("--- Starting Integer XOR Training with SGD + Momentum ---");
@@ -957,7 +1031,7 @@ mod tests {
         let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
 
         let y_target = vec![0, 20, 20, 0];
-        let epochs = 800;
+        let epochs = 1800;
 
         println!("--- Starting Integer XOR Training with ADAM ---");
 

@@ -6,6 +6,8 @@ pub mod nn;
 pub mod data;
 #[path = "lib/dataset_loaders.rs"]
 pub mod dataset_loaders;
+#[path = "lib/quant.rs"]
+pub mod quant;
 
 use std::fmt;
 

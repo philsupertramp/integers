@@ -39,6 +39,9 @@ impl Loss for MAE {
         let mut loss: i32 = 0;
         let mut grad = Tensor::<i16>::new(preds.shape.clone());
 
+        if preds.data.len() == 0 {
+            return (loss, grad);
+        }
         for i in 0..preds.data.len() {
             let error = preds.data[i] as i16 - targets.data[i] as i16;
             loss += error.abs() as i32;
@@ -49,4 +52,86 @@ impl Loss for MAE {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn test_mse(){
+        let loss = MSE;
+
+        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
+        let targets = Tensor::from_vec(vec![0, 1], vec![2, 1]);
+
+        let (loss, grad) = loss.forward(&pred, &targets);
+
+        assert_eq!(loss, 1);
+        assert_eq!(grad, Tensor::from_vec(vec![1, 0], vec![2, 1]));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "assertion `left == right` failed:"
+    )]
+    fn test_mse_wrong_shapes(){
+        let loss = MSE;
+
+        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
+        let targets = Tensor::from_vec(vec![0], vec![1, 1]);
+
+        loss.forward(&pred, &targets);
+    }
+
+    #[test]
+    fn test_mse_empty_data(){
+        let loss = MSE;
+
+        let pred = Tensor::from_vec(vec![], vec![]);
+        let targets = Tensor::from_vec(vec![], vec![]);
+
+        let (loss, grad) = loss.forward(&pred, &targets);
+
+        assert_eq!(loss, 0);
+        assert_eq!(grad, Tensor::from_vec(vec![], vec![]));
+    }
+
+    #[test]
+    fn test_mae(){
+        let loss = MAE;
+
+        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
+        let targets = Tensor::from_vec(vec![0, 1], vec![2, 1]);
+
+        let (loss, grad) = loss.forward(&pred, &targets);
+
+        assert_eq!(loss, 0);
+        assert_eq!(grad, Tensor::from_vec(vec![1, 0], vec![2, 1]));
+    }
+
+    #[test]
+    fn test_mae_empty_data(){
+        let loss = MAE;
+
+        let pred = Tensor::from_vec(vec![], vec![]);
+        let targets = Tensor::from_vec(vec![], vec![]);
+
+        let (loss, grad) = loss.forward(&pred, &targets);
+
+        assert_eq!(loss, 0);
+        assert_eq!(grad, Tensor::from_vec(vec![], vec![]));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "assertion `left == right` failed:"
+    )]
+    fn test_mae_wrong_shapes(){
+        let loss = MAE;
+
+        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
+        let targets = Tensor::from_vec(vec![0], vec![1, 1]);
+
+        loss.forward(&pred, &targets);
+    }
+
+}

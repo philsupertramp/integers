@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::Tensor;
+use crate::quant::{minmax_quantize, standard_score_quantize};
 use parquet::file::reader::FileReader;
 use parquet::file::reader::SerializedFileReader;
 use parquet::record::Field;
@@ -145,46 +146,14 @@ impl DatasetBuilder {
     }
 
     pub fn load(self) -> crate::data::DataResult<crate::data::Dataset> {
+        //TODO: We should consider a caching mechanism, similar to HF's 
+        //      storage approach.
+        //      Loading "small" parquet files is pretty slow.
         match self.config.format {
             FileFormat::CSV | FileFormat::TSV => load_csv(&self.path, self.config),
             FileFormat::Parquet => load_parquet(&self.path, self.config),
         }
     }
-}
-
-// ─── Quantization Helpers ─────────────────────────────────────────────────────
-
-fn minmax_quantize(values: &[f32]) -> Vec<i8> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let min = values.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let range = (max - min).max(1e-6);
-    values
-        .iter()
-        .map(|&v| {
-            let norm = (v - min) / range; // [0, 1]
-            let scaled = norm * 254.0 - 127.0; // [-127, 127]
-            scaled.round().clamp(-127.0, 127.0) as i8
-        })
-        .collect()
-}
-
-fn standard_score_quantize(values: &[f32]) -> Vec<i8> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let mean = values.iter().sum::<f32>() / values.len() as f32;
-    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
-    let std = variance.sqrt().max(1e-6);
-    values
-        .iter()
-        .map(|&v| {
-            let zscore = (v - mean) / std;
-            zscore.round().clamp(-127.0, 127.0) as i8
-        })
-        .collect()
 }
 
 // ─── CSV Loader ───────────────────────────────────────────────────────────────
@@ -370,7 +339,7 @@ fn load_parquet(
 
         // Extract features from this record
         let mut row = Vec::with_capacity(feature_cols.len());
-        for (idx, (name, value)) in record.get_column_iter().enumerate() {
+        for (idx, (_name, value)) in record.get_column_iter().enumerate() {
             if !feature_cols.contains(&idx) {
                 continue;
             }
@@ -394,9 +363,11 @@ fn load_parquet(
 
         // Extract label
         let mut label_field = &Field::Null;
-        for (idx, (name, value)) in record.get_column_iter().enumerate() {
+        for (idx, (_name, value)) in record.get_column_iter().enumerate() {
             if idx == config.label_column {
                 label_field = value;
+                // there's only one label column
+                break;
             }
         }
 

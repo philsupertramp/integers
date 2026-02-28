@@ -31,7 +31,8 @@ impl SGDConfig {
     fn learn_rate_to_shift(&self, learn_rate: f32) -> u32 {
         let inv = 1.0 / learn_rate;
         let shift = inv.log2().round() as u32;
-        assert!(shift >= 0 && shift <= 8, "Learning rate {} gives shift {}, should be 0-8", learn_rate, shift);
+        // shift >= 0 given due to u32
+        assert!(shift <= 8, "Learning rate {} gives shift {}, should be 0-8", learn_rate, shift);
         shift
     }
 
@@ -46,7 +47,8 @@ impl SGDConfig {
 
         let inv = 1.0 / (1.0 - momentum);
         let shift = inv.round() as u32;
-        assert!(shift >= 0 && shift <= 8, "Momentum {} gives shift {}, should be 0-8", momentum, shift);
+        // shift >= 0 given due to u32
+        assert!(shift <= 8, "Momentum {} gives shift {}, should be 0-8", momentum, shift);
         shift
     }
 
@@ -131,7 +133,8 @@ impl AdamConfig {
     fn learn_rate_to_shift(&self, learn_rate: f32) -> u32 {
         let inv = 1.0 / learn_rate;
         let shift = inv.log2().round() as u32;
-        assert!(shift >= 0 && shift <= 8, "Learning rate {} gives shift {}, should be 0-8", learn_rate, shift);
+        // shift >= 0 given due to u32
+        assert!(shift <= 8, "Learning rate {} gives shift {}, should be 0-8", learn_rate, shift);
         shift
     }
 
@@ -140,7 +143,8 @@ impl AdamConfig {
         // shift = log2(1 / (1 - beta))
         let inv = 1.0 / (1.0 - beta);
         let shift = inv.log2().round() as u32;
-        assert!(shift >= 0 && shift <= 8, "Beta {} gives shift {}, should be 0-8", beta, shift);
+        // shift >= 0 given due to u32
+        assert!(shift <= 8, "Beta {} gives shift {}, should be 0-8", beta, shift);
         shift
     }
     pub fn with_betas(mut self, beta1: f32, beta2: f32) -> Self {
@@ -222,14 +226,16 @@ mod tests {
         assert_eq!(optim.lr_shift, 2);
 
         let samples = vec![
-            2.0, 0.25, 0.125,
-            0.0625, 0.03125, 0.015625,
-            0.0078125, 0.00390625,
+            2.0,
+            1.0, 0.5, 0.25,
+            0.125, 0.0625, 0.03125,
+            0.015625, 0.0078125, 0.00390625,
         ];
         let expected_values = vec![
-            0, 2, 3,
-            4, 5, 6,
-            7, 8,
+            0,
+            0, 1, 2,
+            3, 4, 5,
+            6, 7, 8,
         ];
 
         for (val, expected_f32) in samples.iter().zip(expected_values) {

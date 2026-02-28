@@ -44,13 +44,13 @@ impl RNNCell {
 
         let hidden_dim = self.w_hh.weights.master.shape[0];
         let spectral_cap_i8 = kernels::isqrt(16129 / (hidden_dim as u32)) as i32;
-        let spectral_cap_master = spectral_cap_i8 * (1 << self.w_hh.weights.shift);
+        let spectral_cap_master = spectral_cap_i8 * (1 << self.w_hh.weights.quant_shift);
 
         let fan_in = self.w_hh.weights.master.shape[1];
         let fan_out = self.w_hh.weights.master.shape[0];
         let xavier_limit_i8 = kernels::isqrt(96774 / (fan_in + fan_out) as u32) as i32;
 
-        let xavier_limit_master = xavier_limit_i8 * (1 << self.w_hh.weights.shift);
+        let xavier_limit_master = xavier_limit_i8 * (1 << self.w_hh.weights.quant_shift);
         let range = xavier_limit_master.min(spectral_cap_master);
         self.w_hh.weights.init_uniform(rng, range);
     }
@@ -59,10 +59,10 @@ impl RNNCell {
         self.init_weights(rng);
 
         let inferred_shift = self.infer_scale_shift();
-        self.w_ih.weights.shift = inferred_shift;
-        self.w_ih.bias.shift = inferred_shift;
-        self.w_hh.weights.shift = inferred_shift;
-        self.w_hh.bias.shift = inferred_shift;
+        self.w_ih.weights.quant_shift = inferred_shift;
+        self.w_ih.bias.quant_shift = inferred_shift;
+        self.w_hh.weights.quant_shift = inferred_shift;
+        self.w_hh.bias.quant_shift = inferred_shift;
     }
 }
 
@@ -209,3 +209,7 @@ impl RNN {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+}
