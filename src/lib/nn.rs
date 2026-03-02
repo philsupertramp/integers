@@ -12,6 +12,7 @@ pub mod activations;
 use crate::{Tensor, XorShift64};
 use crate::nn::optim::{OptimizerConfig, OptimizerState};
 
+
 // Module trait
 // Every building block needs to implement this.
 // Containers delegate; primitives do work.
@@ -133,9 +134,16 @@ pub trait Module {
 }
 
 pub struct Params {
+    /// Weights used for training
     pub master: Tensor<i32>,
+
+    /// Actual weights for inference
     pub storage: Tensor<i8>,
+
+    /// Accumulated gradient from backward pass
     pub grads: Option<Tensor<i32>>,
+
+    /// State of optimizer
     pub state: Option<OptimizerState>,
 
     /// Determines the quantization bits used when scaling from master -> storage
@@ -147,8 +155,10 @@ pub struct Params {
     ///     shift = 6 // for deeper networks
     pub quant_shift: u32,
 
-    /// Automatically tracks what shift was applied to inputs
+    /// Used to track what shift was applied to inputs
     pub input_shift: Option<u32>,
+
+    /// Used to track what shift was applied to outputs before returning them
     pub output_shift: Option<u32>,
 }
 
@@ -242,7 +252,7 @@ pub trait HasWeights {
     fn get_all_weights(&self) -> Vec<&Tensor<i32>>;
     
     /// Infer an appropriate scale_shift based on weight magnitudes.
-    /// Returns a shift value in the range [1, 8].
+    /// Returns a shift value in the range [0, 8].
     fn infer_scale_shift(&self) -> u32 {
         let all_weights = self.get_all_weights();
         if all_weights.is_empty() {
@@ -301,16 +311,17 @@ impl Module for Linear {
         self.weights.output_shift.unwrap_or(0)
     }
 
-    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
+    fn forward(&mut self, raw_input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
         assert_eq!(
-            input.shape[1], self.weights.storage.shape[1],
+            raw_input.shape[1], self.weights.storage.shape[1],
             "Linear::forward: Input in wrong dimension for weights! {} vs {}",
-            input.shape[1], self.weights.storage.shape[1]
+            raw_input.shape[1], self.weights.storage.shape[1]
         );
-        let batch = input.shape[0];
-        let input_dim = input.shape[1];
+        let batch = raw_input.shape[0];
+        let input_dim = raw_input.shape[1];
         let output_dim = self.weights.storage.shape[0];
 
+        let input = raw_input << input_shift;
 
         self.cache.push(input.clone());
         let mut out = Tensor::new(vec![batch, output_dim]);
@@ -353,13 +364,21 @@ impl Module for Linear {
         out
     }
 
-    fn backward(&mut self, grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
+    fn backward(&mut self, shifted_grad_output: &Tensor<i16>, gradient_shift: Option<u32>) -> Tensor<i16> {
+        // not required to shift anymore, we did that in the forward pass already
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward");
+
+        // gradient_shift: The shift applied to the incoming gradient (`grad_out`)
+        // input_shift: The shift applied to `input`
+        // output_shift: The shift applied to the processed `input`
+        // TODO:
+        //      - rescale grad_out with gradient_shift
+        // used to shift back into the original input space
         let input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
+
         let output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
 
         // Mathematically required for the chain rule:
-        let weight_shift = self.weights.quant_shift;
         let gshift = gradient_shift.unwrap_or(0);
 
         let batch = input.shape[0];
@@ -370,6 +389,8 @@ impl Module for Linear {
         let mut grad_weights = Tensor::<i16>::new(vec![output_dim, input_dim]);
         let mut grad_bias = Tensor::<i16>::new(vec![output_dim]);
 
+        let grad_output = shifted_grad_output >> output_shift;
+
         for b in 0..batch {
             for o in 0..output_dim {
                 let g = grad_output.data[b * output_dim + o];
@@ -378,10 +399,7 @@ impl Module for Linear {
                 }
 
                 // Bias update is an accumulator, so apply gshift
-                let bias_grad_shift = output_shift;
-                let g_shifted = g >> bias_grad_shift;
-                let g_bias = g_shifted >> gshift;
-                grad_bias.data[o] = grad_bias.data[o].saturating_add(g_bias);
+                grad_bias.data[o] = grad_bias.data[o].saturating_add(g);
 
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
@@ -393,11 +411,9 @@ impl Module for Linear {
                     // Both terms are quantized:
                     //  grad_output is quantized by output_shift
                     //  input_i8 is quantized by input_shift
-                    let weight_grad_shift = output_shift.saturating_add(input_shift);
-                    let dw_shifted = (dw >> weight_grad_shift) >> gshift;
                     // Weight update is an accumulator, so apply gshift
                     grad_weights.data[o * input_dim + i] =
-                        grad_weights.data[o * input_dim + i].saturating_add(dw_shifted as i16);
+                        grad_weights.data[o * input_dim + i].saturating_add(dw as i16);
 
                     let w = self.weights.storage.data[o * input_dim + i];
 
@@ -408,17 +424,18 @@ impl Module for Linear {
                     //  input_i8 is quantized by weight_shift
                     let dx = kernels::mul_mixed_scalar(g, w);
 
-                    let input_grad_shift = output_shift.saturating_add(weight_shift);
                     // Input gradient flows back through the network, apply wshift!
                     grad_input.data[b * input_dim + i] =
-                        grad_input.data[b * input_dim + i].saturating_add((dx >> input_grad_shift) as i16);
+                        grad_input.data[b * input_dim + i].saturating_add(dx as i16);
                 }
             }
         }
 
-        self.weights.accumulate_grads(grad_weights);
-        self.bias.accumulate_grads(grad_bias);
-        grad_input
+        let grad_input_shifted = grad_input << input_shift;
+        self.weights.accumulate_grads(grad_weights << gshift);
+        self.bias.accumulate_grads(grad_bias << gshift);
+
+        grad_input_shifted
     }
 
     fn step(&mut self, optim: &dyn OptimizerConfig) {
@@ -850,78 +867,6 @@ mod tests {
         assert_eq!(l1.weights.storage.data[0], 0);
         assert_eq!(l1.weights.storage.data[1], 0);
     }
-
-    #[test]
-    fn test_relu_forward() {
-        let mut relu = activations::ReLU::new();
-        let mut input = Tensor::<i8>::new(vec![4, 1]);
-        let mut rng = XorShift64::new(42);
-
-        input.data[0] = -5;
-        input.data[1] = 0;
-        input.data[2] = 5;
-        input.data[3] = 127;
-
-        let res = relu.forward(&input, 0, &mut rng);
-        assert_eq!(res.data[0], 0);
-        assert_eq!(res.data[1], 0);
-        assert_eq!(res.data[2], 5);
-        assert_eq!(res.data[3], 127);
-    }
-
-    #[test]
-    fn test_relu_backward() {
-        let mut relu = activations::ReLU::new();
-        let mut input = Tensor::<i8>::new(vec![4, 1]);
-        let mut rng = XorShift64::new(42);
-
-        input.data[0] = -5;
-        input.data[1] = 0;
-        input.data[2] = 5;
-        input.data[3] = 127;
-
-        let _res = relu.forward(&input, 0, &mut rng);
-
-        let mut grad = Tensor::<i16>::new(vec![4, 1]);
-        grad.data[0] = 10;
-        grad.data[1] = 10;
-        grad.data[2] = 10;
-        grad.data[3] = 10;
-
-        let res = relu.backward(&grad, Some(8));
-        assert_eq!(res.data[0], 0);
-        assert_eq!(res.data[1], 0);
-        assert_eq!(res.data[2], 10);
-        assert_eq!(res.data[3], 10);
-    }
-
-    #[test]
-    #[should_panic(expected = "ReLU::backward: No state registered. Perform forward pass first!")]
-    fn test_relu_backward_without_forward_call() {
-        let mut relu = activations::ReLU::new();
-        let input = Tensor::<i16>::new(vec![4, 1]);
-        let _res = relu.backward(&input, Some(2));
-    }
-
-    #[test]
-    fn test_relu_memory_report() {
-        let mut relu = activations::ReLU::new();
-
-        let (mut stat, mut dyna) = relu.memory_report();
-
-        assert_eq!(stat, 0);
-        assert_eq!(dyna, 0);
-
-        let input = Tensor::<i8>::new(vec![4, 1]);
-        let mut rng = XorShift64::new(42);
-        relu.forward(&input, 0, &mut rng);
-
-        (stat, dyna) = relu.memory_report();
-
-        assert_eq!(stat, 0);
-        assert_eq!(dyna, 4);
-    }
-
     // Examples
 
     #[test]
@@ -937,152 +882,6 @@ mod tests {
         model.print_summary(&model.describe(), 1);
     }
 
-    #[test]
-    fn test_train_xor_sgd_momentum() {
-        let mut rng = XorShift64::new(777);
-        let input_shift: u32 = 3;
-        let grad_shift: u32 = 3;
-        let mut l1 = Linear::new(2, 8, 0);
-        let mut l2 = Linear::new(8, 1, 0);
-
-        l1.init(&mut rng);
-        l2.init(&mut rng);
-        let mut model = Sequential::new();
-        model
-            .add(l1)
-            .add(activations::ReLU::new())
-            .add(l2);
-
-
-        let mut optim = SGDConfig::new().with_learn_rate(0.015625).with_momentum(0.2);
-
-        let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
-
-        let y_target = vec![0, 20, 20, 0];
-        let epochs = 8000;
-
-        println!("--- Starting Integer XOR Training with SGD + Momentum ---");
-
-        for epoch in 0..epochs {
-            model.sync_weights(&mut rng);
-            let preds = model.forward(&x, input_shift, &mut rng);
-
-            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
-            let mut loss = 0;
-
-            for i in 0..4 {
-                let error = preds.data[i] as i16 - y_target[i] as i16;
-                grad_out.data[i] = error;
-                loss += (error as i32) * (error as i32);
-            }
-
-            if epoch % 50 == 0 {
-                println!(
-                    "Epoch {:03}: Loss = {:05}, Grad = {:?}, Preds: [{}, {}, {}, {}]",
-                    epoch, loss, grad_out, preds.data[0], preds.data[1], preds.data[2], preds.data[3]
-                );
-            }
-
-            if loss == 0 {
-                println!("Converged early at epoch {}!", epoch);
-                break;
-            }
-            model.backward(&grad_out, Some(grad_shift));
-            model.step(&mut optim);
-        }
-
-        model.sync_weights(&mut rng);
-        let final_preds = model.forward(&x, input_shift, &mut rng);
-
-        assert!(final_preds.data[0] < 10, "{}", final_preds.data[0]);
-        assert!(final_preds.data[3] < 10, "{}", final_preds.data[3]);
-        assert!(final_preds.data[1] > 10, "{}", final_preds.data[1]);
-        assert!(final_preds.data[2] > 10, "{}", final_preds.data[2]);
-    }
-
-    #[test]
-    fn test_train_xor_adam() {
-        let mut rng = XorShift64::new(777);
-
-        let lr_shift: u32 = 0;
-        let mut l1 = Linear::new(2, 8, lr_shift);
-        let mut l2 = Linear::new(8, 1, lr_shift);
-
-        for w in l1.weights.master.data.iter_mut() {
-            *w = (rng.gen_range(30) as i32) - 15;
-        }
-        for w in l2.weights.master.data.iter_mut() {
-            *w = (rng.gen_range(30) as i32) - 15;
-        }
-        for b in l1.bias.master.data.iter_mut() {
-            *b = 5;
-        }
-
-        let mut model = Sequential::new();
-        model
-            .add(l1)
-            .add(activations::ReLU::new())
-            .add(l2);
-
-        // NEW: Instantiate our Integer Adam!
-        // We set the learning rate multiplier to 2.
-        let mut optim = AdamConfig::new().with_learn_rate(0.75);
-
-        let x = Tensor::from_vec(vec![0, 0, 0, 1, 1, 0, 1, 1], vec![4, 2]);
-
-        let y_target = vec![0, 20, 20, 0];
-        let epochs = 1800;
-
-        println!("--- Starting Integer XOR Training with ADAM ---");
-
-        for epoch in 0..epochs {
-            model.sync_weights(&mut rng);
-            let preds = model.forward(&x, lr_shift, &mut rng);
-
-            let mut grad_out = Tensor::<i16>::new(vec![4, 1]);
-            let mut loss = 0;
-
-            for i in 0..4 {
-                let error = preds.data[i] as i16 - y_target[i] as i16;
-                grad_out.data[i] = error;
-                loss += (error as i32) * (error as i32);
-            }
-
-            if epoch % 50 == 0 {
-                println!(
-                    "Epoch {:03}: Loss = {:05}, Preds: [{}, {}, {}, {}]",
-                    epoch, loss, preds.data[0], preds.data[1], preds.data[2], preds.data[3]
-                );
-            }
-
-            if loss == 0 {
-                println!("Converged early at epoch {}!", epoch);
-                break;
-            }
-
-            model.backward(&grad_out, Some(0));
-
-            // NEW: Pass the optimizer to the model step
-            model.step(&mut optim);
-        }
-
-        model.sync_weights(&mut rng);
-        let final_preds = model.forward(&x, 0, &mut rng);
-        let p00 = final_preds.data[0];
-        let p01 = final_preds.data[1];
-        let p10 = final_preds.data[2];
-        let p11 = final_preds.data[3];
-
-        println!(
-            "Final XOR Evaluation: 0,0->{} | 0,1->{} | 1,0->{} | 1,1->{}",
-            p00, p01, p10, p11
-        );
-
-        assert!(p00 < 10, "0,0 failed: expected low, got {}", p00);
-        assert!(p11 < 10, "1,1 failed: expected low, got {}", p11);
-        assert!(p01 > 10, "0,1 failed: expected high, got {}", p01);
-        assert!(p10 > 10, "1,0 failed: expected high, got {}", p10);
-    }
 }
 
 

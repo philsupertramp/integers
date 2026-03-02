@@ -10,6 +10,7 @@ pub mod dataset_loaders;
 pub mod quant;
 
 use std::fmt;
+use std::ops::{Shr, Shl};
 
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +63,129 @@ where
         self.data.len() * std::mem::size_of::<T>()
     }
 }
+
+///
+/// Right shift operator for Tensors
+///
+/// Example:
+/// ```
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = t >> 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 2);
+/// ```
+impl<T> Shr<u32> for Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shr(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .into_iter()
+            .map(|val| val >> shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape,
+        }
+    }
+}
+
+///
+/// Right shift operator for Tensors [by reference]
+///
+/// Example:
+/// ```
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = &t >> 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 2);
+/// assert_eq!(t.data[0], 4);
+/// ```
+impl<T> Shr<u32> for &Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shr(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .iter()
+            .map(|&val| val >> shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape.clone(),
+        }
+    }
+}
+
+///
+/// Left shift operator for Tensors
+///
+/// Example:
+/// ```
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = t << 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 8);
+/// ```
+impl<T> Shl<u32> for Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shl<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shl(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .into_iter()
+            .map(|val| val << shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape,
+        }
+    }
+}
+
+///
+/// Left shift operator for Tensors [by reference]
+///
+/// Example:
+/// ```
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = &t << 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 8);
+/// assert_eq!(t.data[0], 4);
+/// ```
+impl<T> Shl<u32> for &Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shl<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shl(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .iter()
+            .map(|&val| val << shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape.clone(),
+        }
+    }
+}
+
 pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
     let axis = axis.unwrap_or(1);
     
@@ -208,6 +332,48 @@ mod tests {
 
         assert_eq!(t.len(), 1);
         assert_eq!(t.memory_bytes(), 4);
+    }
+
+    #[test]
+    fn test_tensor_shr_borrow(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = t << 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 8);
+        // not allowed
+        // assert_eq!(t.data[0], 4);
+    }
+
+    #[test]
+    fn test_tensor_shr_reference(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = &t << 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 8);
+        assert_eq!(t.data[0], 4);
+    }
+
+    #[test]
+    fn test_tensor_shl_borrow(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = t >> 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 2);
+        // not allowed
+        // assert_eq!(t.data[0], 4);
+    }
+
+    #[test]
+    fn test_tensor_shl_reference(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = &t >> 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 2);
+        assert_eq!(t.data[0], 4);
     }
 
     #[test]
