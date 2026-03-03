@@ -8,6 +8,7 @@ pub trait OptimizerConfig {
     fn init_state(&self, len: usize) -> OptimizerState;
 }
 
+#[derive(Debug, PartialEq)]
 pub enum OptimizerState {
     None,
     SGD { velocity: Vec<i32> },
@@ -242,6 +243,161 @@ mod tests {
             optim = optim.with_learn_rate(*val);
             assert_eq!(optim.lr_shift, expected_f32);
         }
-        
+    }
+
+    #[test]
+    fn test_sgd_with_momentum(){
+        let mut optim = SGDConfig::new();
+
+        assert_eq!(optim.momentum_shift, None);
+
+        let samples = vec![
+            0.88, 0.85, 0.82,
+            0.80, 0.75, 0.70,
+            0.50, 0.25, 0.125,
+            0.0625,
+        ];
+        let expected_values = vec![
+            8, 7, 6, 5, 4, 3, 2,
+            1, 1, 1,
+        ];
+
+        for (val, expected_f32) in samples.iter().zip(expected_values) {
+            optim = optim.with_momentum(*val);
+            assert_eq!(optim.momentum_shift, Some(expected_f32));
+        }
+    }
+
+    #[test]
+    fn test_sgd_init_state(){
+        let optim = SGDConfig::new();
+
+        let state = optim.init_state(420);
+        assert_eq!(state, OptimizerState::None);
+
+        let optim = SGDConfig::new()
+            .with_momentum(0.8);
+
+
+        let state = optim.init_state(420);
+        assert_eq!(state, OptimizerState::SGD{ velocity: vec![0; 420] });
+    }
+
+    #[test]
+    #[should_panic(
+        expected="assertion `left == right` failed: Weights and Gradients must match length! Got 2 vs. 3\n  left: 2\n right: 3"
+    )]
+    fn test_sgd_update_wrong_sizes(){
+        let mut optim = SGDConfig::new();
+
+        let mut state = optim.init_state(5);
+
+        let mut input = vec![2; 2];
+        let grad = vec![2; 3];
+        optim.update(&mut input, &grad, &mut state);
+    }
+
+    #[test]
+    fn test_sgd_no_momentum_update(){
+        let mut optim = SGDConfig::new()
+            // grad update will be applied fully
+            .with_learn_rate(1.0);
+
+        let mut state = optim.init_state(0);
+
+        // somewhere we computed this gradient, we will apply it to 
+        // some weights and some bias
+        let grad = vec![2; 2];
+        // will be [0, 0] -> [-2, -2]
+        let mut weights = vec![0; 2];
+
+        optim.update(&mut weights, &grad, &mut state);
+
+        // will be [1, 1] -> [-1, -1]
+        let mut bias = vec![1; 2];
+
+        optim.update(&mut bias, &grad, &mut state);
+
+        assert_eq!(weights, vec![-2, -2]);
+        assert_eq!(bias, vec![-1, -1]);
+    }
+
+    #[test]
+    fn test_sgd_no_momentum_update_check_lr_influence(){
+        let mut optim = SGDConfig::new()
+            // grad update will be applied fully
+            .with_learn_rate(0.5);
+
+        let mut state = optim.init_state(0);
+
+        // somewhere we computed this gradient, we will apply it to 
+        // some weights and some bias
+        let grad = vec![2; 2];
+        // will be [0, 0] -> [-1, -1]
+        let mut weights = vec![0; 2];
+
+        optim.update(&mut weights, &grad, &mut state);
+
+        // will be [1, 1] -> [0, 0]
+        let mut bias = vec![1; 2];
+
+        optim.update(&mut bias, &grad, &mut state);
+
+        assert_eq!(weights, vec![-1, -1]);
+        assert_eq!(bias, vec![0, 0]);
+    }
+
+    #[test]
+    fn test_sgd_with_momentum_update(){
+        let mut optim = SGDConfig::new()
+            // grad update will be applied fully
+            .with_learn_rate(1.0)
+            // ~ shift by 1
+            .with_momentum(0.88);
+
+        let mut state = optim.init_state(1);
+
+        // somewhere we computed this gradient, we will apply it to 
+        // some weights and some bias
+        let grad = vec![2; 2];
+        // will be [0, 0] -> [-2, -2]
+        let mut weights = vec![0; 2];
+
+        optim.update(&mut weights, &grad, &mut state);
+
+        // will be [1, 1] -> [-2, -2]
+        let mut bias = vec![1; 2];
+
+        optim.update(&mut bias, &grad, &mut state);
+
+        assert_eq!(weights, vec![-2, -2]);
+        assert_eq!(bias, vec![-2, -2]);
+    }
+
+    #[test]
+    fn test_sgd_with_momentum_update_check_lr_influence(){
+        let mut optim = SGDConfig::new()
+            // grad update will be applied fully
+            .with_learn_rate(0.5)
+            // momentum shift ~ 2
+            .with_momentum(0.5);
+
+        let mut state = optim.init_state(0);
+
+        // somewhere we computed this gradient, we will apply it to 
+        // some weights and some bias
+        let grad = vec![2; 2];
+        // will be [0, 0] -> [-1, -1]
+        let mut weights = vec![0; 2];
+
+        optim.update(&mut weights, &grad, &mut state);
+
+        // will be [1, 1] -> [0, 0]
+        let mut bias = vec![1; 2];
+
+        optim.update(&mut bias, &grad, &mut state);
+
+        assert_eq!(weights, vec![-1, -1]);
+        assert_eq!(bias, vec![0, 0]);
     }
 }

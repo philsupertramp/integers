@@ -22,7 +22,7 @@ fn generate_tanh_lut_i8(input_scale: f32) -> [i8; 256] {
     lut
 }
 
-fn clamp_i32(shifted: i32) -> i32 {
+fn clamp_i8(shifted: i32) -> i8 {
     let mut val = shifted as i32;
     let mut clamp = true;
     if shifted > 127 {
@@ -37,7 +37,7 @@ fn clamp_i32(shifted: i32) -> i32 {
             increase_clamp_downcast();
         }
     }
-    val
+    val as i8
 }
 
 pub fn mul_mixed_scalar(a: i32, b: i32) -> i32 {
@@ -148,6 +148,60 @@ pub mod arm_neon {
 mod tests {
     use super::*;
     // Kernel tests
+    #[test]
+    fn test_kernel_clamp_i8(){
+        assert_eq!(clamp_i8(10000), 127);
+        assert_eq!(clamp_i8(128), 127);
+        assert_eq!(clamp_i8(127), 127);
+        assert_eq!(clamp_i8(0), 0);
+        assert_eq!(clamp_i8(-127), -127);
+        assert_eq!(clamp_i8(-128), -128);
+        assert_eq!(clamp_i8(-129), -128);
+        assert_eq!(clamp_i8(-10000), -128);
+    }
+
+    #[test]
+    fn test_kernel_mul_mixed_scalar(){
+        assert_eq!(mul_mixed_scalar(127, 128), 127 * 128);
+    }
+
+    #[test]
+    fn test_kernel_isqrt_64(){
+        assert_eq!(isqrt_64(4), 2);
+        assert_eq!(isqrt_64(10000), 100);
+        assert_eq!(isqrt_64(1000000), 1000);
+    }
+
+    #[test]
+    fn test_generate_tanh_lut_i8() {
+        let lut = generate_tanh_lut_i8(127.0);
+        let inputs: Vec<i8> = (-128..=127).collect();
+
+        for inp in inputs {
+            let expected = ((inp as f32 / 127.0).tanh() * 127.0).round().clamp(-128.0, 127.0) as i8;
+            let index = (inp as i16 + 128) as usize;
+            assert_eq!(
+                lut[index],
+                expected, 
+                "mismatch at input {inp}: got {}, expected {expected}", tanh_i8(inp)
+            );
+        }
+    }
+
+    #[test]
+    fn test_kernel_tanh_i8() {
+        let inputs: Vec<i8> = (-128..=127).collect();
+
+        for inp in inputs {
+            let expected = ((inp as f32 / 127.0).tanh() * 127.0).round().clamp(-128.0, 127.0) as i8;
+            assert_eq!(
+                tanh_i8(inp), 
+                expected, 
+                "mismatch at input {inp}: got {}, expected {expected}", tanh_i8(inp)
+            );
+        }
+    }
+
     #[test]
     fn test_kernel_dot_product_scalar() {
         let vec1 = [1, 1, 1];

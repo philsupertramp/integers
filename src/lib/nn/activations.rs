@@ -459,4 +459,69 @@ mod tests {
         assert_eq!(out.shape, vec![5, 1]);
         assert_eq!(out.data, vec![0, 94, 0, -95, 0]);
     }
+
+    #[test]
+    fn test_tanh_memory_report(){
+        let mut tanh = Tanh::new();
+        let mut rng = XorShift64::new(420);
+
+        let (stat_, dyn_) = tanh.memory_report();
+
+        assert_eq!(stat_, 0);
+        assert_eq!(dyn_, 0);
+
+        let input = Tensor::from_vec(vec![-128, -1, 0, 1, 127], vec![5, 1]);
+
+        tanh.forward(&input, 0, &mut rng);
+
+        let (stat_, dyn_) = tanh.memory_report();
+
+        assert_eq!(stat_, 0);
+        assert_eq!(dyn_, 20);
+
+        tanh.forward(&input, 0, &mut rng);
+
+        let (stat_, dyn_) = tanh.memory_report();
+
+        assert_eq!(stat_, 0);
+        assert_eq!(dyn_, 40);
+
+        // and the backward pass removes objects from the cache
+        tanh.backward(&input, Some(0));
+
+        let (stat_, dyn_) = tanh.memory_report();
+
+        assert_eq!(stat_, 0);
+        assert_eq!(dyn_, 20);
+    }
+
+    #[test]
+    fn test_tanh_describe(){
+        let tanh = Tanh::new();
+
+        let info = tanh.describe();
+
+        assert_eq!(info.name, "Tanh");
+        assert_eq!(info.params, 0);
+        assert_eq!(info.static_bytes, 0);
+        assert_eq!(info.children, vec![]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected="No forward call."
+    )]
+    fn test_tanh_get_output_shift_no_shift(){
+        let tanh = Tanh::new();
+
+        tanh.get_output_shift();
+    }
+
+    #[test]
+    fn test_tanh_get_output_shift(){
+        let mut tanh = Tanh::new();
+        tanh.output_shift = Some(1);
+
+        assert_eq!(tanh.get_output_shift(), 1u32);
+    }
 }
