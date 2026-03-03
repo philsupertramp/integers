@@ -298,6 +298,35 @@ mod tests {
     }
 
     #[test]
+    fn test_sgd_update_sets_velocities(){
+        let mut optim = SGDConfig::new()
+            // grad update will be applied fully
+            .with_learn_rate(1.0);
+
+        let mut state = optim.init_state(0);
+
+        match state {
+            OptimizerState::SGD { ref velocity } => {
+                let grad = vec![2; 2];
+                // will be [0, 0] -> [-2, -2]
+                let mut weights = vec![0; 2];
+
+                let og_velocity = velocity.clone();
+                optim.update(&mut weights, &grad, &mut state);
+
+                let new_velocity = velocity.clone();
+
+                for (og_vel, new_vel) in og_velocity.into_iter().zip(new_velocity.into_iter()) {
+                    assert!(og_vel != new_vel);
+                }
+            }
+            OptimizerState::Adam { m: _, v: _ } => {}
+            OptimizerState::None => {}
+        }
+
+    }
+
+    #[test]
     fn test_sgd_no_momentum_update(){
         let mut optim = SGDConfig::new()
             // grad update will be applied fully
@@ -335,12 +364,10 @@ mod tests {
         let grad = vec![2; 2];
         // will be [0, 0] -> [-1, -1]
         let mut weights = vec![0; 2];
-
-        optim.update(&mut weights, &grad, &mut state);
-
         // will be [1, 1] -> [0, 0]
         let mut bias = vec![1; 2];
 
+        optim.update(&mut weights, &grad, &mut state);
         optim.update(&mut bias, &grad, &mut state);
 
         assert_eq!(weights, vec![-1, -1]);
@@ -355,23 +382,24 @@ mod tests {
             // ~ shift by 1
             .with_momentum(0.88);
 
-        let mut state = optim.init_state(1);
+        let mut state = optim.init_state(2);
 
         // somewhere we computed this gradient, we will apply it to 
         // some weights and some bias
         let grad = vec![2; 2];
+        let grad_bias = vec![2; 1];
+
         // will be [0, 0] -> [-2, -2]
         let mut weights = vec![0; 2];
 
-        optim.update(&mut weights, &grad, &mut state);
-
         // will be [1, 1] -> [-2, -2]
-        let mut bias = vec![1; 2];
+        let mut bias = vec![1; 1];
 
-        optim.update(&mut bias, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state);
+        optim.update(&mut bias, &grad_bias, &mut state);
 
         assert_eq!(weights, vec![-2, -2]);
-        assert_eq!(bias, vec![-2, -2]);
+        assert_eq!(bias, vec![-2]);
     }
 
     #[test]
@@ -382,21 +410,75 @@ mod tests {
             // momentum shift ~ 2
             .with_momentum(0.5);
 
-        let mut state = optim.init_state(0);
+        let mut state = optim.init_state(2);
 
         // somewhere we computed this gradient, we will apply it to 
         // some weights and some bias
         let grad = vec![2; 2];
         // will be [0, 0] -> [-1, -1]
         let mut weights = vec![0; 2];
-
-        optim.update(&mut weights, &grad, &mut state);
-
         // will be [1, 1] -> [0, 0]
         let mut bias = vec![1; 2];
 
+        optim.update(&mut weights, &grad, &mut state);
         optim.update(&mut bias, &grad, &mut state);
 
+        assert_eq!(weights, vec![-1, -1]);
+        assert_eq!(bias, vec![0, 0]);
+    }
+    
+    #[test]
+    fn test_sgd_update_too_small_state_size(){
+        let mut optim = SGDConfig::new()
+            // grad update will be applied fully
+            .with_learn_rate(0.5)
+            // momentum shift ~ 2
+            .with_momentum(0.5);
+
+        let mut state = optim.init_state(1);
+
+        // somewhere we computed this gradient, we will apply it to 
+        // some weights and some bias
+        let grad = vec![2; 2];
+        // will be [0, 0] -> [-1, -1]
+        let mut weights = vec![0; 2];
+        // will be [1, 1] -> [0, 0]
+        let mut bias = vec![1; 2];
+
+        optim.update(&mut weights, &grad, &mut state);
+        optim.update(&mut bias, &grad, &mut state);
+
+        // weights[1] and bias[1] are not updated
+        assert_eq!(weights, vec![-1, 0]);
+        assert_eq!(bias, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_sgd_update_too_big_state_size_no_issue_except_velocity(){
+        let mut optim = SGDConfig::new()
+            // grad update will be applied fully
+            .with_learn_rate(0.5)
+            // momentum shift ~ 2
+            .with_momentum(0.5);
+
+        let mut state = optim.init_state(3);
+
+        // somewhere we computed this gradient, we will apply it to 
+        // some weights and some bias
+        let grad = vec![2; 2];
+        // will be [0, 0] -> [-1, -1]
+        let mut weights = vec![0; 2];
+        // will be [1, 1] -> [0, 0]
+        let mut bias = vec![1; 2];
+        println!("Vel: {:?}", state);
+
+        optim.update(&mut weights, &grad, &mut state);
+        println!("Vel: {:?}", state);
+        optim.update(&mut bias, &grad, &mut state);
+
+        println!("Vel: {:?}", state);
+
+        // the full matrix was updated
         assert_eq!(weights, vec![-1, -1]);
         assert_eq!(bias, vec![0, 0]);
     }
