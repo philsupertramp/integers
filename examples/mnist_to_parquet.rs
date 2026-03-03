@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::{self, Read, BufReader};
 use std::path::Path;
 
-use arrow::array::{UInt8Array, Float32Array};
+use arrow::array::{UInt8Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;

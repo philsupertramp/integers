@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let target = test_ds.get_target(t);
         let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
         let pred_cls = argmax(&pred, Some(1));
-        let error = pred_cls[0] as i8 - target.data[0];
+        let error = pred_cls[0] as i32 - target.data[0];
         eval_loss += (error as i64) * (error as i64);
     }
     println!("Eval  total  MSE : {}", eval_loss);

@@ -2,10 +2,10 @@ use integers::*;
 use integers::nn::*;
 use integers::nn::losses::*;
 use integers::nn::activations::{ReLU};
-use integers::data::{load_mnist, shuffled_indices};
+use integers::data::{shuffled_indices};
 #[cfg(debug_assertions)]
 use integers::debug::{reset_overflow_stats, get_overflow_stats};
-use integers::nn::optim::{SGDConfig, AdamConfig};
+use integers::nn::optim::{AdamConfig};
 use integers::dataset_loaders::{QuantizationMethod, DatasetBuilder, FileFormat};
 
 use std::time::Instant;

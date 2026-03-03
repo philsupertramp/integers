@@ -1,4 +1,4 @@
-pub fn minmax_quantize(values: &[f32]) -> Vec<i8> {
+pub fn minmax_quantize(values: &[f32]) -> Vec<i32> {
     if values.is_empty() {
         return Vec::new();
     }
@@ -10,12 +10,12 @@ pub fn minmax_quantize(values: &[f32]) -> Vec<i8> {
         .map(|&v| {
             let norm = (v - min) / range; // [0, 1]
             let scaled = norm * 254.0 - 127.0; // [-127, 127]
-            scaled.round().clamp(-127.0, 127.0) as i8
+            scaled.round().clamp(-127.0, 127.0) as i32
         })
         .collect()
 }
 
-pub fn standard_score_quantize(values: &[f32]) -> Vec<i8> {
+pub fn standard_score_quantize(values: &[f32]) -> Vec<i32> {
     if values.is_empty() {
         return Vec::new();
     }
@@ -26,7 +26,7 @@ pub fn standard_score_quantize(values: &[f32]) -> Vec<i8> {
         .iter()
         .map(|&v| {
             let zscore = (v - mean) / std;
-            zscore.round().clamp(-127.0, 127.0) as i8
+            zscore.round().clamp(-127.0, 127.0) as i32
         })
         .collect()
 }
@@ -34,7 +34,6 @@ pub fn standard_score_quantize(values: &[f32]) -> Vec<i8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn test_minmax_quantize_empty_vec() {
@@ -88,6 +87,40 @@ mod tests {
 
         res = standard_score_quantize(&vec![1., 2., 3., 4., 5.]);
         assert_eq!(res, vec![-1, -1, 0, 1, 1]);
+
+        res = standard_score_quantize(&(-128..127).map(|x| x as f32).collect::<Vec<f32>>());
+        let expected: Vec<i32> = vec![
+            -2, -2, -2, -2, -2, -2, -2, -2, -2,
+            -2, -2, -2, -2, -2, -2, -2, -2, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            -1,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  0,  0,  0,  0,  0,  0,  0,
+             0,  0,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  1,  1,  1,  1,  1,
+             1,  1,  1,  1,  2,  2,  2,  2,  2,
+             2,  2,  2,  2,  2,  2,  2,  2,  2,
+             2,  2,  2
+        ];
+        assert_eq!(res, expected);
     }
 
 

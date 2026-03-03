@@ -11,7 +11,7 @@ pub trait OptimizerConfig {
 pub enum OptimizerState {
     None,
     SGD { velocity: Vec<i32> },
-    Adam { m: Vec<i32>, v: Vec<i64> },
+    Adam { m: Vec<i32>, v: Vec<i32> },
 }
 
 // SGD
@@ -173,7 +173,7 @@ impl OptimizerConfig for AdamConfig {
     fn init_state(&self, len: usize) -> OptimizerState {
         OptimizerState::Adam {
             m: vec![0; len],
-            v: vec![0i64; len],
+            v: vec![0i32; len],
         }
     }
 
@@ -185,15 +185,15 @@ impl OptimizerConfig for AdamConfig {
 
             for i in 0..weights.len() {
                 let g = grads[i];
-                let g_64 = grads[i] as i64;
+                let g_64 = grads[i] as i32;
                 m[i] = checked_add_counting!(
                     m[i].wrapping_sub(m[i] / b1_div),
                     g / b1_div,
                     backward_wraps
                 );
                 v[i] = checked_add_counting!(
-                    v[i].wrapping_sub(v[i] / (b2_div as i64)),
-                    g_64 * g_64 / b2_div as i64,
+                    v[i].wrapping_sub(v[i] / (b2_div as i32)),
+                    g_64 * g_64 / b2_div as i32,
                     backward_wraps
                 );
                 let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;

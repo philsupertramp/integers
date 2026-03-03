@@ -1,7 +1,7 @@
 /// Debug utils
 #[derive(Clone, Copy)]
 pub struct OverflowStats {
-    /// i16 overflow in backward loops
+    /// i32 overflow in backward loops
     pub forward_wraps:  u64,
     /// i32 master weight update overflow
     pub backward_wraps: u64,

@@ -4,12 +4,12 @@
 ///   - MNIST (IDX binary format, from http://yann.lecun.com/exdb/mnist/)
 ///   - Iris / "Petals" dataset (CSV, from UCI or sklearn-compatible exports)
 ///
-/// All loaders return `Tensor<i8>` inputs and either `Tensor<i8>` for
+/// All loaders return `Tensor<i32>` inputs and either `Tensor<i32>` for
 /// regression targets or `Vec<u8>` label indices for classification.
 ///
 /// # Quantization convention
 ///
-/// Pixel values [0, 255] → i8 by `(v as i32 - 128) as i8`
+/// Pixel values [0, 255] → i32 by `(v as i32 - 128) as i32`
 ///   so 0 → -128, 128 → 0, 255 → 127.
 ///
 /// Floating-point features are min-max scaled to [-127, 127].
@@ -64,11 +64,11 @@ pub type DataResult<T> = Result<T, DataError>;
 ///
 /// `inputs`  shape: [n_samples, n_features]
 /// `labels`  length: n_samples  (class index 0..n_classes)
-/// `targets` shape: [n_samples, n_classes]  (one-hot i8, see module docs)
+/// `targets` shape: [n_samples, n_classes]  (one-hot i32, see module docs)
 pub struct Dataset {
-    pub inputs:   Tensor<i8>,
+    pub inputs:   Tensor<i32>,
     pub labels:   Vec<u8>,
-    pub targets:  Tensor<i8>,
+    pub targets:  Tensor<i32>,
     pub n_classes: usize,
 }
 
@@ -86,21 +86,21 @@ impl Dataset {
     }
 
     /// Return a single sample as a [1, n_features] tensor (no allocation on inputs slice).
-    pub fn get_input(&self, idx: usize) -> Tensor<i8> {
+    pub fn get_input(&self, idx: usize) -> Tensor<i32> {
         let nf = self.n_features();
         let start = idx * nf;
         Tensor::from_vec(self.inputs.data[start..start + nf].to_vec(), vec![1, nf])
     }
 
     /// Return a single one-hot target as a [1, n_classes] tensor.
-    pub fn get_target(&self, idx: usize) -> Tensor<i8> {
+    pub fn get_target(&self, idx: usize) -> Tensor<i32> {
         let nc = self.n_classes;
         let start = idx * nc;
         Tensor::from_vec(self.targets.data[start..start + nc].to_vec(), vec![1, nc])
     }
 
     /// Convenience: predicted class from a [1, n_classes] output tensor.
-    pub fn argmax(output: &Tensor<i8>) -> u8 {
+    pub fn argmax(output: &Tensor<i32>) -> u8 {
         output.data
             .iter()
             .enumerate()
@@ -115,7 +115,7 @@ impl Dataset {
     pub fn minibatch(
         &self,
         indices: &[usize],
-    ) -> (Tensor<i8>, Tensor<i8>) {
+    ) -> (Tensor<i32>, Tensor<i32>) {
         let nf = self.n_features();
         let nc = self.n_classes;
         let b  = indices.len();
@@ -201,7 +201,7 @@ fn load_mnist_labels_raw(path: &Path) -> DataResult<Vec<u8>> {
 ///
 /// # Returns
 ///
-/// A [`Dataset`] where inputs are flattened 28×28 images quantized to i8.
+/// A [`Dataset`] where inputs are flattened 28×28 images quantized to i32.
 ///
 /// # Example
 ///
@@ -248,18 +248,18 @@ pub fn load_mnist(
     let n_features = rows * cols;    // 784 for standard MNIST
     let n_classes  = 10usize;
 
-    // Quantize pixels: [0,255] → i8 via centre-shift.
+    // Quantize pixels: [0,255] → i32 via centre-shift.
     // 0 → -128,  127/128 → ~0,  255 → 127
     let mut inp_data = Vec::with_capacity(n * n_features);
     for px in &pixels[..n * n_features] {
-        inp_data.push((*px as i32 - 128) as i8);
+        inp_data.push((*px as i32 - 128) as i32);
     }
 
     let labels: Vec<u8> = raw_labels[..n].to_vec();
 
     // One-hot targets: true class → +96, others → 0
     // (leaves room for the head to output the right direction without saturation)
-    let mut tgt_data = vec![0i8; n * n_classes];
+    let mut tgt_data = vec![0i32; n * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
         tgt_data[i * n_classes + lbl as usize] = 96;
     }
@@ -286,15 +286,15 @@ fn iris_class_index(s: &str) -> Option<u8> {
     }
 }
 
-/// Min-max scale a column of f32 values to [-127, 127] → i8.
-fn minmax_quantize(values: &[f32]) -> Vec<i8> {
+/// Min-max scale a column of f32 values to [-127, 127] → i32.
+fn minmax_quantize(values: &[f32]) -> Vec<i32> {
     let min = values.iter().cloned().fold(f32::INFINITY, f32::min);
     let max = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let range = (max - min).max(1e-6);
     values.iter().map(|&v| {
         let norm = (v - min) / range;          // [0, 1]
         let scaled = norm * 254.0 - 127.0;    // [-127, 127]
-        scaled.round().clamp(-127.0, 127.0) as i8
+        scaled.round().clamp(-127.0, 127.0) as i32
     }).collect()
 }
 
@@ -390,14 +390,14 @@ pub fn load_iris(path: impl AsRef<Path>) -> DataResult<Dataset> {
     let n = labels.len();
 
     // Quantize per-column so each feature spans the full [-127, 127] range.
-    let mut columns: Vec<Vec<i8>> = Vec::with_capacity(n_features);
+    let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
         columns.push(minmax_quantize(&col));
     }
 
     // Re-interleave into row-major layout [n, n_features]
-    let mut inp_data = vec![0i8; n * n_features];
+    let mut inp_data = vec![0i32; n * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
             *cell = columns[feat_idx][sample_idx];
@@ -405,7 +405,7 @@ pub fn load_iris(path: impl AsRef<Path>) -> DataResult<Dataset> {
     }
 
     // One-hot targets
-    let mut tgt_data = vec![0i8; n * n_classes];
+    let mut tgt_data = vec![0i32; n * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
         tgt_data[i * n_classes + lbl as usize] = 96;
     }
@@ -513,11 +513,11 @@ mod tests {
                    6.3,3.3,6.0,2.5,Iris-virginica\n";
         let ds = iris_csv_roundtrip(csv).unwrap();
         for &v in &ds.inputs.data {
-            assert!(v >= -127 && v <= 127, "value {} out of i8 range", v);
+            assert!(v >= -127, "value {} out of i32 range", v);  // v <= 127 given by data type
         }
         // Min and max of each column should hit the extremes
         for feat in 0..4 {
-            let col: Vec<i8> = (0..ds.len())
+            let col: Vec<i32> = (0..ds.len())
                 .map(|i| ds.inputs.data[i * 4 + feat])
                 .collect();
             let has_min = col.contains(&-127);
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_argmax() {
-        let t = Tensor::from_vec(vec![-10i8, 50, 20], vec![1, 3]);
+        let t = Tensor::from_vec(vec![-10i32, 50, 20], vec![1, 3]);
         assert_eq!(Dataset::argmax(&t), 1);
     }
 
@@ -646,9 +646,9 @@ mod tests {
         write_idx1(&dir.join("train-labels-idx1-ubyte"), &[3u8]);
 
         let ds = load_mnist(&dir, "train", None).unwrap();
-        assert_eq!(ds.inputs.data[0], -128i8);  // 0   → -128
-        assert_eq!(ds.inputs.data[1], 0i8);     // 128 → 0
-        assert_eq!(ds.inputs.data[2], 127i8);   // 255 → 127
+        assert_eq!(ds.inputs.data[0], -128i32);  // 0   → -128
+        assert_eq!(ds.inputs.data[1], 0i32);     // 128 → 0
+        assert_eq!(ds.inputs.data[2], 127i32);   // 255 → 127
     }
 
     #[test]

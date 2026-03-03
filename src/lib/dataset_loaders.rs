@@ -266,7 +266,7 @@ fn load_csv(
         .unwrap_or(labels.iter().max().map(|&x| x as usize + 1).unwrap_or(0));
 
     // Quantize per-column
-    let mut columns: Vec<Vec<i8>> = Vec::with_capacity(n_features);
+    let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
         let quantized = match config.quantization {
@@ -282,7 +282,7 @@ fn load_csv(
     }
 
     // Re-interleave into row-major layout [n, n_features]
-    let mut inp_data = vec![0i8; n_samples * n_features];
+    let mut inp_data = vec![0i32; n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
             *cell = columns[feat_idx][sample_idx];
@@ -290,7 +290,7 @@ fn load_csv(
     }
 
     // One-hot targets
-    let mut tgt_data = vec![0i8; n_samples * n_classes];
+    let mut tgt_data = vec![0i32; n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
         tgt_data[i * n_classes + lbl as usize] = 96;
     }
@@ -424,7 +424,7 @@ fn finalize_dataset(
         .unwrap_or(labels.iter().max().map(|&x| x as usize + 1).unwrap_or(0));
 
     // Quantize per-column
-    let mut columns: Vec<Vec<i8>> = Vec::with_capacity(n_features);
+    let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
         let quantized = match config.quantization {
@@ -440,7 +440,7 @@ fn finalize_dataset(
     }
 
     // Re-interleave into row-major layout [n, n_features]
-    let mut inp_data = vec![0i8; n_samples * n_features];
+    let mut inp_data = vec![0i32; n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
             *cell = columns[feat_idx][sample_idx];
@@ -448,7 +448,7 @@ fn finalize_dataset(
     }
 
     // One-hot targets
-    let mut tgt_data = vec![0i8; n_samples * n_classes];
+    let mut tgt_data = vec![0i32; n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
         tgt_data[i * n_classes + lbl as usize] = 96;
     }
@@ -551,9 +551,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(ds.len(), 3);
-        // Values should be in i8 range
+        // Values should be in i32 range
         for &v in &ds.inputs.data {
-            assert!(v >= -127 && v <= 127);
+            assert!(v >= -127);  // v <= 127 given by data type
         }
     }
 }

@@ -8,10 +8,10 @@ pub struct RNNCell {
     pub w_ih: Linear,
     pub w_hh: Linear,
     pub act: Tanh,
-    pub h_prev: Option<Tensor<i8>>,
+    pub h_prev: Option<Tensor<i32>>,
     pub hidden_dim: usize,
 
-    d_h_next: Option<Tensor<i16>>,
+    d_h_next: Option<Tensor<i32>>,
 
     pub output_shift: Option<u32>,
 }
@@ -43,14 +43,14 @@ impl RNNCell {
         self.w_ih.init_xavier(rng);
 
         let hidden_dim = self.w_hh.weights.master.shape[0];
-        let spectral_cap_i8 = kernels::isqrt(16129 / (hidden_dim as u32)) as i32;
-        let spectral_cap_master = spectral_cap_i8 * (1 << self.w_hh.weights.quant_shift);
+        let spectral_cap_i32 = kernels::isqrt(16129 / (hidden_dim as u32)) as i32;
+        let spectral_cap_master = spectral_cap_i32 * (1 << self.w_hh.weights.quant_shift);
 
         let fan_in = self.w_hh.weights.master.shape[1];
         let fan_out = self.w_hh.weights.master.shape[0];
-        let xavier_limit_i8 = kernels::isqrt(96774 / (fan_in + fan_out) as u32) as i32;
+        let xavier_limit_i32 = kernels::isqrt(96774 / (fan_in + fan_out) as u32) as i32;
 
-        let xavier_limit_master = xavier_limit_i8 * (1 << self.w_hh.weights.quant_shift);
+        let xavier_limit_master = xavier_limit_i32 * (1 << self.w_hh.weights.quant_shift);
         let range = xavier_limit_master.min(spectral_cap_master);
         self.w_hh.weights.init_uniform(rng, range);
     }
@@ -70,7 +70,7 @@ impl Module for RNNCell {
     fn get_output_shift(&self) -> u32 {
         self.output_shift.unwrap_or(0)
     }
-    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i8> {
+    fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i32> {
         let batch = input.shape[0];
 
         let h = self
@@ -81,25 +81,28 @@ impl Module for RNNCell {
         // We do both linear transforms, add elementwise, then tanh.
         // Simplest: pass through w_ih, add w_hh output, apply tanh.
         //
-        // Note: adding two i8 tensors before tanh risks overflow.
-        // Accumulate in i16, then downcast before tanh.
+        // Note: adding two i32 tensors before tanh risks overflow.
+        // Accumulate in i32, then downcast before tanh.
         let ih = self.w_ih.forward(input, input_shift, rng);
         let hh = self.w_hh.forward(h, self.w_ih.weights.output_shift.expect("Expected output shift"), rng);
 
-        let mut comb = Tensor::<i8>::new(vec![batch, self.hidden_dim]);
+        let mut comb = Tensor::<i32>::new(vec![batch, self.hidden_dim]);
         for i in 0..comb.data.len() {
-            let sum = checked_add_counting!(ih.data[i] as i16, hh.data[i] as i16, forward_wraps);
-            comb.data[i] = sum.clamp(-128, 127) as i8;
+            let sum = checked_add_counting!(ih.data[i] as i32, hh.data[i] as i32, forward_wraps);
+            comb.data[i] = sum;//.clamp(-128, 127) as i32;
         }
 
-        let h_next = self.act.forward(&comb, self.w_hh.weights.output_shift.expect("Expected output shift"), rng);
+        let mut h_next = self.act.forward(&comb, self.w_hh.weights.output_shift.expect("Expected output shift"), rng);
         let max_magnitude = h_next.data.iter().map(|x| x.abs() as u32).max().unwrap_or(1);
-        self.output_shift = Some(compute_shift_for_max(max_magnitude));
+        let out_shift = compute_shift_for_max(max_magnitude);
+        self.output_shift = Some(out_shift);
+
+        // h_next = h_next << out_shift;
 
         self.h_prev = Some(h_next.clone());
         h_next
     }
-    fn backward(&mut self, grad_output: &Tensor<i16>, grad_shift: Option<u32>) -> Tensor<i16> {
+    fn backward(&mut self, grad_output: &Tensor<i32>, grad_shift: Option<u32>) -> Tensor<i32> {
         let combined_grad = match self.d_h_next.take() {
             Some(carry) => {
                 let mut combined = grad_output.clone();
@@ -185,10 +188,10 @@ impl RNN {
 
     pub fn forward_seq(
         &mut self,
-        input_seq: &[Tensor<i8>],
+        input_seq: &[Tensor<i32>],
         input_shift: u32,
         rng: &mut XorShift64,
-    ) -> Vec<Tensor<i8>> {
+    ) -> Vec<Tensor<i32>> {
         input_seq
             .iter()
             .map(|x| self.cell.forward(x, input_shift, rng))
@@ -197,9 +200,9 @@ impl RNN {
 
     pub fn backward_seq(
         &mut self,
-        grad_seq: &[Tensor<i16>],
+        grad_seq: &[Tensor<i32>],
         grad_shift: Option<u32>,
-    ) -> Vec<Tensor<i16>> {
+    ) -> Vec<Tensor<i32>> {
         let start = grad_seq.len().saturating_sub(self.bptt_steps);
         grad_seq[start..]
             .iter()

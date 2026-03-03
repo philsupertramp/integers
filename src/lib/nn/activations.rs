@@ -3,7 +3,7 @@ use crate::nn::{ModuleInfo, Module, compute_shift_for_max};
 use crate::nn::kernels;
 
 pub struct ReLU {
-    pub cache: Vec<Tensor<i8>>,
+    pub cache: Vec<Tensor<i32>>,
     /// Automatically tracks what shift was applied to inputs
     pub input_shift: Option<u32>,
     pub output_shift: Option<u32>,
@@ -26,12 +26,12 @@ impl Module for ReLU {
         self.output_shift.expect("ReLU::get_output_shift: Didn't call forward!")
     }
 
-    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i8> {
+    fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32> {
         self.input_shift = Some(input_shift);
         self.output_shift = Some(input_shift);
 
         self.cache.push(input.clone());
-        let mut output = Tensor::<i8>::new(input.shape.clone());
+        let mut output = Tensor::<i32>::new(input.shape.clone());
         for idx in 0..input.data.len() {
             output.data[idx] = if input.data[idx] > 0 {
                 input.data[idx]
@@ -41,12 +41,12 @@ impl Module for ReLU {
         }
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
+    fn backward(&mut self, grad_output: &Tensor<i32>, _grad_shift: Option<u32>) -> Tensor<i32> {
         let input = self
             .cache
             .pop()
             .expect("ReLU::backward: No state registered. Perform forward pass first!");
-        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
+        let mut output = Tensor::<i32>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
             output.data[o] = if input.data[o] > 0 {
                 grad_output.data[o]
@@ -72,7 +72,7 @@ impl Module for ReLU {
 }
 
 pub struct Tanh {
-    pub cache: Vec<Tensor<i8>>,
+    pub cache: Vec<Tensor<i32>>,
     /// Automatically tracks what shift was applied to inputs
     pub input_shift: Option<u32>,
     pub output_shift: Option<u32>,
@@ -91,13 +91,13 @@ impl Tanh {
 }
 
 impl Module for Tanh {
-    fn forward(&mut self, input: &Tensor<i8>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i8> {
+    fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32> {
         self.input_shift = Some(input_shift);
 
         self.cache.push(input.clone());
-        let mut output = Tensor::<i8>::new(input.shape.clone());
+        let mut output = Tensor::<i32>::new(input.shape.clone());
         for (o, &x) in output.data.iter_mut().zip(&input.data) {
-            *o = kernels::tanh_i8(x);
+            *o = kernels::tanh_i8(x as i8) as i32;
         }
 
         let max_magnitude = output.data
@@ -112,7 +112,7 @@ impl Module for Tanh {
 
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i16>, _grad_shift: Option<u32>) -> Tensor<i16> {
+    fn backward(&mut self, grad_output: &Tensor<i32>, _grad_shift: Option<u32>) -> Tensor<i32> {
         let input = self
             .cache
             .pop()
@@ -123,14 +123,17 @@ impl Module for Tanh {
             .expect("Tanh::backward: No state registered. Perform forward pass first.");
 
 
-        let mut output = Tensor::<i16>::new(grad_output.shape.clone());
+        let mut output = Tensor::<i32>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
-            let t = kernels::tanh_i8(input.data[o]) as i32;
+            let t = kernels::tanh_i8(input.data[o] as i8) as i64;
             let dtanh_num = (127 * 127) - (t * t); // [0, 16129]
-            let grad = grad_output.data[o] as i32;
+            let grad = grad_output.data[o] as i64;
+            // TODO: For more accurate results we can divide by 16129
+            //       This divides by 16384
             let dout = (grad * dtanh_num) >> 14;
-            let adjusted = dout >> (output_shift.saturating_sub(input_shift));
-            output.data[o] = adjusted.clamp(-32768, 32767) as i16;
+            let shift = output_shift.saturating_sub(input_shift);
+            let adjusted = dout;// >> shift;
+            output.data[o] = adjusted.clamp(-32768, 32767) as i32;
         }
         output
     }
@@ -223,7 +226,6 @@ mod tests {
         expected="ReLU::backward: No state registered. Perform forward pass first!"
     )]
     fn test_relu_backward_no_cache(){
-        let mut rng = XorShift64::new(420);
         let mut relu = ReLU::new();
         let grad = Tensor::from_vec(vec![1], vec![1, 1]);
 
@@ -232,7 +234,6 @@ mod tests {
 
     #[test]
     fn test_relu_backward(){
-        let mut rng = XorShift64::new(420);
         let mut relu = ReLU::new();
         let input = Tensor::from_vec(vec![-128, -1, 0, 1, 127], vec![5, 1]);
         let grad = Tensor::from_vec(vec![1, 0, -10, 20, 100], vec![5, 1]);
@@ -264,7 +265,7 @@ mod tests {
         (sta_, dyn_) = relu.memory_report();
 
         assert_eq!(sta_, 0);
-        assert_eq!(dyn_, 5);
+        assert_eq!(dyn_, 20);
 
         // we accumulate inputs
         relu.forward(&input, 0, &mut rng);
@@ -272,7 +273,7 @@ mod tests {
         (sta_, dyn_) = relu.memory_report();
 
         assert_eq!(sta_, 0);
-        assert_eq!(dyn_, 10);
+        assert_eq!(dyn_, 40);
 
         // and can free them by calling the backward pass
         let grad = Tensor::from_vec(vec![1, 0, -10, 20, 100], vec![5, 1]);
@@ -281,7 +282,7 @@ mod tests {
         (sta_, dyn_) = relu.memory_report();
 
         assert_eq!(sta_, 0);
-        assert_eq!(dyn_, 5);
+        assert_eq!(dyn_, 20);
 
         relu.backward(&grad, None);
 
@@ -327,7 +328,7 @@ mod tests {
         let mut rng = XorShift64::new(420);
         let mut tanh = Tanh::new();
 
-        let mut input = Tensor::from_vec(vec![], vec![]);
+        let input = Tensor::from_vec(vec![], vec![]);
 
         let output = tanh.forward(&input, 0, &mut rng);
 
@@ -340,7 +341,7 @@ mod tests {
         let mut rng = XorShift64::new(420);
         let mut tanh = Tanh::new();
 
-        let mut input = Tensor::from_vec(vec![-128, -1, 0, 1, 127], vec![5, 1]);
+        let input = Tensor::from_vec(vec![-128, -1, 0, 1, 127], vec![5, 1]);
 
         let output = tanh.forward(&input, 0, &mut rng);
 
@@ -359,7 +360,7 @@ mod tests {
         assert_eq!(tanh.output_shift, None);
         assert!(tanh.cache.is_empty());
 
-        let mut input = Tensor::from_vec(vec![], vec![]);
+        let input = Tensor::from_vec(vec![], vec![]);
 
         tanh.forward(&input, 0, &mut rng);
 
@@ -372,14 +373,13 @@ mod tests {
         expected="Tanh::backward: No state registered. Perform forward pass first."
     )]
     fn test_tanh_backward_without_forward_cache() {
-        let mut rng = XorShift64::new(420);
         let mut tanh = Tanh::new();
 
         assert_eq!(tanh.input_shift, None);
         assert_eq!(tanh.output_shift, None);
         assert!(tanh.cache.is_empty());
 
-        let mut input = Tensor::from_vec(vec![], vec![]);
+        let input = Tensor::from_vec(vec![], vec![]);
 
         tanh.backward(&input, Some(0));
 
@@ -390,15 +390,14 @@ mod tests {
         expected="Tanh::backward: No state registered. Perform forward pass first."
     )]
     fn test_tanh_backward_without_input_shift() {
-        let mut rng = XorShift64::new(420);
         let mut tanh = Tanh::new();
 
         assert_eq!(tanh.input_shift, None);
         assert_eq!(tanh.output_shift, None);
         assert!(tanh.cache.is_empty());
 
-        let mut input = Tensor::from_vec(vec![], vec![]);
-        let mut grad = Tensor::from_vec(vec![], vec![]);
+        let input = Tensor::from_vec(vec![], vec![]);
+        let grad = Tensor::from_vec(vec![], vec![]);
         tanh.cache.push(input);
 
         tanh.backward(&grad, Some(0));
@@ -409,15 +408,14 @@ mod tests {
         expected="Tanh::backward: No state registered. Perform forward pass first."
     )]
     fn test_tanh_backward_without_output_shift() {
-        let mut rng = XorShift64::new(420);
         let mut tanh = Tanh::new();
 
         assert_eq!(tanh.input_shift, None);
         assert_eq!(tanh.output_shift, None);
         assert!(tanh.cache.is_empty());
 
-        let mut input = Tensor::from_vec(vec![], vec![]);
-        let mut grad = Tensor::from_vec(vec![], vec![]);
+        let input = Tensor::from_vec(vec![], vec![]);
+        let grad = Tensor::from_vec(vec![], vec![]);
         tanh.cache.push(input);
         tanh.input_shift = Some(0);
 
@@ -426,15 +424,14 @@ mod tests {
 
     #[test]
     fn test_tanh_backward_with_empty_input() {
-        let mut rng = XorShift64::new(420);
         let mut tanh = Tanh::new();
 
         assert_eq!(tanh.input_shift, None);
         assert_eq!(tanh.output_shift, None);
         assert!(tanh.cache.is_empty());
 
-        let mut input = Tensor::from_vec(vec![], vec![]);
-        let mut grad = Tensor::from_vec(vec![], vec![]);
+        let input = Tensor::from_vec(vec![], vec![]);
+        let grad = Tensor::from_vec(vec![], vec![]);
         tanh.cache.push(input);
         tanh.input_shift = Some(0);
         tanh.output_shift = Some(0);
@@ -446,15 +443,14 @@ mod tests {
 
     #[test]
     fn test_tanh_backward() {
-        let mut rng = XorShift64::new(420);
         let mut tanh = Tanh::new();
 
         assert_eq!(tanh.input_shift, None);
         assert_eq!(tanh.output_shift, None);
         assert!(tanh.cache.is_empty());
 
-        let mut input = Tensor::from_vec(vec![-128, -1, 0, 1, 127], vec![5, 1]);
-        let mut grad = Tensor::from_vec(vec![0, 96, 0, -96, 0], vec![5, 1]);
+        let input = Tensor::from_vec(vec![-128, -1, 0, 1, 127], vec![5, 1]);
+        let grad = Tensor::from_vec(vec![0, 96, 0, -96, 0], vec![5, 1]);
         tanh.cache.push(input);
         tanh.input_shift = Some(0);
         tanh.output_shift = Some(0);

@@ -69,6 +69,7 @@ where
 ///
 /// Example:
 /// ```
+/// use integers::Tensor;
 /// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 /// let o = t >> 1u32;
 /// assert_eq!(o.len(), 1);
@@ -99,6 +100,7 @@ where
 ///
 /// Example:
 /// ```
+/// use integers::Tensor;
 /// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 /// let o = &t >> 1u32;
 /// assert_eq!(o.len(), 1);
@@ -130,6 +132,7 @@ where
 ///
 /// Example:
 /// ```
+/// use integers::Tensor;
 /// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 /// let o = t << 1u32;
 /// assert_eq!(o.len(), 1);
@@ -160,6 +163,7 @@ where
 ///
 /// Example:
 /// ```
+/// use integers::Tensor;
 /// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 /// let o = &t << 1u32;
 /// assert_eq!(o.len(), 1);
@@ -186,7 +190,7 @@ where
     }
 }
 
-pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
+pub fn argmax(tensor: &Tensor<i32>, axis: Option<usize>) -> Vec<usize> {
     let axis = axis.unwrap_or(1);
     
     // Only supports 2D tensors
@@ -209,7 +213,7 @@ pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
                 .iter()
                 .enumerate()
                 .max_by_key(|&(_, &v)| v)
-                .unwrap_or((0, &i8::MIN));
+                .unwrap_or((0, &i32::MIN));
             
             result.push(max_idx);
         }
@@ -220,7 +224,7 @@ pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
             let (max_idx, _) = (0..rows)
                 .map(|r| (r, tensor.data[r * cols + col_idx]))
                 .max_by_key(|&(_, v)| v)
-                .unwrap_or((0, i8::MIN));
+                .unwrap_or((0, i32::MIN));
             
             result.push(max_idx);
         }
@@ -335,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tensor_shr_borrow(){
+    fn test_tensor_shl_borrow(){
         let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 
         let o = t << 1u32;
@@ -346,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tensor_shr_reference(){
+    fn test_tensor_shl_reference(){
         let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 
         let o = &t << 1u32;
@@ -356,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tensor_shl_borrow(){
+    fn test_tensor_shr_borrow(){
         let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 
         let o = t >> 1u32;
@@ -367,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tensor_shl_reference(){
+    fn test_tensor_shr_reference(){
         let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
 
         let o = &t >> 1u32;
@@ -380,7 +384,7 @@ mod tests {
     fn test_argmax_batch() {
         // Batch of 3 samples, 4 classes each
         let data = vec![
-            10i8, 5, 3, 2,      // Sample 0: max at index 0
+            10i32, 5, 3, 2,      // Sample 0: max at index 0
             2, 15, 8, 1,        // Sample 1: max at index 1
             1, 2, 20, 5,        // Sample 2: max at index 2
         ];
@@ -394,7 +398,7 @@ mod tests {
     fn test_argmax_axis_0() {
         // 3 rows, 2 columns
         let data = vec![
-            10i8, 2,
+            10i32, 2,
             5, 15,
             3, 1,
         ];
@@ -409,7 +413,7 @@ mod tests {
     #[test]
     fn test_argmax_single_sample() {
         // Single sample [1, 5]
-        let data = vec![2i8, 8, 5, 3, 1];
+        let data = vec![2i32, 8, 5, 3, 1];
         let tensor = Tensor::from_vec(data, vec![1, 5]);
         
         let result = argmax(&tensor, Some(1));
