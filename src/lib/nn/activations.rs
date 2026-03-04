@@ -172,6 +172,15 @@ mod tests {
     }
 
     #[test]
+    fn test_relu_default() {
+        let relu = ReLU::default();
+
+        assert_eq!(relu.cache, Vec::new());
+        assert_eq!(relu.input_shift, None);
+        assert_eq!(relu.output_shift, None);
+    }
+
+    #[test]
     fn test_relu_input_shift_sets_shifts(){
         let mut rng = XorShift64::new(420);
         let mut relu = ReLU::new();
