@@ -9,15 +9,13 @@ use integers::nn::optim::{SGDConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
-    const EPOCHS: i32 = 800;
+    const EPOCHS: i32 = 200;
     const SCALE_SHIFT: u32 = 0;
     const GRAD_SHIFT: u32 = 0;
-    let optim = SGDConfig::new().with_learn_rate(0.17626).with_momentum(0.01);  // lr_shift=2, momentum_shift=2
+    let optim = SGDConfig::new().with_learn_rate(0.7);//.with_momentum(0.01);  // lr_shift=2, momentum_shift=2
 
     let mut l1 = Linear::new(4, 8, SCALE_SHIFT);
-    l1.init_xavier(&mut sync_rng);
     let mut l2 = Linear::new(8, 3, SCALE_SHIFT);
-    l2.init_xavier(&mut sync_rng);
     
     // Build model for Iris: 4 input features → 3 output classes
     let mut model = Sequential::new();
@@ -26,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(ReLU::new())
         .add(l2);
 
+    model.init(&mut rng);
 
     // Load datasets (unwrap Results with ?)
     let train_ds = DatasetBuilder::new("data/iris_train.tsv")
@@ -60,6 +59,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let (loss, grad_out) = mse.forward(&pred, &target);
             epoch_loss += loss as i64;
+
+            if t % 100 == 0 {
+                println!("T={}: {:?} => {:?}", t, x_t, pred);
+                println!("{:?}", target);
+                println!("Loss: {:?}; Grad: {:?}", loss, grad_out);
+            }
 
             model.backward(&grad_out, Some(GRAD_SHIFT));
             model.step(&optim);

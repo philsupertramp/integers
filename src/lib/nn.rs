@@ -11,6 +11,7 @@ pub mod activations;
 
 use crate::{Tensor, XorShift64};
 use crate::nn::optim::{OptimizerConfig, OptimizerState};
+use crate::{checked_add_counting};
 
 use std::any::Any;
 
@@ -388,8 +389,12 @@ impl Module for Linear {
                 };
                 #[cfg(not(target_arch = "aarch64"))]
                 let raw_val = kernels::dot_product_scalar(in_row, w_row);
-                let acc = raw_val as i64 + self.bias.storage.data[o] as i64;
-                out_raw.data[b * output_dim + o] = acc as i32;
+
+                out_raw.data[b * output_dim + o] = checked_add_counting!(
+                    raw_val as i64,
+                    self.bias.storage.data[o] as i64,
+                    forward_wraps
+                ) as i32;
             }
         }
 
@@ -459,8 +464,11 @@ impl Module for Linear {
                     //  grad_output is quantized by output_shift
                     //  input_i32 is quantized by input_shift
                     // Weight update is an accumulator, so apply gshift
-                    grad_weights.data[o * input_dim + i] =
-                        grad_weights.data[o * input_dim + i].saturating_add(dw as i32);
+                    grad_weights.data[o * input_dim + i] = checked_add_counting!(
+                        grad_weights.data[o * input_dim + i], 
+                        dw as i32,
+                        backward_wraps
+                    );
 
                     let w = self.weights.storage.data[o * input_dim + i];
 
@@ -472,8 +480,11 @@ impl Module for Linear {
                     let dx = kernels::mul_mixed_scalar(g, w);
 
                     // Input gradient flows back through the network, apply wshift!
-                    grad_input.data[b * input_dim + i] =
-                        grad_input.data[b * input_dim + i].saturating_add(dx as i32);
+                    grad_input.data[b * input_dim + i] = checked_add_counting!(
+                        grad_input.data[b * input_dim + i],
+                        dx as i32,
+                        backward_wraps
+                    );
                 }
             }
         }

@@ -46,10 +46,10 @@ pub fn mul_mixed_scalar(a: i32, b: i32) -> i32 {
 }
 
 pub fn dot_product_scalar(a: &[i32], b: &[i32]) -> i32 {
-    let sum = a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| (x as i64) * (y as i64))  // widen before multiply
-        .sum::<i64>();                               // accumulate in i64
+    let mut sum: i64 = 0;
+    for (x, y) in a.iter().zip(b.iter()){
+        sum = sum.saturating_add((*x as i64) * (*y as i64));
+    }
     sum.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
