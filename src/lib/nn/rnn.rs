@@ -4,6 +4,8 @@ use crate::nn::optim::{OptimizerConfig};
 use crate::{Tensor, XorShift64, checked_add_counting};
 use crate::nn::kernels;
 
+use std::any::Any;
+
 pub struct RNNCell {
     pub w_ih: Linear,
     pub w_hh: Linear,
@@ -157,7 +159,11 @@ impl Module for RNNCell {
     fn init(&mut self, rng: &mut XorShift64) {
         self.init_weights(rng);
     }
+
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
+
 impl HasWeights for RNNCell {
     fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
         vec![
@@ -169,50 +175,255 @@ impl HasWeights for RNNCell {
     }
 }
 
-pub struct RNN {
-    pub cell: RNNCell,
-    pub bptt_steps: usize,
-}
-
-impl RNN {
-    pub fn new(input_dim: usize, hidden_dim: usize, scale_shift: u32, bptt_steps: usize) -> Self {
-        Self {
-            cell: RNNCell::new(input_dim, hidden_dim, scale_shift),
-            bptt_steps,
-        }
-    }
-
-    pub fn reset_state(&mut self) {
-        self.cell.reset_state();
-    }
-
-    pub fn forward_seq(
-        &mut self,
-        input_seq: &[Tensor<i32>],
-        input_shift: u32,
-        rng: &mut XorShift64,
-    ) -> Vec<Tensor<i32>> {
-        input_seq
-            .iter()
-            .map(|x| self.cell.forward(x, input_shift, rng))
-            .collect()
-    }
-
-    pub fn backward_seq(
-        &mut self,
-        grad_seq: &[Tensor<i32>],
-        grad_shift: Option<u32>,
-    ) -> Vec<Tensor<i32>> {
-        let start = grad_seq.len().saturating_sub(self.bptt_steps);
-        grad_seq[start..]
-            .iter()
-            .rev()
-            .map(|g| self.cell.backward(g, grad_shift))
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_rnncell_new(){
+        let cell = RNNCell::new(2, 4, 0);
+
+        assert_eq!(cell.w_ih.weights.master.shape, vec![4, 2]);
+        assert_eq!(cell.w_hh.weights.master.shape, vec![4, 4]);
+        assert_eq!(cell.hidden_dim, 4);
+        assert_eq!(cell.h_prev, None);
+        assert_eq!(cell.d_h_next, None);
+        assert_eq!(cell.output_shift, None);
+    }
+
+    #[test]
+    fn test_rnncell_reset_state(){
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        let t1 = Tensor::from_vec(vec![1, 2], vec![1, 2]);
+
+        cell.h_prev = Some(t1.clone());
+        cell.d_h_next = Some(t1.clone());
+        cell.output_shift = Some(2);
+        cell.w_ih.cache.push(t1.clone());
+        cell.w_hh.cache.push(t1.clone());
+        cell.act.cache.push(t1.clone());
+
+        cell.reset_state();
+        
+        assert_eq!(cell.h_prev, None);
+        assert_eq!(cell.d_h_next, None);
+        assert_eq!(cell.output_shift, None);
+        assert!(cell.w_ih.cache.is_empty());
+        assert!(cell.w_hh.cache.is_empty());
+        assert!(cell.act.cache.is_empty());
+    }
+
+    #[test]
+    fn test_rnncell_init_weights(){
+        let mut rng = XorShift64::new(420);
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        cell.init_weights(&mut rng);
+
+        assert_eq!(cell.w_ih.weights.master.data, vec![124, -105, 44, -53, 59, -11, 5, 35]);
+        assert_eq!(cell.w_hh.weights.master.data, vec![20, -43, 36, 22, 2, -14, 15, 29, 13, 36, -49, -42, -7, 8, 12, 0]);
+    }
+
+    #[test]
+    fn test_init_weights_auto(){
+        let mut rng = XorShift64::new(420);
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        // sets weights and determines quant_shift
+        cell.init_weights_auto(&mut rng);
+
+        assert_eq!(cell.w_ih.weights.master.data, vec![124, -105, 44, -53, 59, -11, 5, 35]);
+        assert_eq!(cell.w_hh.weights.master.data, vec![20, -43, 36, 22, 2, -14, 15, 29, 13, 36, -49, -42, -7, 8, 12, 0]);
+        assert_eq!(cell.w_ih.weights.quant_shift, 0);
+        assert_eq!(cell.w_hh.weights.quant_shift, 0);
+    }
+
+    #[test]
+    fn test_rnn_cell_get_output_shift(){
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        assert_eq!(cell.get_output_shift(), 0);
+
+        cell.output_shift = Some(4);
+
+        assert_eq!(cell.get_output_shift(), 4);
+    }
+
+    #[test]
+    fn test_rnncell_forward(){
+        let mut rng = XorShift64::new(420);
+        let mut cell = RNNCell::new(2, 2, 0);
+
+        cell.w_ih.weights.storage.data = vec![1, 0, 0, 1];
+        cell.w_hh.weights.storage.data = vec![1, 0, 0, 1];
+
+        let input = Tensor::from_vec(vec![0, 100, 200, 300], vec![2, 2]);
+
+        // first call, cell.h_prev is zero-vector
+        let val1 = cell.forward(&input, 0, &mut rng);
+
+        assert_eq!(val1.data, vec![0, 83, -53, 42]);
+        assert_eq!(
+            cell.h_prev,
+            Some(Tensor::from_vec(vec![0, 83, -53, 42], vec![2, 2]))
+        );
+
+        // sequential call, now we have cell.h_prev available
+        let val2 = cell.forward(&input, 0, &mut rng);
+
+        assert_eq!(val2.data, vec![0, -66, -88, 75]);
+    }
+
+    #[test]
+    fn test_rnncell_backward(){
+        let mut rng = XorShift64::new(420);
+        let mut cell = RNNCell::new(2, 2, 0);
+
+        cell.w_ih.weights.storage.data = vec![1, 0, 0, 1];
+        cell.w_hh.weights.storage.data = vec![1, 0, 0, 1];
+
+        let input = Tensor::from_vec(vec![0, 100, 200, 300], vec![2, 2]);
+
+        let _ = cell.forward(&input, 0, &mut rng);
+        let _ = cell.forward(&input, 0, &mut rng);
+
+        // with round values we can calculate the outgoing gradients,
+        // otherwise we get random behavior
+        let grad = Tensor::from_vec(vec![0, -1, -1, 100], vec![2, 2]);
+
+        assert_eq!(cell.d_h_next, None);
+
+        let out = cell.backward(&grad, None);
+
+        assert_eq!(out.data, vec![0, -1, -1, 64]);
+        assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -1, -1, 64], vec![2, 2])));
+
+        let out2 = cell.backward(&grad, None);
+        
+        assert_eq!(out2.data, vec![0, -2, -2, 143]);
+        assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -2, -2, 143], vec![2, 2])));
+    }
+
+    #[test]
+    fn test_rnncell_step(){
+        use crate::nn::optim::{SGDConfig};
+
+        // step updates master weights.
+        let mut rng = XorShift64::new(420);
+        let mut cell = RNNCell::new(2, 2, 0);
+
+        cell.w_ih.weights.master.data = vec![1, 0, 0, 1];
+        cell.w_hh.weights.master.data = vec![1, 0, 0, 1];
+        cell.sync_weights(&mut rng);
+
+        let input = Tensor::from_vec(vec![0, 100, 200, 300], vec![2, 2]);
+
+        let _ = cell.forward(&input, 0, &mut rng);
+        let _ = cell.forward(&input, 0, &mut rng);
+
+        // with round values we can calculate the outgoing gradients,
+        // otherwise we get random behavior
+        let grad = Tensor::from_vec(vec![0, -1, -1, 100], vec![2, 2]);
+
+        assert_eq!(cell.d_h_next, None);
+
+        let _ = cell.backward(&grad, None);
+        let _ = cell.backward(&grad, None);
+
+        let mut optim = SGDConfig::new()
+            .with_learn_rate(1.0);
+
+        assert_eq!(cell.w_ih.weights.master.data, cell.w_ih.weights.storage.data);
+        assert_eq!(cell.w_hh.weights.master.data, cell.w_hh.weights.storage.data);
+
+        cell.step(&mut optim);
+
+        assert_ne!(cell.w_ih.weights.master.data, cell.w_ih.weights.storage.data);
+        assert_ne!(cell.w_hh.weights.master.data, cell.w_hh.weights.storage.data);
+    }
+
+    #[test]
+    fn test_rnncell_sync_weights(){
+        let mut rng = XorShift64::new(420);
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        // sets weights and determines quant_shift
+        cell.init_weights_auto(&mut rng);
+
+        assert_eq!(cell.w_ih.weights.master.data, vec![124, -105, 44, -53, 59, -11, 5, 35]);
+        assert_eq!(cell.w_hh.weights.master.data, vec![20, -43, 36, 22, 2, -14, 15, 29, 13, 36, -49, -42, -7, 8, 12, 0]);
+
+        // no shifting
+        cell.sync_weights(&mut rng);
+
+        assert_eq!(cell.w_ih.weights.storage.data, vec![124, -105, 44, -53, 59, -11, 5, 35]);
+        assert_eq!(cell.w_hh.weights.storage.data, vec![20, -43, 36, 22, 2, -14, 15, 29, 13, 36, -49, -42, -7, 8, 12, 0]);
+    }
+
+    #[test]
+    fn test_rnncell_memory_report(){
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        let (s, d) = cell.memory_report();
+
+        assert_eq!(d, 0);
+        assert_eq!(s, 256);
+    }
+
+    #[test]
+    fn test_rnncell_describe(){
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        assert_eq!(cell.describe(), ModuleInfo{
+            name: "RNNCell",
+            params: 32,
+            static_bytes: 0,
+            children: vec![
+                ModuleInfo{
+                    name: "Linear",
+                    params: 12,
+                    static_bytes: 96,
+                    children: vec![],
+                },
+                ModuleInfo{
+                    name: "Linear",
+                    params: 20,
+                    static_bytes: 160,
+                    children: vec![],
+                },
+                ModuleInfo{
+                    name: "Tanh",
+                    params: 0,
+                    static_bytes: 0,
+                    children: vec![],
+                }
+            ]
+        });
+    }
+
+    #[test]
+    fn test_rnncell_init(){
+        let mut rng = XorShift64::new(420);
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        // sets weights
+        cell.init(&mut rng);
+
+        assert_eq!(cell.w_ih.weights.master.data, vec![124, -105, 44, -53, 59, -11, 5, 35]);
+        assert_eq!(cell.w_hh.weights.master.data, vec![20, -43, 36, 22, 2, -14, 15, 29, 13, 36, -49, -42, -7, 8, 12, 0]);
+    }
+
+    #[test]
+    fn test_rnncell_get_all_weights(){
+        let mut cell = RNNCell::new(2, 4, 0);
+
+        assert_eq!(cell.get_all_weights(), vec![
+            &cell.w_ih.weights.master,
+            &cell.w_ih.bias.master,
+            &cell.w_hh.weights.master,
+            &cell.w_hh.bias.master,
+        ]);
+
+    }
 }

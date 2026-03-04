@@ -92,7 +92,7 @@ impl OptimizerConfig for SGDConfig {
                     if decay == 0 && *m != 0 {
                         decay = m.signum();
                     }
-                    *m = m.wrapping_sub(decay).wrapping_add(*g);
+                    *m = m.saturating_sub(decay).saturating_add(*g);
                     *w = checked_sub_counting!(
                         w,
                         *m / lr_div,
@@ -188,12 +188,12 @@ impl OptimizerConfig for AdamConfig {
                 let g = grads[i];
                 let g_64 = grads[i] as i32;
                 m[i] = checked_add_counting!(
-                    m[i].wrapping_sub(m[i] / b1_div),
+                    m[i].saturating_sub(m[i] / b1_div),
                     g / b1_div,
                     backward_wraps
                 );
                 v[i] = checked_add_counting!(
-                    v[i].wrapping_sub(v[i] / (b2_div as i32)),
+                    v[i].saturating_sub(v[i] / (b2_div as i32)),
                     g_64 * g_64 / b2_div as i32,
                     backward_wraps
                 );

@@ -22,7 +22,7 @@ impl Loss for MSE {
             let error = preds.data[i] as i32 - targets.data[i] as i32;
             // Cast to i32 BEFORE multiplying
             let error_i64 = error as i64;
-            loss += (error_i64 * error_i64) as i32;
+            loss = loss.saturating_add((error_i64 * error_i64) as i32);
             grad.data[i] = error as i32;
         }
         (loss, grad)

@@ -84,5 +84,94 @@ pub fn get_overflow_stats() -> OverflowStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_vals(forward: u64, backward: u64, clamps: u64) {
+        crate::debug::OVERFLOW_STATS.with(|s: &std::cell::RefCell<crate::debug::OverflowStats>| {
+            let s = s.borrow();
+
+            assert_eq!(s.forward_wraps, forward);
+            assert_eq!(s.backward_wraps, backward);
+            assert_eq!(s.downcast_clamps, clamps);
+        });
+    }
+
+    #[test]
+    fn test_reset_overflow_stats(){
+        crate::debug::OVERFLOW_STATS.with(|s: &std::cell::RefCell<crate::debug::OverflowStats>| {
+            let mut s = s.borrow_mut();
+
+            s.forward_wraps = 10;
+            s.backward_wraps = 20;
+            s.downcast_clamps = 100;
+        });
+
+        assert_vals(10, 20, 100);
+        reset_overflow_stats();
+        assert_vals(0, 0, 0);
+    }
+
+    #[test]
+    fn test_check_add_counting(){
+        let mut val: i32 = 10;
+        let val2: i32 = 20;
+
+        let new_val = checked_add_counting!(val, val2, forward_wraps);
+
+        assert_vals(0, 0, 0);
+        assert_eq!(new_val, val + val2);
+
+        val = i32::MAX;
+        let new_val = checked_add_counting!(val, val2, forward_wraps);
+
+        assert_vals(1, 0, 0);
+        assert_eq!(new_val, (val as i64 + val2 as i64) as i32);
+    }
+
+    #[test]
+    fn test_check_sub_counting(){
+        let mut val: i32 = 10;
+        let val2: i32 = 20;
+
+        let new_val = checked_sub_counting!(val, val2, backward_wraps);
+
+        assert_vals(0, 0, 0);
+        assert_eq!(new_val, val - val2);
+
+        val = i32::MIN;
+        let new_val = checked_sub_counting!(val, val2, backward_wraps);
+
+        assert_vals(0, 1, 0);
+        assert_eq!(new_val, (val as i64 - val2 as i64) as i32);
+    }
+
+    #[test]
+    fn test_increase_clamp_downcast(){
+        assert_vals(0, 0, 0);
+
+        increase_clamp_downcast();
+
+        assert_vals(0, 0, 1);
+    }
+
+    #[test]
+    fn test_get_overflow_stats(){
+        let stats = get_overflow_stats();
+
+        assert_eq!(stats.forward_wraps, 0);
+        assert_eq!(stats.backward_wraps, 0);
+        assert_eq!(stats.downcast_clamps, 0);
+        
+
+        increase_clamp_downcast();
+        increase_clamp_downcast();
+        increase_clamp_downcast();
+        increase_clamp_downcast();
+        
+        let new_stats = get_overflow_stats();
+
+        assert_eq!(new_stats.forward_wraps, 0);
+        assert_eq!(new_stats.backward_wraps, 0);
+        assert_eq!(new_stats.downcast_clamps, 4);
+    }
 }
 

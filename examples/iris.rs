@@ -9,10 +9,10 @@ use integers::nn::optim::{SGDConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
-    const EPOCHS: i32 = 8000;
-    const SCALE_SHIFT: u32 = 5;
-    const GRAD_SHIFT: u32 = 3;
-    let optim = SGDConfig::new().with_learn_rate(0.0625).with_momentum(0.75);  // lr_shift=3, momentum_shift=2
+    const EPOCHS: i32 = 800;
+    const SCALE_SHIFT: u32 = 0;
+    const GRAD_SHIFT: u32 = 0;
+    let optim = SGDConfig::new().with_learn_rate(0.17626).with_momentum(0.01);  // lr_shift=2, momentum_shift=2
 
     let mut l1 = Linear::new(4, 8, SCALE_SHIFT);
     l1.init_xavier(&mut sync_rng);
@@ -32,20 +32,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
-        .with_quantization(QuantizationMethod::StandardScore)
+        .with_quantization(QuantizationMethod::MinMax)
         .load()?;  // ← Unwrap Result<Dataset, DataError>
     
     let test_ds = DatasetBuilder::new("data/iris_test.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
-        .with_quantization(QuantizationMethod::StandardScore)
+        .with_quantization(QuantizationMethod::MinMax)
         .load()?;   // ← Unwrap Result<Dataset, DataError>
 
     println!("Train set: {} samples, {} features", train_ds.len(), train_ds.n_features());
     println!("Test set:  {} samples, {} features", test_ds.len(), test_ds.n_features());
     println!("Classes:   {}", train_ds.n_classes);
     
+    let mse = MSE;
 
     for epoch in 0..EPOCHS {
         model.sync_weights(&mut sync_rng);
@@ -57,7 +58,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
 
-            let mse = MSE;
             let (loss, grad_out) = mse.forward(&pred, &target);
             epoch_loss += loss as i64;
 

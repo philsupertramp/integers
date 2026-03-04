@@ -2,6 +2,8 @@ use crate::{Tensor, XorShift64};
 use crate::nn::{ModuleInfo, Module, compute_shift_for_max};
 use crate::nn::kernels;
 
+use std::any::Any;
+
 pub struct ReLU {
     pub cache: Vec<Tensor<i32>>,
     /// Automatically tracks what shift was applied to inputs
@@ -69,6 +71,9 @@ impl Module for ReLU {
             children: vec![],
         }
     }
+
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
 
 pub struct Tanh {
@@ -155,6 +160,9 @@ impl Module for Tanh {
         self.output_shift
             .expect("No forward call.")
     }
+
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
 
 
