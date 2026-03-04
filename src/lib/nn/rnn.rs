@@ -94,7 +94,7 @@ impl Module for RNNCell {
             comb.data[i] = sum;//.clamp(-128, 127) as i32;
         }
 
-        let mut h_next = self.act.forward(&comb, self.w_hh.weights.output_shift.expect("Expected output shift"), rng);
+        let h_next = self.act.forward(&comb, self.w_hh.weights.output_shift.expect("Expected output shift"), rng);
         let max_magnitude = h_next.data.iter().map(|x| x.abs() as u32).max().unwrap_or(1);
         let out_shift = compute_shift_for_max(max_magnitude);
         self.output_shift = Some(out_shift);
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_memory_report(){
-        let mut cell = RNNCell::new(2, 4, 0);
+        let cell = RNNCell::new(2, 4, 0);
 
         let (s, d) = cell.memory_report();
 
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_describe(){
-        let mut cell = RNNCell::new(2, 4, 0);
+        let cell = RNNCell::new(2, 4, 0);
 
         assert_eq!(cell.describe(), ModuleInfo{
             name: "RNNCell",
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_get_all_weights(){
-        let mut cell = RNNCell::new(2, 4, 0);
+        let cell = RNNCell::new(2, 4, 0);
 
         assert_eq!(cell.get_all_weights(), vec![
             &cell.w_ih.weights.master,

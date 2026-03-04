@@ -136,7 +136,7 @@ impl Module for Tanh {
             // TODO: For more accurate results we can divide by 16129
             //       This divides by 16384
             let dout = (grad * dtanh_num) >> 14;
-            let shift = output_shift.saturating_sub(input_shift);
+            let _shift = output_shift.saturating_sub(input_shift);
             let adjusted = dout;// >> shift;
             output.data[o] = adjusted.clamp(-32768, 32767) as i32;
         }

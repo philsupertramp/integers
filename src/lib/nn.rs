@@ -358,7 +358,7 @@ impl Module for Linear {
         self.weights.output_shift.unwrap_or(0)
     }
 
-    fn forward(&mut self, raw_input: &Tensor<i32>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i32> {
+    fn forward(&mut self, raw_input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32> {
         assert_eq!(
             raw_input.shape[1], self.weights.storage.shape[1],
             "Linear::forward: Input in wrong dimension for weights! {} vs {}",
@@ -421,12 +421,12 @@ impl Module for Linear {
         // TODO:
         //      - rescale grad_out with gradient_shift
         // used to shift back into the original input space
-        let input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
+        let _input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
 
-        let output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
+        let _output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
 
         // Mathematically required for the chain rule:
-        let gshift = gradient_shift.unwrap_or(0);
+        let _gshift = gradient_shift.unwrap_or(0);
 
         let batch = input.shape[0];
         let input_dim = input.shape[1];
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn test_params_step_without_grad_is_okay(){
         let mut params = Params::new(vec![1, 1], 0);
-        let mut optim = SGDConfig::new();
+        let optim = SGDConfig::new();
 
         params.step(&optim);
 
@@ -850,7 +850,7 @@ mod tests {
     #[test]
     fn test_params_step_initializes_state(){
         let mut params = Params::new(vec![1, 1], 0);
-        let mut optim = SGDConfig::new();
+        let optim = SGDConfig::new();
 
         let grad = Tensor::from_vec(vec![10; 1], vec![1, 1]);
 
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn test_has_weights_infer_scale_no_weights() {
-        let mut module = TestHasWeightsEmptyStruct{};
+        let module = TestHasWeightsEmptyStruct{};
 
         assert_eq!(module.infer_scale_shift(), 4);
     }
@@ -1365,7 +1365,7 @@ mod tests {
     #[test]
     fn test_sequential_init_all(){
         let mut model = Sequential::new();
-        let mut l1 = Linear::new(1, 1, 0);
+        let l1 = Linear::new(1, 1, 0);
         let mut rng = XorShift64::new(420);
 
         model.add(l1);
@@ -1412,8 +1412,8 @@ mod tests {
 
         let input = Tensor::from_vec(vec![10, 5], vec![1, 2]);
 
-        let f1_out = l1.forward(&input, 0, &mut rng);
-        let model_out = model.forward(&input, 0, &mut rng2);
+        let _ = l1.forward(&input, 0, &mut rng);
+        let _ = model.forward(&input, 0, &mut rng2);
 
         let grad = Tensor::from_vec(vec![-1, -2], vec![1, 2]);
 
@@ -1471,7 +1471,7 @@ mod tests {
 
         // Backpropagate "a" gradient 
         let grad_out = Tensor::<i32>::from_vec(vec![126, 2], vec![2, 1]);
-        let mut mut_ref = model.modules[0]
+        let mut_ref = model.modules[0]
             .as_any_mut()
             .downcast_mut::<Linear>()
             .expect("Expected linear layer");

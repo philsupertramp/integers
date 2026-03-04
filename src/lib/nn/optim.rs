@@ -250,7 +250,7 @@ mod tests {
         expected="Momentum must be in [0, 1], got 1.1"
     )]
     fn test_sgd_with_momentum_wrong_value(){
-        let mut optim = SGDConfig::new();
+        let optim = SGDConfig::new();
 
         optim.momentum_to_shift(1.1);
     }
@@ -298,7 +298,7 @@ mod tests {
         expected="assertion `left == right` failed: Weights and Gradients must match length! Got 2 vs. 3\n  left: 2\n right: 3"
     )]
     fn test_sgd_update_wrong_sizes(){
-        let mut optim = SGDConfig::new();
+        let optim = SGDConfig::new();
 
         let mut state = optim.init_state(5);
 
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_sgd_update_sets_velocities(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(1.0)
             .with_momentum(0.8);
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_sgd_no_momentum_update(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(1.0);
 
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_sgd_no_momentum_update_check_lr_influence(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(0.5);
 
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_sgd_update_decay_too_small(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(1.0)
             // ~ shift by 1
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_sgd_with_momentum_update(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(1.0)
             // ~ shift by 1
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_sgd_with_momentum_update_check_lr_influence(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(0.5)
             // momentum shift ~ 2
@@ -488,7 +488,7 @@ mod tests {
     
     #[test]
     fn test_sgd_update_too_small_state_size(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(0.5)
             // momentum shift ~ 2
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_sgd_update_too_big_state_size_no_issue_except_velocity(){
-        let mut optim = SGDConfig::new()
+        let optim = SGDConfig::new()
             // grad update will be applied fully
             .with_learn_rate(0.5)
             // momentum shift ~ 2
@@ -628,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_adam_init_state_creates_correct_length_vectors(){
-        let mut optim = AdamConfig::new();
+        let optim = AdamConfig::new();
 
         for size in [0, 1, 12] {
             let state = optim.init_state(size);
@@ -648,14 +648,14 @@ mod tests {
 
         let adam = AdamConfig::new();
         let mut weights = vec![1; 2];
-        let mut grads = vec![1; 2];
+        let grads = vec![1; 2];
 
         adam.update(&mut weights, &grads, &mut sgd.init_state(2));
     }
 
     #[test]
     fn test_adam_update(){
-        let mut optim = AdamConfig::new()
+        let optim = AdamConfig::new()
             .with_learn_rate(1.0)
             .with_betas(0.0, 0.0)
             .with_eps(0.0);
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_adam_update_with_learn_rate(){
-        let mut optim = AdamConfig::new()
+        let optim = AdamConfig::new()
             .with_learn_rate(2.0)
             .with_betas(0.0, 0.0)
             .with_eps(0.0);
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn test_adam_update_with_eps(){
-        let mut optim = AdamConfig::new()
+        let optim = AdamConfig::new()
             .with_learn_rate(1.0)
             .with_betas(0.0, 0.0)
             .with_eps(1.0);

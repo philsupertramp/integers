@@ -1,25 +1,4 @@
-/// Data loading utilities for real-world datasets.
-///
-/// Supports:
-///   - MNIST (IDX binary format, from http://yann.lecun.com/exdb/mnist/)
-///   - Iris / "Petals" dataset (CSV, from UCI or sklearn-compatible exports)
-///
-/// All loaders return `Tensor<i32>` inputs and either `Tensor<i32>` for
-/// regression targets or `Vec<u8>` label indices for classification.
-///
-/// # Quantization convention
-///
-/// Pixel values [0, 255] → i32 by `(v as i32 - 128) as i32`
-///   so 0 → -128, 128 → 0, 255 → 127.
-///
-/// Floating-point features are min-max scaled to [-127, 127].
-///
-/// One-hot targets use +96 for the true class and 0 elsewhere,
-/// giving a comfortable margin without saturating tanh.
-
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
+use std::io::{self};
 
 use crate::Tensor;
 
