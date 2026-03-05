@@ -9,10 +9,10 @@ use integers::nn::optim::{SGDConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
-    const EPOCHS: i32 = 200;
+    const EPOCHS: i32 = 50;
     const SCALE_SHIFT: u32 = 0;
     const GRAD_SHIFT: u32 = 0;
-    let optim = SGDConfig::new().with_learn_rate(0.0125).with_momentum(0.8);  // lr_shift=2, momentum_shift=2
+    let optim = SGDConfig::new().with_learn_rate(0.60);//.with_momentum(0.1);  // lr_shift=2, momentum_shift=2
 
     let mut l1 = Linear::new(4, 8, SCALE_SHIFT);
     let mut l2 = Linear::new(8, 3, SCALE_SHIFT);
@@ -52,7 +52,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut epoch_loss: i64 = 0;
 
         for t in 0..(train_ds.len()) {
-            model.zero_grads();
             let x_t = train_ds.get_input(t);
             let target = train_ds.get_target(t);
 
@@ -61,14 +60,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (loss, grad_out) = mse.forward(&pred, &target);
             epoch_loss += loss as i64;
 
-            if t % 100 == 0 {
-                println!("T={}: {:?} => {:?}", t, x_t, pred);
-                println!("{:?}", target);
-                println!("Loss: {:?}; Grad: {:?}", loss, grad_out);
-            }
+            println!("T: {} = {:?}", t, x_t);
+            println!("{:?} vs. {:?}", target, pred);
+            println!("Loss: {:?}; Grad: {:?}", loss, grad_out);
 
             model.backward(&grad_out, Some(GRAD_SHIFT));
             model.step(&optim);
+            model.zero_grads();
+            model.sync_weights(&mut sync_rng);
         }
         if epoch % 100 == 0 {
             #[cfg(debug_assertions)]

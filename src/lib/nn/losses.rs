@@ -18,6 +18,9 @@ impl Loss for MSE {
         let mut loss: i64 = 0;
         let mut grad = Tensor::<i32>::new(preds.shape.clone());
 
+        if preds.data.len() == 0 {
+            return (0, grad);
+        }
         for i in 0..preds.data.len() {
             let error = preds.data[i] - targets.data[i];
             // Cast to i32 BEFORE multiplying
@@ -25,7 +28,7 @@ impl Loss for MSE {
             loss = loss.saturating_add(error_i64.saturating_mul(error_i64));
             grad.data[i] = error as i32;
         }
-        (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32, grad)
+        (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32 / preds.data.len() as i32, grad)
     }
 }
 
@@ -36,19 +39,19 @@ impl Loss for MAE {
             targets.len(),
             "MAE::forward: vector sizes don't match."
         );
-        let mut loss: i32 = 0;
+        let mut loss: i64 = 0;
         let mut grad = Tensor::<i32>::new(preds.shape.clone());
 
         if preds.data.len() == 0 {
-            return (loss, grad);
+            return (0i32, grad);
         }
         for i in 0..preds.data.len() {
             let error = preds.data[i] as i32 - targets.data[i] as i32;
-            loss += error.abs() as i32;
+            loss += error.abs() as i64;
             // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
             grad.data[i] = error.signum();
         }
-        (loss / (preds.data.len() as i32), grad)
+        (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32 / (preds.data.len() as i32), grad)
     }
 }
 
@@ -65,7 +68,7 @@ mod tests {
 
         let (loss, grad) = loss.forward(&pred, &targets);
 
-        assert_eq!(loss, 1);
+        assert_eq!(loss, 0);
         assert_eq!(grad, Tensor::from_vec(vec![1, 0], vec![2, 1]));
     }
 
