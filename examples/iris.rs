@@ -9,13 +9,19 @@ use integers::nn::optim::{SGDConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
-    const EPOCHS: i32 = 50;
-    const SCALE_SHIFT: u32 = 0;
-    const GRAD_SHIFT: u32 = 0;
-    let optim = SGDConfig::new().with_learn_rate(0.60);//.with_momentum(0.1);  // lr_shift=2, momentum_shift=2
+    const EPOCHS: i32 = 2000;
+    const SCALE_SHIFT: u32 = 1;
+    let mut optim = SGDConfig::new();
+    optim.lr_shift = 12;
 
-    let mut l1 = Linear::new(4, 8, SCALE_SHIFT);
-    let mut l2 = Linear::new(8, 3, SCALE_SHIFT);
+    let mut l1 = Linear::new(4, 8);
+    let mut l2 = Linear::new(8, 3);
+
+    l1.init(&mut sync_rng);
+    l2.init(&mut sync_rng);
+
+    l1.weights.quant_shift = SCALE_SHIFT;
+    l2.weights.quant_shift = SCALE_SHIFT;
     
     // Build model for Iris: 4 input features → 3 output classes
     let mut model = Sequential::new();
@@ -23,8 +29,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(l1)
         .add(ReLU::new())
         .add(l2);
-
-    model.init(&mut rng);
 
     // Load datasets (unwrap Results with ?)
     let train_ds = DatasetBuilder::new("data/iris_train.tsv")
@@ -52,22 +56,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut epoch_loss: i64 = 0;
 
         for t in 0..(train_ds.len()) {
+            model.sync_weights(&mut sync_rng);
             let x_t = train_ds.get_input(t);
-            let target = train_ds.get_target(t);
+            let target = train_ds.get_target(t) << SCALE_SHIFT;
 
             let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
 
             let (loss, grad_out) = mse.forward(&pred, &target);
             epoch_loss += loss as i64;
 
-            println!("T: {} = {:?}", t, x_t);
-            println!("{:?} vs. {:?}", target, pred);
-            println!("Loss: {:?}; Grad: {:?}", loss, grad_out);
+            //println!("T: {} = {:?}", t, x_t);
+            //println!("{:?} vs. {:?}", target, pred);
+            //println!("Loss: {:?}; Grad: {:?}", loss, grad_out);
 
-            model.backward(&grad_out, Some(GRAD_SHIFT));
-            model.step(&optim);
             model.zero_grads();
-            model.sync_weights(&mut sync_rng);
+            model.backward(&grad_out);
+            model.step(&optim);
         }
         if epoch % 100 == 0 {
             #[cfg(debug_assertions)]
@@ -75,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get_overflow_stats();
                 reset_overflow_stats();
             }
-            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss);
+            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / train_ds.len() as i64);
         }
     }
     #[cfg(debug_assertions)]
@@ -93,11 +97,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let x_t = test_ds.get_input(t);
         let target = test_ds.get_target(t);
         let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
-        let pred_cls = argmax(&pred, Some(1));
-        let error = pred_cls[0] as i32 - target.data[0];
-        eval_loss += (error as i64) * (error as i64);
+        let (loss, grad_out) = mse.forward(&pred, &target);
+        eval_loss += loss as i64;
     }
-    println!("Eval  total  MSE : {}", eval_loss);
+    println!("Eval  total  MSE : {}", eval_loss / test_ds.len() as i64);
 
     // Get a batch of test samples
     let test_indices: Vec<usize> = (0..test_ds.len()).collect();
@@ -114,12 +117,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|&i| test_ds.labels[i])
         .collect();
-    
+
     // Compute accuracy
     let accuracy = accuracy(&predicted_classes, &true_labels);
-    
+
+    println!("PREDICTED CLASSES: {:?}", predictions_tensor);
     println!("\nTest batch accuracy: {:.2}%", accuracy * 100.0);
-    
+
     // Print predictions vs ground truth
     for (i, &idx) in test_indices.iter().enumerate() {
         println!("Sample {}: predicted class {}, true class {}",

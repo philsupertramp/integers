@@ -4,7 +4,7 @@ use crate::{checked_sub_counting, checked_add_counting};
 use std::fmt;
 
 pub trait OptimizerConfig {
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState);
+    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState, quant_shift: u32);
     fn init_state(&self, len: usize) -> OptimizerState;
 }
 
@@ -70,7 +70,7 @@ impl OptimizerConfig for SGDConfig {
         }
     }
 
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState) {
+    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState, quant_shift: u32) {
         assert_eq!(
             weights.len(),
             grads.len(),
@@ -95,7 +95,7 @@ impl OptimizerConfig for SGDConfig {
                     *m = m.saturating_sub(decay).saturating_add(*g);
                     *w = checked_sub_counting!(
                         w,
-                        *m / lr_div,
+                        (*m / lr_div) >> quant_shift,
                         backward_wraps
                     );
                 }
@@ -104,7 +104,7 @@ impl OptimizerConfig for SGDConfig {
                 for (w, g) in weights.iter_mut().zip(grads) {
                     *w = checked_sub_counting!(
                         w,
-                        *g / lr_div,
+                        (*g / lr_div) >> quant_shift,
                         backward_wraps
                     );
                 }
@@ -178,7 +178,7 @@ impl OptimizerConfig for AdamConfig {
         }
     }
 
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState) {
+    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState, quant_shift: u32) {
         if let OptimizerState::Adam { m, v } = state {
             let b1_div = 1 << self.b1_shift;
             let b2_div = 1 << self.b2_shift;
@@ -189,12 +189,12 @@ impl OptimizerConfig for AdamConfig {
                 let g_64 = grads[i] as i64;
                 m[i] = checked_add_counting!(
                     m[i].saturating_sub(m[i] / b1_div),
-                    g / b1_div,
+                    (g / b1_div) >> quant_shift,
                     backward_wraps
                 );
                 v[i] = checked_add_counting!(
                     v[i].saturating_sub(v[i] / (b2_div as i32)),
-                    (g_64 * g_64 / b2_div) as i32,
+                    ((g_64 * g_64 / b2_div) >> quant_shift ) as i32,
                     backward_wraps
                 );
                 let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;

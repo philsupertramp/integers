@@ -22,10 +22,9 @@ impl Loss for MSE {
             return (0, grad);
         }
         for i in 0..preds.data.len() {
-            let error = preds.data[i] - targets.data[i];
+            let error = preds.data[i] as i64 - targets.data[i] as i64;
             // Cast to i32 BEFORE multiplying
-            let error_i64 = error as i64;
-            loss = loss.saturating_add(error_i64.saturating_mul(error_i64));
+            loss = loss.saturating_add((error).saturating_mul(error));
             grad.data[i] = error as i32;
         }
         (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32 / preds.data.len() as i32, grad)
@@ -48,7 +47,6 @@ impl Loss for MAE {
         for i in 0..preds.data.len() {
             let error = preds.data[i] as i32 - targets.data[i] as i32;
             loss += error.abs() as i64;
-            // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
             grad.data[i] = error.signum();
         }
         (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32 / (preds.data.len() as i32), grad)

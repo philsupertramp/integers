@@ -69,9 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  epochs = {}\n", epochs);
     let mut rng = XorShift64::new(42);
 
-    let mut l1 = Linear::new(784, 128, 1);
+    let mut l1 = Linear::new(784, 128)
+        .with_shift(1);
     l1.init(&mut rng);
-    let mut l2 = Linear::new(128, 10, 1);
+    let mut l2 = Linear::new(128, 10)
+        .with_shift(1);
     l2.init(&mut rng);
     let mut model = Sequential::new();
     model

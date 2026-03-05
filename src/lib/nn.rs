@@ -69,7 +69,7 @@ pub trait Module: Any {
     /// }
     ///
     /// impl Module for XPlusN {
-    ///     fn backward(&mut self, grad: &Tensor<i32>, _grad_shift: Option<u32>) -> Tensor<i32> {
+    ///     fn backward(&mut self, grad: &Tensor<i32>) -> Tensor<i32> {
     ///         grad.clone()
     ///     }
     ///     fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32>{
@@ -100,7 +100,7 @@ pub trait Module: Any {
     /// assert_eq!(output.data[2], 4);
     /// ```
     fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i32>;
-    fn backward(&mut self, grad: &Tensor<i32>, grad_shift: Option<u32>) -> Tensor<i32>;
+    fn backward(&mut self, grad: &Tensor<i32>) -> Tensor<i32>;
 
     /// quantize i32 master weights -> i32 storage. No-op for non-parameterized modules.
     fn sync_weights(&mut self, _rng: &mut XorShift64) {}
@@ -247,7 +247,7 @@ impl Params {
             let state = self
                 .state
                 .get_or_insert_with(|| optim.init_state(self.master.len()));
-            optim.update(&mut self.master.data, &grads.data, state);
+            optim.update(&mut self.master.data, &grads.data, state, self.quant_shift);
         }
     }
 
@@ -334,10 +334,10 @@ pub struct Linear {
 }
 
 impl Linear {
-    pub fn new(input_dim: usize, output_dim: usize, scale_shift: u32) -> Self {
+    pub fn new(input_dim: usize, output_dim: usize) -> Self {
         Self {
-            weights: Params::new(vec![output_dim, input_dim], scale_shift),
-            bias: Params::new(vec![output_dim], scale_shift),
+            weights: Params::new(vec![output_dim, input_dim], 0),
+            bias: Params::new(vec![output_dim], 0),
             cache: Vec::new(),
         }
     }
@@ -351,6 +351,11 @@ impl Linear {
         }
     }
 
+    pub fn with_shift(mut self, shift: u32) -> Self {
+        self.weights.quant_shift = shift;
+        self.bias.quant_shift = shift;
+        self
+    }
 }
 
 impl Module for Linear {
@@ -388,16 +393,8 @@ impl Module for Linear {
             let in_row = &input.data[b * input_dim..(b + 1) * input_dim];
             for o in 0..output_dim {
                 let w_row = &self.weights.storage.data[o * input_dim..(o + 1) * input_dim];
-                #[cfg(target_arch = "aarch64")]
-                let raw_val = unsafe {
-                    if input_dim % 16 == 0 {
-                        kernels::arm_neon::dot_product_neon_raw(in_row, w_row)
-                    } else {
-                        kernels::dot_product_scalar(in_row, w_row)
-                    }
-                };
-                #[cfg(not(target_arch = "aarch64"))]
-                let raw_val = kernels::dot_product_scalar(in_row, w_row);
+
+                let raw_val = kernels::dot_product_scalar_scaled(in_row, w_row, self.weights.quant_shift);
 
                 out_raw.data[b * output_dim + o] = checked_add_counting!(
                     raw_val as i64,
@@ -407,16 +404,16 @@ impl Module for Linear {
             }
         }
 
-        let max_val = out_raw.data
-            .iter()
-            .map(|x| x.abs() as u32)
-            .max()
-            // TODO: (SHIFT#1) Potentially an issue. Empty input is shifted?
-            .unwrap_or(0);
+        //let max_val = out_raw.data
+        //    .iter()
+        //    .map(|x| x.abs() as u32)
+        //    .max()
+        //    // TODO: (SHIFT#1) Potentially an issue. Empty input is shifted?
+        //    .unwrap_or(1);
 
-        let output_shift = compute_shift_for_max(max_val);
-        self.weights.input_shift = Some(input_shift);
-        self.weights.output_shift = Some(output_shift);
+        //let output_shift = compute_shift_for_max(max_val);
+        //self.weights.input_shift = Some(input_shift);
+        //self.weights.output_shift = Some(output_shift);
 
         //for (raw_out_val, out_val) in out_raw.data.iter().zip(&mut out.data) {
         //    *out_val = kernels::stochastic_downcast(*raw_out_val, output_shift, rng);
@@ -425,23 +422,19 @@ impl Module for Linear {
         out_raw
     }
 
-    fn backward(&mut self, shifted_grad_output: &Tensor<i32>, gradient_shift: Option<u32>) -> Tensor<i32> {
+    fn backward(&mut self, shifted_grad_output: &Tensor<i32>) -> Tensor<i32> {
         // not required to shift anymore, we did that in the forward pass already
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward");
 
-        // gradient_shift: The shift applied to the incoming gradient (`grad_out`)
         // input_shift: The shift applied to `input`
         // output_shift: The shift applied to the processed `input`
         // TODO:
-        //      - rescale grad_out with gradient_shift
         // used to shift back into the original input space
-        let _input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
+        //let _input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
 
-        let _output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
+        //let _output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
 
         // Mathematically required for the chain rule:
-        let _gshift = gradient_shift.unwrap_or(0);
-
         let batch = input.shape[0];
         let input_dim = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
@@ -465,7 +458,7 @@ impl Module for Linear {
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
 
-                    let dw = kernels::mul_mixed_scalar(g, x);
+                    let dw = kernels::mul_mixed_scalar_scaled(g, x, self.weights.quant_shift);
 
                     // --- Weight Gradient ---
                     // dL/dw = grad_output * input_i32
@@ -486,7 +479,7 @@ impl Module for Linear {
                     // Both terms are quantized:
                     //  grad_output is quantized by output_shift
                     //  input_i32 is quantized by weight_shift
-                    let dx = kernels::mul_mixed_scalar(g, w);
+                    let dx = kernels::mul_mixed_scalar_scaled(g, w, self.weights.quant_shift);
 
                     // Input gradient flows back through the network, apply wshift!
                     grad_input.data[b * input_dim + i] = checked_add_counting!(
@@ -579,14 +572,14 @@ impl Module for Sequential {
         let mut output = input.clone();
         for m in self.modules.iter_mut() {
             output = m.forward(&output, input_shift, rng);
-            input_shift = m.get_output_shift();
+            //input_shift = m.get_output_shift();
         }
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>, grad_shift: Option<u32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
         let mut output = grad_output.clone();
         for m in self.modules.iter_mut().rev() {
-            output = m.backward(&output, grad_shift);
+            output = m.backward(&output);
         }
         output
     }
@@ -657,7 +650,7 @@ mod tests {
     }
    
     impl Module for TestXPlusN {
-        fn backward(&mut self, grad: &Tensor<i32>, _grad_shift: Option<u32>) -> Tensor<i32> {
+        fn backward(&mut self, grad: &Tensor<i32>) -> Tensor<i32> {
             grad.clone()
         }
         fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32>{
@@ -968,12 +961,12 @@ mod tests {
     // Linear tests
     #[test]
     fn test_linear_new() {
-        let lin = Linear::new(4, 8, 2);
+        let lin = Linear::new(4, 8);
 
         assert_eq!(lin.weights.master.len(), 4 * 8);
         assert_eq!(lin.weights.storage.len(), 4 * 8);
         assert_eq!(lin.bias.master.len(), 8);
-        assert_eq!(lin.weights.quant_shift, 2);
+        assert_eq!(lin.weights.quant_shift, 0);
         assert_eq!(lin.cache, Vec::new());
         assert_eq!(lin.weights.grads, None);
         assert_eq!(lin.bias.grads, None);
@@ -981,7 +974,7 @@ mod tests {
 
     #[test]
     fn test_linear_init_xavier(){
-        let mut lin = Linear::new(2, 2, 0);
+        let mut lin = Linear::new(2, 2);
         let mut rng = XorShift64::new(420);
 
         lin.init_xavier(&mut rng);
@@ -996,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_linear_sync_weights() {
-        let mut lin = Linear::new(2, 2, 0);
+        let mut lin = Linear::new(2, 2);
         lin.weights.master.data[0] = 10;
         lin.weights.master.data[3] = 10;
         let mut rng = XorShift64 { state: 420 };
@@ -1034,7 +1027,7 @@ mod tests {
 
     #[test]
     fn test_get_output_shift(){
-        let mut layer = Linear::new(10, 5, 0);
+        let mut layer = Linear::new(10, 5);
 
         assert_eq!(layer.get_output_shift(), 0);
 
@@ -1046,7 +1039,7 @@ mod tests {
     #[test]
     fn test_auto_scale_shift_detection() {
         let mut rng = XorShift64::new(42);
-        let mut layer = Linear::new(10, 5, 0); // start with shift=0
+        let mut layer = Linear::new(10, 5); // start with shift=0
         
         // Initialize with Xavier distribution
         layer.init_xavier(&mut rng);
@@ -1068,7 +1061,7 @@ mod tests {
     }
     #[test]
     fn test_linear_forward() {
-        let mut lin = Linear::new(2, 2, 0);
+        let mut lin = Linear::new(2, 2);
         lin.weights.master.data[0] = 1;
         lin.weights.master.data[3] = 1;
         let mut rng = XorShift64 { state: 420 };
@@ -1086,7 +1079,7 @@ mod tests {
 
     #[test]
     fn test_linear_forward_saturation() {
-        let mut lin = Linear::new(2, 2, 0);
+        let mut lin = Linear::new(2, 2);
         lin.weights.master.data[0] = 33292288;
         lin.weights.master.data[3] = 33292288;
         let mut rng = XorShift64 { state: 420 };
@@ -1108,7 +1101,7 @@ mod tests {
 
     #[test]
     fn test_linear_forward_shape() {
-        let mut lin = Linear::new(2, 3, 0);
+        let mut lin = Linear::new(2, 3);
         let mut rng = XorShift64 { state: 420 };
         lin.sync_weights(&mut rng);
 
@@ -1122,7 +1115,7 @@ mod tests {
     #[test]
     fn test_linear_forward_identity() {
         // Linear 2->2, Scale 0 (Identity mapping potential)
-        let mut lin = Linear::new(2, 2, 0);
+        let mut lin = Linear::new(2, 2);
 
         // Identity Matrix in Master Weights [1, 0] / [0, 1]
         lin.weights.master.data[0] = 1;
@@ -1145,7 +1138,7 @@ mod tests {
     #[test]
     fn test_linear_forward_identity_with_shift() {
         // Linear 2->2, Scale 0 (Identity mapping potential)
-        let mut lin = Linear::new(2, 2, 0);
+        let mut lin = Linear::new(2, 2);
 
         // Identity Matrix in Master Weights [2, 0] / [0, 2]
         lin.weights.master.data[0] = 2;
@@ -1177,7 +1170,7 @@ mod tests {
 
     #[test]
     fn test_linear_forward_shape_batch() {
-        let mut lin = Linear::new(2, 3, 0);
+        let mut lin = Linear::new(2, 3);
         let mut rng = XorShift64::new(420);
         lin.sync_weights(&mut rng);
 
@@ -1194,7 +1187,7 @@ mod tests {
         expected = "assertion `left == right` failed: Linear::forward: Input in wrong dimension for weights! 1 vs 2\n  left: 1\n right: 2"
     )]
     fn test_linear_forward_wrong_dimensional_input() {
-        let mut lin = Linear::new(2, 3, 0);
+        let mut lin = Linear::new(2, 3);
         let mut rng = XorShift64::new(420);
         lin.sync_weights(&mut rng);
 
@@ -1205,7 +1198,7 @@ mod tests {
     #[test]
     fn test_linear_backward_shapes() {
         // Batch 2, Input 4 -> Output 3
-        let mut lin = Linear::new(4, 3, 0);
+        let mut lin = Linear::new(4, 3);
         let mut rng = XorShift64::new(420);
 
         let input = Tensor::new(vec![2, 4]); // [Batch, In]
@@ -1224,7 +1217,7 @@ mod tests {
 
     #[test]
     fn test_linear_backward() {
-        let mut lin = Linear::new(2, 3, 0);
+        let mut lin = Linear::new(2, 3);
         let mut rng = XorShift64::new(420);
 
         for w in lin.weights.master.data.iter_mut() {
@@ -1266,7 +1259,8 @@ mod tests {
     #[test]
     fn test_linear_memory_report() {
         let mut rng = XorShift64::new(777);
-        let mut l1 = Linear::new(2, 1, 2);
+        let mut l1 = Linear::new(2, 1)
+            .with_shift(2);
         let x = Tensor::from_vec(vec![0, 0], vec![1, 2]);
         l1.forward(&x, 2, &mut rng);
 
@@ -1274,7 +1268,8 @@ mod tests {
         assert_eq!(a, 24);
         assert_eq!(b, 8);
 
-        let mut l2 = Linear::new(2, 10, 2);
+        let mut l2 = Linear::new(2, 10)
+            .with_shift(2);
         l2.forward(&x, 2, &mut rng);
 
         let (a2, b2) = l2.memory_report();
@@ -1285,7 +1280,8 @@ mod tests {
     #[test]
     fn test_linear_step() {
         let mut rng = XorShift64::new(777);
-        let mut l1 = Linear::new(2, 1, 1);
+        let mut l1 = Linear::new(2, 1)
+            .with_shift(1);
         let mut optim = SGDConfig::new().with_learn_rate(1.0);
         l1.weights.master.data[0] = 111;
         l1.weights.master.data[1] = 222;
@@ -1333,7 +1329,7 @@ mod tests {
 
     #[test]
     fn test_linear_describe(){
-        let l1 = Linear::new(2, 1, 2);
+        let l1 = Linear::new(2, 1);
 
         assert_eq!(l1.describe(), ModuleInfo{
             name: "Linear",
@@ -1345,7 +1341,8 @@ mod tests {
 
     #[test]
     fn test_linear_init_sets_weights_and_shifts(){
-        let mut l1 = Linear::new(1, 1, 0);
+        let mut l1 = Linear::new(1, 1)
+            .with_shift(2);
         let mut rng = XorShift64::new(420);
 
         l1.init(&mut rng);
@@ -1357,7 +1354,7 @@ mod tests {
 
     #[test]
     fn test_linear_get_all_weights(){
-        let l1 = Linear::new(1, 1, 0);
+        let l1 = Linear::new(1, 1);
 
         assert_eq!(l1.get_all_weights(), vec![&l1.weights.master, &l1.bias.master]);
 
@@ -1376,7 +1373,7 @@ mod tests {
     #[test]
     fn test_sequential_add(){
         let mut model = Sequential::new();
-        let l1 = Linear::new(1, 1, 0);
+        let l1 = Linear::new(1, 1);
 
         model.add(l1);
 
@@ -1385,7 +1382,7 @@ mod tests {
     #[test]
     fn test_sequential_init_all(){
         let mut model = Sequential::new();
-        let l1 = Linear::new(1, 1, 0);
+        let l1 = Linear::new(1, 1);
         let mut rng = XorShift64::new(420);
 
         model.add(l1);
@@ -1404,10 +1401,10 @@ mod tests {
     fn test_sequential_forward(){
         let mut rng = XorShift64::new(420);
         let mut rng2 = XorShift64::new(420);
-        let mut l1 = Linear::new(2, 2, 0);
+        let mut l1 = Linear::new(2, 2);
         let mut model = Sequential {
             modules: vec![
-                Box::new(Linear::new(2, 2, 0)),
+                Box::new(Linear::new(2, 2)),
             ],
         };
 
@@ -1423,10 +1420,10 @@ mod tests {
     fn test_sequential_backward(){
         let mut rng = XorShift64::new(420);
         let mut rng2 = XorShift64::new(420);
-        let mut l1 = Linear::new(2, 2, 0);
+        let mut l1 = Linear::new(2, 2);
         let mut model = Sequential {
             modules: vec![
-                Box::new(Linear::new(2, 2, 0)),
+                Box::new(Linear::new(2, 2)),
             ],
         };
 
@@ -1448,7 +1445,7 @@ mod tests {
         let mut rng = XorShift64::new(420);
         let mut model = Sequential {
             modules: vec![
-                Box::new(Linear::new(2, 2, 0)),
+                Box::new(Linear::new(2, 2)),
             ],
         };
 
@@ -1470,7 +1467,8 @@ mod tests {
     fn test_sequential_step(){
         // basically the same as just a linear layer
         let mut rng = XorShift64::new(777);
-        let mut l1 = Linear::new(2, 1, 1);
+        let mut l1 = Linear::new(2, 1)
+            .with_shift(1);
         let mut model = Sequential::new();
 
         let mut optim = SGDConfig::new().with_learn_rate(1.0);
@@ -1514,9 +1512,9 @@ mod tests {
     fn test_sequential_memory_report(){
         let model = Sequential {
             modules: vec![
-                Box::new(Linear::new(2, 8, 2)),
+                Box::new(Linear::new(2, 8)),
                 Box::new(activations::ReLU::new()),
-                Box::new(Linear::new(8, 1, 2)),
+                Box::new(Linear::new(8, 1)),
             ],
         };
 
@@ -1530,9 +1528,9 @@ mod tests {
     fn test_summary() {
         let model = Sequential {
             modules: vec![
-                Box::new(Linear::new(2, 8, 2)),
+                Box::new(Linear::new(2, 8)),
                 Box::new(activations::ReLU::new()),
-                Box::new(Linear::new(8, 1, 2)),
+                Box::new(Linear::new(8, 1)),
             ],
         };
 

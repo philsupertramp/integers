@@ -19,10 +19,10 @@ pub struct RNNCell {
 }
 
 impl RNNCell {
-    pub fn new(input_dim: usize, hidden_dim: usize, scale_shift: u32) -> Self {
+    pub fn new(input_dim: usize, hidden_dim: usize) -> Self {
         Self {
-            w_ih: Linear::new(input_dim, hidden_dim, scale_shift),
-            w_hh: Linear::new(hidden_dim, hidden_dim, scale_shift),
+            w_ih: Linear::new(input_dim, hidden_dim),
+            w_hh: Linear::new(hidden_dim, hidden_dim),
             act: Tanh::new(),
             h_prev: None,
             hidden_dim,
@@ -104,7 +104,7 @@ impl Module for RNNCell {
         self.h_prev = Some(h_next.clone());
         h_next
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>, grad_shift: Option<u32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
         let combined_grad = match self.d_h_next.take() {
             Some(carry) => {
                 let mut combined = grad_output.clone();
@@ -116,10 +116,10 @@ impl Module for RNNCell {
             None => grad_output.clone(),
         };
 
-        let d_comb = self.act.backward(&combined_grad, grad_shift);
+        let d_comb = self.act.backward(&combined_grad);
 
-        let d_ih = self.w_ih.backward(&d_comb, grad_shift);
-        let d_hh = self.w_hh.backward(&d_comb, grad_shift); // compute it...
+        let d_ih = self.w_ih.backward(&d_comb);
+        let d_hh = self.w_hh.backward(&d_comb); // compute it...
         // d_hh should be fed back as the grad for h_prev in the next BPTT step
         self.d_h_next = Some(d_hh);
 
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_new(){
-        let cell = RNNCell::new(2, 4, 0);
+        let cell = RNNCell::new(2, 4);
 
         assert_eq!(cell.w_ih.weights.master.shape, vec![4, 2]);
         assert_eq!(cell.w_hh.weights.master.shape, vec![4, 4]);
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_reset_state(){
-        let mut cell = RNNCell::new(2, 4, 0);
+        let mut cell = RNNCell::new(2, 4);
 
         let t1 = Tensor::from_vec(vec![1, 2], vec![1, 2]);
 
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn test_rnncell_init_weights(){
         let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 4, 0);
+        let mut cell = RNNCell::new(2, 4);
 
         cell.init_weights(&mut rng);
 
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_init_weights_auto(){
         let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 4, 0);
+        let mut cell = RNNCell::new(2, 4);
 
         // sets weights and determines quant_shift
         cell.init_weights_auto(&mut rng);
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_rnn_cell_get_output_shift(){
-        let mut cell = RNNCell::new(2, 4, 0);
+        let mut cell = RNNCell::new(2, 4);
 
         assert_eq!(cell.get_output_shift(), 0);
 
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn test_rnncell_forward(){
         let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 2, 0);
+        let mut cell = RNNCell::new(2, 2);
 
         cell.w_ih.weights.storage.data = vec![1, 0, 0, 1];
         cell.w_hh.weights.storage.data = vec![1, 0, 0, 1];
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn test_rnncell_backward(){
         let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 2, 0);
+        let mut cell = RNNCell::new(2, 2);
 
         cell.w_ih.weights.storage.data = vec![1, 0, 0, 1];
         cell.w_hh.weights.storage.data = vec![1, 0, 0, 1];
@@ -314,7 +314,7 @@ mod tests {
 
         // step updates master weights.
         let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 2, 0);
+        let mut cell = RNNCell::new(2, 2);
 
         cell.w_ih.weights.master.data = vec![1, 0, 0, 1];
         cell.w_hh.weights.master.data = vec![1, 0, 0, 1];
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn test_rnncell_sync_weights(){
         let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 4, 0);
+        let mut cell = RNNCell::new(2, 4);
 
         // sets weights and determines quant_shift
         cell.init_weights_auto(&mut rng);
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_memory_report(){
-        let cell = RNNCell::new(2, 4, 0);
+        let cell = RNNCell::new(2, 4);
 
         let (s, d) = cell.memory_report();
 
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_describe(){
-        let cell = RNNCell::new(2, 4, 0);
+        let cell = RNNCell::new(2, 4);
 
         assert_eq!(cell.describe(), ModuleInfo{
             name: "RNNCell",
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn test_rnncell_init(){
         let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 4, 0);
+        let mut cell = RNNCell::new(2, 4);
 
         // sets weights
         cell.init(&mut rng);
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_rnncell_get_all_weights(){
-        let cell = RNNCell::new(2, 4, 0);
+        let cell = RNNCell::new(2, 4);
 
         assert_eq!(cell.get_all_weights(), vec![
             &cell.w_ih.weights.master,

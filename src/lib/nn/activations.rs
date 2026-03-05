@@ -43,7 +43,7 @@ impl Module for ReLU {
         }
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>, _grad_shift: Option<u32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
         let input = self
             .cache
             .pop()
@@ -117,7 +117,7 @@ impl Module for Tanh {
 
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>, _grad_shift: Option<u32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
         let input = self
             .cache
             .pop()
