@@ -258,21 +258,24 @@ mod tests {
         cell.w_ih.weights.storage.data = vec![1, 0, 0, 1];
         cell.w_hh.weights.storage.data = vec![1, 0, 0, 1];
 
-        let input = Tensor::from_vec(vec![0, 100, 200, 300], vec![2, 2]);
+        // first value stays 0, second and third aren't fully saturated,
+        // value 4 will clamp to the max value (97)
+        let input = Tensor::from_vec(vec![0, 100, 126, 127], vec![2, 2]);
 
         // first call, cell.h_prev is zero-vector
         let val1 = cell.forward(&input, 0, &mut rng);
 
-        assert_eq!(val1.data, vec![0, 83, -53, 42]);
+        assert_eq!(val1.data, vec![0, 83, 96, 97]);
         assert_eq!(
             cell.h_prev,
-            Some(Tensor::from_vec(vec![0, 83, -53, 42], vec![2, 2]))
+            Some(Tensor::from_vec(vec![0, 83, 96, 97], vec![2, 2]))
         );
 
         // sequential call, now we have cell.h_prev available
+        // the three last elements are fully saturated
         let val2 = cell.forward(&input, 0, &mut rng);
 
-        assert_eq!(val2.data, vec![0, -66, -88, 75]);
+        assert_eq!(val2.data, vec![0, 97, 97, 97]);
     }
 
     #[test]
@@ -296,13 +299,13 @@ mod tests {
 
         let out = cell.backward(&grad, None);
 
-        assert_eq!(out.data, vec![0, -1, -1, 64]);
-        assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -1, -1, 64], vec![2, 2])));
+        assert_eq!(out.data, vec![0, -1, -1, 47]);
+        assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -1, -1, 47], vec![2, 2])));
 
         let out2 = cell.backward(&grad, None);
         
-        assert_eq!(out2.data, vec![0, -2, -2, 143]);
-        assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -2, -2, 143], vec![2, 2])));
+        assert_eq!(out2.data, vec![0, -2, -2, 128]);
+        assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -2, -2, 128], vec![2, 2])));
     }
 
     #[test]

@@ -15,17 +15,17 @@ impl Loss for MSE {
             targets.len(),
             "MSE::forward: vector sizes don't match."
         );
-        let mut loss: i32 = 0;
+        let mut loss: i64 = 0;
         let mut grad = Tensor::<i32>::new(preds.shape.clone());
 
         for i in 0..preds.data.len() {
-            let error = preds.data[i] as i32 - targets.data[i] as i32;
+            let error = preds.data[i] - targets.data[i];
             // Cast to i32 BEFORE multiplying
             let error_i64 = error as i64;
-            loss = loss.saturating_add(error_i64.saturating_mul(error_i64) as i32);
+            loss = loss.saturating_add(error_i64.saturating_mul(error_i64));
             grad.data[i] = error as i32;
         }
-        (loss, grad)
+        (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32, grad)
     }
 }
 
@@ -46,7 +46,7 @@ impl Loss for MAE {
             let error = preds.data[i] as i32 - targets.data[i] as i32;
             loss += error.abs() as i32;
             // dL/dy = 2*(y - t), dropping the 2 it's absorbed by lr
-            grad.data[i] = error;
+            grad.data[i] = error.signum();
         }
         (loss / (preds.data.len() as i32), grad)
     }

@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const EPOCHS: i32 = 200;
     const SCALE_SHIFT: u32 = 0;
     const GRAD_SHIFT: u32 = 0;
-    let optim = SGDConfig::new().with_learn_rate(0.7);//.with_momentum(0.01);  // lr_shift=2, momentum_shift=2
+    let optim = SGDConfig::new().with_learn_rate(0.0125).with_momentum(0.8);  // lr_shift=2, momentum_shift=2
 
     let mut l1 = Linear::new(4, 8, SCALE_SHIFT);
     let mut l2 = Linear::new(8, 3, SCALE_SHIFT);
@@ -31,14 +31,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
-        .with_quantization(QuantizationMethod::MinMax)
+        .with_quantization(QuantizationMethod::StandardScore)
         .load()?;  // ← Unwrap Result<Dataset, DataError>
     
     let test_ds = DatasetBuilder::new("data/iris_test.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
-        .with_quantization(QuantizationMethod::MinMax)
+        .with_quantization(QuantizationMethod::StandardScore)
         .load()?;   // ← Unwrap Result<Dataset, DataError>
 
     println!("Train set: {} samples, {} features", train_ds.len(), train_ds.n_features());
@@ -52,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut epoch_loss: i64 = 0;
 
         for t in 0..(train_ds.len()) {
+            model.zero_grads();
             let x_t = train_ds.get_input(t);
             let target = train_ds.get_target(t);
 

@@ -107,6 +107,9 @@ pub trait Module: Any {
 
     fn init(&mut self, _rng: &mut XorShift64) {}
 
+    /// sets all gradients to zero, e.g. at the beginning of a training iteration
+    fn zero_grads(&mut self) {}
+
     /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
     fn step(&mut self, _optim: &dyn OptimizerConfig) {}
 
@@ -347,9 +350,15 @@ impl Linear {
             *b = 0;
         }
     }
+
 }
 
 impl Module for Linear {
+    fn zero_grads(&mut self){
+        self.weights.zero_grads();
+        self.bias.zero_grads();
+    }
+
     fn sync_weights(&mut self, rng: &mut XorShift64) {
         self.weights.sync(rng);
         self.bias.sync(rng);

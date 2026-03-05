@@ -102,7 +102,7 @@ impl Module for Tanh {
         self.cache.push(input.clone());
         let mut output = Tensor::<i32>::new(input.shape.clone());
         for (o, &x) in output.data.iter_mut().zip(&input.data) {
-            *o = kernels::tanh_i8(x as i8) as i32;
+            *o = kernels::tanh_i8(x.clamp(-128, 127) as i8) as i32;
         }
 
         let max_magnitude = output.data
@@ -138,7 +138,7 @@ impl Module for Tanh {
             let dout = (grad * dtanh_num) >> 14;
             let _shift = output_shift.saturating_sub(input_shift);
             let adjusted = dout;// >> shift;
-            output.data[o] = adjusted.clamp(-32768, 32767) as i32;
+            output.data[o] = adjusted.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         }
         output
     }

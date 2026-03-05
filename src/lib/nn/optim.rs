@@ -47,7 +47,7 @@ impl SGDConfig {
         assert!(momentum > 0.0 && momentum < 1.0, "Momentum must be in [0, 1], got {}", momentum);
 
         let inv = 1.0 / (1.0 - momentum);
-        let shift = inv.round() as u32;
+        let shift = inv.log2().round() as u32;
         // shift >= 0 given due to u32
         assert!(shift <= 8, "Momentum {} gives shift {}, should be 0-8", momentum, shift);
         shift
@@ -186,7 +186,7 @@ impl OptimizerConfig for AdamConfig {
 
             for i in 0..weights.len() {
                 let g = grads[i];
-                let g_64 = grads[i] as i32;
+                let g_64 = grads[i] as i64;
                 m[i] = checked_add_counting!(
                     m[i].saturating_sub(m[i] / b1_div),
                     g / b1_div,
@@ -194,7 +194,7 @@ impl OptimizerConfig for AdamConfig {
                 );
                 v[i] = checked_add_counting!(
                     v[i].saturating_sub(v[i] / (b2_div as i32)),
-                    g_64 * g_64 / b2_div as i32,
+                    (g_64 * g_64 / b2_div) as i32,
                     backward_wraps
                 );
                 let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;
@@ -262,14 +262,12 @@ mod tests {
         assert_eq!(optim.momentum_shift, None);
 
         let samples = vec![
-            0.88, 0.85, 0.82,
-            0.80, 0.75, 0.70,
-            0.50, 0.25, 0.125,
-            0.0625,
+            0.997, 0.99, 0.98,
+            0.97, 0.95, 0.88,
+            0.82, 0.50, 0.20,
         ];
         let expected_values = vec![
-            8, 7, 6, 5, 4, 3, 2,
-            1, 1, 1,
+            8, 7, 6, 5, 4, 3, 2, 1, 0
         ];
 
         for (val, expected_f32) in samples.iter().zip(expected_values) {
