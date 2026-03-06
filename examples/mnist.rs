@@ -124,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             epoch_loss += loss as i64;
             batches_processed += 1;
 
-            model.backward(&grad_out, Some(grad_shift));
+            model.backward(&grad_out);
             model.step(&optim);
         }
 

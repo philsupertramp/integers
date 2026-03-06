@@ -172,12 +172,6 @@ pub struct Params {
     ///     shift = 5 // for 2-3 layer networks
     ///     shift = 6 // for deeper networks
     pub quant_shift: u32,
-
-    /// Used to track what shift was applied to inputs
-    pub input_shift: Option<u32>,
-
-    /// Used to track what shift was applied to outputs before returning them
-    pub output_shift: Option<u32>,
 }
 
 impl Params {
@@ -190,8 +184,6 @@ impl Params {
             grads: None,
             state: None,
             quant_shift: shift,
-            input_shift: None,
-            output_shift: None,
         }
     }
 
@@ -331,14 +323,24 @@ pub struct Linear {
     pub weights: Params,
     pub bias: Params,
     pub cache: Vec<Tensor<i32>>,
+
+
+    /// Used to track what shift was applied to inputs
+    pub input_shift: u32,
+    /// Used to track what shift was applied to outputs before returning them
+    pub output_shift: u32,
 }
 
 impl Linear {
     pub fn new(input_dim: usize, output_dim: usize) -> Self {
+        let acc_shift = (usize::BITS - input_dim.leading_zeros()) as u32; // ceil(log2)
+        let back_acc_shift = (usize::BITS - output_dim.leading_zeros()) as u32;
         Self {
             weights: Params::new(vec![output_dim, input_dim], 0),
             bias: Params::new(vec![output_dim], 0),
             cache: Vec::new(),
+            input_shift: acc_shift,
+            output_shift: back_acc_shift,
         }
     }
 
@@ -370,10 +372,10 @@ impl Module for Linear {
     }
 
     fn get_output_shift(&self) -> u32 {
-        self.weights.output_shift.unwrap_or(0)
+        self.output_shift
     }
 
-    fn forward(&mut self, raw_input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32> {
+    fn forward(&mut self, raw_input: &Tensor<i32>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i32> {
         assert_eq!(
             raw_input.shape[1], self.weights.storage.shape[1],
             "Linear::forward: Input in wrong dimension for weights! {} vs {}",
@@ -394,7 +396,11 @@ impl Module for Linear {
             for o in 0..output_dim {
                 let w_row = &self.weights.storage.data[o * input_dim..(o + 1) * input_dim];
 
-                let raw_val = kernels::dot_product_scalar_scaled(in_row, w_row, self.weights.quant_shift);
+                let raw_val = kernels::stochastic_downcast(
+                    kernels::dot_product_scalar(in_row, w_row),
+                    self.weights.quant_shift + self.input_shift,
+                    rng
+                );
 
                 out_raw.data[b * output_dim + o] = checked_add_counting!(
                     raw_val as i64,
@@ -444,6 +450,8 @@ impl Module for Linear {
         let mut grad_bias = Tensor::<i32>::new(vec![output_dim]);
 
         let grad_output = shifted_grad_output; //shifted_grad_output >> output_shift;
+                                               //
+        let weight_shift: i32 = (self.output_shift + self.input_shift) as i32 - self.weights.quant_shift as i32;
 
         for b in 0..batch {
             for o in 0..output_dim {
@@ -458,7 +466,11 @@ impl Module for Linear {
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
 
-                    let dw = kernels::mul_mixed_scalar_scaled(g, x, self.weights.quant_shift);
+                    let dw = if weight_shift >= 0 {
+                        kernels::mul_mixed_scalar(g, x) >> weight_shift
+                    } else {
+                        kernels::mul_mixed_scalar(g, x) << (-1 * weight_shift)
+                    };
 
                     // --- Weight Gradient ---
                     // dL/dw = grad_output * input_i32
@@ -479,7 +491,9 @@ impl Module for Linear {
                     // Both terms are quantized:
                     //  grad_output is quantized by output_shift
                     //  input_i32 is quantized by weight_shift
-                    let dx = kernels::mul_mixed_scalar_scaled(g, w, self.weights.quant_shift);
+                    let dx = {
+                        kernels::mul_mixed_scalar(g, w) >> (self.weights.quant_shift + self.output_shift)
+                    };
 
                     // Input gradient flows back through the network, apply wshift!
                     grad_input.data[b * input_dim + i] = checked_add_counting!(
@@ -694,7 +708,7 @@ mod tests {
         // Same contract applies to backward
         let grad = Tensor::from_vec(vec![-1, -1, -2], vec![3, 1]);
 
-        let b_out = module.backward(&grad, None);
+        let b_out = module.backward(&grad);
 
         assert_eq!(b_out.shape, grad.shape);
     }
@@ -741,8 +755,6 @@ mod tests {
         assert_eq!(params.grads, None);
         assert_eq!(params.state, None);
         assert_eq!(params.quant_shift, 0);
-        assert_eq!(params.input_shift, None);
-        assert_eq!(params.output_shift, None);
     }
 
     #[test]
@@ -1071,7 +1083,7 @@ mod tests {
         input.data[0] = 10;
         input.data[1] = 20;
         let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.weights.output_shift.expect("Does not exist.");
+        let output_shift = lin.output_shift.expect("Does not exist.");
 
         assert_eq!(out.data[0] << output_shift, 10);
         assert_eq!(out.data[1] << output_shift, 20);
@@ -1089,7 +1101,7 @@ mod tests {
         input.data[0] = 33292288;
         input.data[1] = 33292288;
         let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.weights.output_shift.expect("Does not exist.");
+        let output_shift = lin.output_shift.expect("Does not exist.");
 
         // clamping around 127
         assert_eq!(output_shift, 8);
@@ -1127,7 +1139,7 @@ mod tests {
         let input = Tensor::from_vec(vec![10, 20], vec![1, 2]);
 
         let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.weights.output_shift.expect("Does not exist.");
+        let output_shift = lin.output_shift.expect("Does not exist.");
 
         assert_eq!(out.data[0] << output_shift, 10);
         assert_eq!(out.data[1] << output_shift, 20);
@@ -1150,7 +1162,7 @@ mod tests {
         let mut input = Tensor::from_vec(vec![127, -128], vec![1, 2]);
 
         let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.weights.output_shift.expect("Does not exist.");
+        let output_shift = lin.output_shift.expect("Does not exist.");
 
         assert_eq!(out.data[0] << output_shift, 1016);
         assert_eq!(out.data[1] << output_shift, -1024);
@@ -1160,7 +1172,7 @@ mod tests {
         input = Tensor::from_vec(vec![127, 64], vec![1, 2]);
 
         let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.weights.output_shift.expect("Does not exist.");
+        let output_shift = lin.output_shift.expect("Does not exist.");
 
         assert_eq!(out.data[0] << output_shift, 508);
         assert_eq!(out.data[1] << output_shift, 256);
@@ -1207,7 +1219,7 @@ mod tests {
         lin.forward(&input, 0, &mut rng);
         lin.cache = vec![input.clone()];
 
-        let d_x = lin.backward(&grad_out, None);
+        let d_x = lin.backward(&grad_out);
         let d_w = lin.weights.grads.unwrap().clone();
 
         // Check shapes
@@ -1230,7 +1242,7 @@ mod tests {
         lin.forward(&input, 0, &mut rng);
         lin.cache = vec![input.clone()];
 
-        let d_x = lin.backward(&grad_out, None);
+        let d_x = lin.backward(&grad_out);
         let d_w = lin.weights.grads.unwrap().clone();
         let d_b = lin.bias.grads.unwrap().clone();
 
@@ -1434,8 +1446,8 @@ mod tests {
 
         let grad = Tensor::from_vec(vec![-1, -2], vec![1, 2]);
 
-        let f1_grad_out = l1.backward(&grad, None);
-        let grad_out = model.backward(&grad, None);
+        let f1_grad_out = l1.backward(&grad);
+        let grad_out = model.backward(&grad);
 
         assert_eq!(f1_grad_out, grad_out);
     }

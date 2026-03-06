@@ -246,7 +246,7 @@ mod tests {
         let mut relu = ReLU::new();
         let grad = Tensor::from_vec(vec![1], vec![1, 1]);
 
-        relu.backward(&grad, Some(0));
+        relu.backward(&grad);
     }
 
     #[test]
@@ -257,7 +257,7 @@ mod tests {
         let expected_grad = Tensor::from_vec(vec![0, 0, 0, 20, 100], vec![5, 1]);
         relu.cache.push(input.clone());
 
-        let grad_out = relu.backward(&grad, Some(0));
+        let grad_out = relu.backward(&grad);
 
         for (calculated, expected) in grad_out.data.into_iter().zip(expected_grad.data.into_iter()) {
             assert_eq!(calculated, expected);
@@ -294,14 +294,14 @@ mod tests {
 
         // and can free them by calling the backward pass
         let grad = Tensor::from_vec(vec![1, 0, -10, 20, 100], vec![5, 1]);
-        relu.backward(&grad, None);
+        relu.backward(&grad);
 
         (sta_, dyn_) = relu.memory_report();
 
         assert_eq!(sta_, 0);
         assert_eq!(dyn_, 20);
 
-        relu.backward(&grad, None);
+        relu.backward(&grad);
 
         (sta_, dyn_) = relu.memory_report();
 
@@ -398,7 +398,7 @@ mod tests {
 
         let input = Tensor::from_vec(vec![], vec![]);
 
-        tanh.backward(&input, Some(0));
+        tanh.backward(&input);
 
     }
 
@@ -417,7 +417,7 @@ mod tests {
         let grad = Tensor::from_vec(vec![], vec![]);
         tanh.cache.push(input);
 
-        tanh.backward(&grad, Some(0));
+        tanh.backward(&grad);
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
         tanh.cache.push(input);
         tanh.input_shift = Some(0);
 
-        tanh.backward(&grad, Some(0));
+        tanh.backward(&grad);
     }
 
     #[test]
@@ -453,7 +453,7 @@ mod tests {
         tanh.input_shift = Some(0);
         tanh.output_shift = Some(0);
 
-        let out = tanh.backward(&grad, Some(0));
+        let out = tanh.backward(&grad);
         assert_eq!(out.shape, vec![]);
         assert_eq!(out.data, vec![]);
     }
@@ -472,7 +472,7 @@ mod tests {
         tanh.input_shift = Some(0);
         tanh.output_shift = Some(0);
 
-        let out = tanh.backward(&grad, Some(0));
+        let out = tanh.backward(&grad);
         assert_eq!(out.shape, vec![5, 1]);
         assert_eq!(out.data, vec![0, 94, 0, -95, 0]);
     }
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(dyn_, 40);
 
         // and the backward pass removes objects from the cache
-        tanh.backward(&input, Some(0));
+        tanh.backward(&input);
 
         let (stat_, dyn_) = tanh.memory_report();
 

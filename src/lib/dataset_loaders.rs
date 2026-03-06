@@ -267,9 +267,10 @@ fn load_csv(
 
     // Quantize per-column
     let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
+    let mut input_shift: u32 = 0;
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
-        let quantized = match config.quantization {
+        let (quantized, shift) = match config.quantization {
             QuantizationMethod::MinMax => minmax_quantize(&col),
             QuantizationMethod::StandardScore => standard_score_quantize(&col),
             QuantizationMethod::Custom => {
@@ -278,6 +279,7 @@ fn load_csv(
                 ))
             }
         };
+        input_shift = shift;
         columns.push(quantized);
     }
 
@@ -300,6 +302,7 @@ fn load_csv(
         labels,
         targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
+        input_shift,
     })
 }
 
@@ -425,9 +428,10 @@ fn finalize_dataset(
 
     // Quantize per-column
     let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
+    let mut input_shift: u32 = 0;
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
-        let quantized = match config.quantization {
+        let (quantized, shift) = match config.quantization {
             QuantizationMethod::MinMax => minmax_quantize(&col),
             QuantizationMethod::StandardScore => standard_score_quantize(&col),
             QuantizationMethod::Custom => {
@@ -436,6 +440,7 @@ fn finalize_dataset(
                 ))
             }
         };
+        input_shift = shift;
         columns.push(quantized);
     }
 
@@ -458,6 +463,7 @@ fn finalize_dataset(
         labels,
         targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
+        input_shift,
     })
 }
 

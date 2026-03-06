@@ -49,6 +49,7 @@ pub struct Dataset {
     pub labels:   Vec<u8>,
     pub targets:  Tensor<i32>,
     pub n_classes: usize,
+    pub input_shift: u32,
 }
 
 impl Dataset {

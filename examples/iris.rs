@@ -9,19 +9,17 @@ use integers::nn::optim::{SGDConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
-    const EPOCHS: i32 = 2000;
+    const EPOCHS: i32 = 8000;
     const SCALE_SHIFT: u32 = 1;
     let mut optim = SGDConfig::new();
     optim.lr_shift = 12;
+    optim.momentum_shift = Some(4);
 
     let mut l1 = Linear::new(4, 8);
     let mut l2 = Linear::new(8, 3);
 
     l1.init(&mut sync_rng);
     l2.init(&mut sync_rng);
-
-    l1.weights.quant_shift = SCALE_SHIFT;
-    l2.weights.quant_shift = SCALE_SHIFT;
     
     // Build model for Iris: 4 input features → 3 output classes
     let mut model = Sequential::new();
@@ -58,9 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for t in 0..(train_ds.len()) {
             model.sync_weights(&mut sync_rng);
             let x_t = train_ds.get_input(t);
-            let target = train_ds.get_target(t) << SCALE_SHIFT;
+            let target = train_ds.get_target(t);
 
-            let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
+            let pred = model.forward(&x_t, train_ds.input_shift, &mut rng);
 
             let (loss, grad_out) = mse.forward(&pred, &target);
             epoch_loss += loss as i64;
@@ -96,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for t in 0..test_ds.len() {
         let x_t = test_ds.get_input(t);
         let target = test_ds.get_target(t);
-        let pred = model.forward(&x_t, SCALE_SHIFT, &mut rng);
+        let pred = model.forward(&x_t, test_ds.input_shift, &mut rng);
         let (loss, grad_out) = mse.forward(&pred, &target);
         eval_loss += loss as i64;
     }
@@ -107,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (test_inputs, _test_targets) = test_ds.minibatch(&test_indices);
     
     // Forward pass
-    let predictions_tensor = model.forward(&test_inputs, SCALE_SHIFT, &mut rng);
+    let predictions_tensor = model.forward(&test_inputs, test_ds.input_shift, &mut rng);
     
     // Get predicted classes [batch_size]
     let predicted_classes = argmax(&predictions_tensor, Some(1));

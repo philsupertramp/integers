@@ -302,7 +302,7 @@ mod tests {
 
         let mut input = vec![2; 2];
         let grad = vec![2; 3];
-        optim.update(&mut input, &grad, &mut state);
+        optim.update(&mut input, &grad, &mut state, 0);
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
             OptimizerState::SGD { velocity } => velocity.clone(),
             _ => panic!("Expected SGD state with velocity!"),
         };
-        optim.update(&mut weights, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
 
         let new_velocity = match &state {
             OptimizerState::SGD { velocity } => velocity.clone(),
@@ -361,12 +361,12 @@ mod tests {
         // will be [0, 0] -> [-2, -2]
         let mut weights = vec![0; 2];
 
-        optim.update(&mut weights, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
 
         // will be [1, 1] -> [-1, -1]
         let mut bias = vec![1; 2];
 
-        optim.update(&mut bias, &grad, &mut state);
+        optim.update(&mut bias, &grad, &mut state, 0);
 
         assert_eq!(weights, vec![-2, -2]);
         assert_eq!(bias, vec![-1, -1]);
@@ -388,8 +388,8 @@ mod tests {
         // will be [1, 1] -> [0, 0]
         let mut bias = vec![1; 2];
 
-        optim.update(&mut weights, &grad, &mut state);
-        optim.update(&mut bias, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
+        optim.update(&mut bias, &grad, &mut state, 0);
 
         assert_eq!(weights, vec![-1, -1]);
         assert_eq!(bias, vec![0, 0]);
@@ -412,7 +412,7 @@ mod tests {
         // will be [0, 0] -> [-2, -2]
         let mut weights = vec![0; 2];
 
-        optim.update(&mut weights, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
         
         let og_velocity = match &state {
             OptimizerState::SGD { velocity } => velocity.clone(),
@@ -426,7 +426,7 @@ mod tests {
         // Hence there will be an update to weights once we run optim.update again
         assert_eq!(og_velocity[0] / (1 << optim.momentum_shift.unwrap_or(0)), 0);
         
-        optim.update(&mut weights, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
         assert_ne!(weights, vec![-2, -2]);
         assert_eq!(weights, vec![-5, -5]);
     }
@@ -452,8 +452,8 @@ mod tests {
         // will be [1, 1] -> [-2, -2]
         let mut bias = vec![1; 1];
 
-        optim.update(&mut weights, &grad, &mut state);
-        optim.update(&mut bias, &grad_bias, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
+        optim.update(&mut bias, &grad_bias, &mut state, 0);
 
         assert_eq!(weights, vec![-2, -2]);
         assert_eq!(bias, vec![-2]);
@@ -477,8 +477,8 @@ mod tests {
         // will be [1, 1] -> [0, 0]
         let mut bias = vec![1; 2];
 
-        optim.update(&mut weights, &grad, &mut state);
-        optim.update(&mut bias, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
+        optim.update(&mut bias, &grad, &mut state, 0);
 
         assert_eq!(weights, vec![-1, -1]);
         assert_eq!(bias, vec![0, 0]);
@@ -502,8 +502,8 @@ mod tests {
         // will be [1, 1] -> [0, 0]
         let mut bias = vec![1; 2];
 
-        optim.update(&mut weights, &grad, &mut state);
-        optim.update(&mut bias, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
+        optim.update(&mut bias, &grad, &mut state, 0);
 
         // weights[1] and bias[1] are not updated
         assert_eq!(weights, vec![-1, 0]);
@@ -528,8 +528,8 @@ mod tests {
         // will be [1, 1] -> [0, 0]
         let mut bias = vec![1; 2];
 
-        optim.update(&mut weights, &grad, &mut state);
-        optim.update(&mut bias, &grad, &mut state);
+        optim.update(&mut weights, &grad, &mut state, 0);
+        optim.update(&mut bias, &grad, &mut state, 0);
 
 
         // the full matrix was updated
@@ -648,7 +648,7 @@ mod tests {
         let mut weights = vec![1; 2];
         let grads = vec![1; 2];
 
-        adam.update(&mut weights, &grads, &mut sgd.init_state(2));
+        adam.update(&mut weights, &grads, &mut sgd.init_state(2), 0);
     }
 
     #[test]
@@ -671,8 +671,8 @@ mod tests {
         let w_grads = vec![4; 2];
         let b_grads = vec![4; 1];
 
-        optim.update(&mut weights, &w_grads, &mut w_state);
-        optim.update(&mut bias, &b_grads, &mut b_state);
+        optim.update(&mut weights, &w_grads, &mut w_state, 0);
+        optim.update(&mut bias, &b_grads, &mut b_state, 0);
 
         let (w_momentum, w_velocities) = match &w_state {
             OptimizerState::Adam { m, v } => (m.clone(), v.clone()),
@@ -723,8 +723,8 @@ mod tests {
         let grads = vec![4; 2];
 
         let mut state = optim.init_state(2);
-        optim.update(&mut weights, &grads, &mut state);
-        optim.update(&mut bias, &grads, &mut state);
+        optim.update(&mut weights, &grads, &mut state, 0);
+        optim.update(&mut bias, &grads, &mut state, 0);
 
         assert_eq!(weights[0], 0);
         assert_eq!(weights[1], 0);
@@ -750,8 +750,8 @@ mod tests {
         let grads = vec![4; 2];
 
         let mut state = optim.init_state(2);
-        optim.update(&mut weights, &grads, &mut state);
-        optim.update(&mut bias, &grads, &mut state);
+        optim.update(&mut weights, &grads, &mut state, 0);
+        optim.update(&mut bias, &grads, &mut state, 0);
 
         assert_eq!(weights[0], 1);
         assert_eq!(weights[1], 1);

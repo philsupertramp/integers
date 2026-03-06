@@ -15,6 +15,7 @@ pub struct RNNCell {
 
     d_h_next: Option<Tensor<i32>>,
 
+    pub input_shift: Option<u32>,
     pub output_shift: Option<u32>,
 }
 
@@ -27,6 +28,7 @@ impl RNNCell {
             h_prev: None,
             hidden_dim,
             d_h_next: None,
+            input_shift: None,
             output_shift: None,
         }
     }
@@ -34,7 +36,8 @@ impl RNNCell {
     pub fn reset_state(&mut self) {
         self.h_prev = None;
         self.d_h_next = None;
-        self.output_shift = None;
+        //self.output_shift = None;
+        //self.input_shift = None;
 
         self.w_ih.cache.clear();
         self.w_hh.cache.clear();
@@ -86,7 +89,7 @@ impl Module for RNNCell {
         // Note: adding two i32 tensors before tanh risks overflow.
         // Accumulate in i32, then downcast before tanh.
         let ih = self.w_ih.forward(input, input_shift, rng);
-        let hh = self.w_hh.forward(h, self.w_ih.weights.output_shift.expect("Expected output shift"), rng);
+        let hh = self.w_hh.forward(h, input_shift, rng);
 
         let mut comb = Tensor::<i32>::new(vec![batch, self.hidden_dim]);
         for i in 0..comb.data.len() {
@@ -94,7 +97,8 @@ impl Module for RNNCell {
             comb.data[i] = sum;//.clamp(-128, 127) as i32;
         }
 
-        let h_next = self.act.forward(&comb, self.w_hh.weights.output_shift.expect("Expected output shift"), rng);
+        // TODO: Shift is for sure wrong!
+        let h_next = self.act.forward(&comb, input_shift, rng);
         let max_magnitude = h_next.data.iter().map(|x| x.abs() as u32).max().unwrap_or(1);
         let out_shift = compute_shift_for_max(max_magnitude);
         self.output_shift = Some(out_shift);
@@ -297,12 +301,12 @@ mod tests {
 
         assert_eq!(cell.d_h_next, None);
 
-        let out = cell.backward(&grad, None);
+        let out = cell.backward(&grad);
 
         assert_eq!(out.data, vec![0, -1, -1, 47]);
         assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -1, -1, 47], vec![2, 2])));
 
-        let out2 = cell.backward(&grad, None);
+        let out2 = cell.backward(&grad);
         
         assert_eq!(out2.data, vec![0, -2, -2, 128]);
         assert_eq!(cell.d_h_next, Some(Tensor::from_vec(vec![0, -2, -2, 128], vec![2, 2])));
@@ -331,8 +335,8 @@ mod tests {
 
         assert_eq!(cell.d_h_next, None);
 
-        let _ = cell.backward(&grad, None);
-        let _ = cell.backward(&grad, None);
+        let _ = cell.backward(&grad);
+        let _ = cell.backward(&grad);
 
         let mut optim = SGDConfig::new()
             .with_learn_rate(1.0);
