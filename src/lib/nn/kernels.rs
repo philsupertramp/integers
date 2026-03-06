@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use crate::nn::XorShift64;
+use crate::nn::{XorShift64, Scalar, Numeric};
 use crate::debug::{increase_clamp_downcast};
 
 /// A global reference to our dynamically generated lookup table.
@@ -50,12 +50,13 @@ pub fn mul_mixed_scalar_scaled(a: i32, b: i32, shift: u32) -> i32 {
     result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-pub fn dot_product_scalar(a: &[i32], b: &[i32]) -> i32 {
-    let mut sum: i64 = 0;
+
+pub fn dot_product_scalar<S: Scalar>(a: &[S], b: &[S]) -> S::Acc {
+    let mut sum: S::Acc = S::Acc::zero();
     for (x, y) in a.iter().zip(b.iter()){
-        sum = sum.saturating_add((*x as i64) * (*y as i64));
+        sum = sum.add(x.mul(*y));
     }
-    sum.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    sum
 }
 
 pub fn dot_product_scalar_scaled(a: &[i32], b: &[i32], shift: u32) -> i32 {

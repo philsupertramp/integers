@@ -1,25 +1,25 @@
 use crate::nn::{Linear, ModuleInfo, Module, HasWeights, compute_shift_for_max};
 use crate::nn::activations::{Tanh};
 use crate::nn::optim::{OptimizerConfig};
-use crate::{Tensor, XorShift64, checked_add_counting};
+use crate::{Tensor, XorShift64, checked_add_counting, Scalar};
 use crate::nn::kernels;
 
 use std::any::Any;
 
-pub struct RNNCell {
-    pub w_ih: Linear,
-    pub w_hh: Linear,
-    pub act: Tanh,
-    pub h_prev: Option<Tensor<i32>>,
+pub struct RNNCell<S: Scalar> {
+    pub w_ih: Linear<S>,
+    pub w_hh: Linear<S>,
+    pub act: Tanh<S>,
+    pub h_prev: Option<Tensor<S>>,
     pub hidden_dim: usize,
 
-    d_h_next: Option<Tensor<i32>>,
+    d_h_next: Option<Tensor<S>>,
 
     pub input_shift: Option<u32>,
     pub output_shift: Option<u32>,
 }
 
-impl RNNCell {
+impl<S: Scalar + 'static> RNNCell<S> {
     pub fn new(input_dim: usize, hidden_dim: usize) -> Self {
         Self {
             w_ih: Linear::new(input_dim, hidden_dim),
@@ -71,11 +71,11 @@ impl RNNCell {
     }
 }
 
-impl Module for RNNCell {
+impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
     fn get_output_shift(&self) -> u32 {
         self.output_shift.unwrap_or(0)
     }
-    fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i32> {
+    fn forward(&mut self, input: &Tensor<S>, input_shift: u32, rng: &mut XorShift64) -> Tensor<S> {
         let batch = input.shape[0];
 
         let h = self
@@ -91,10 +91,11 @@ impl Module for RNNCell {
         let ih = self.w_ih.forward(input, input_shift, rng);
         let hh = self.w_hh.forward(h, input_shift, rng);
 
-        let mut comb = Tensor::<i32>::new(vec![batch, self.hidden_dim]);
+        let mut comb = Tensor::<S>::new(vec![batch, self.hidden_dim]);
         for i in 0..comb.data.len() {
+            // TODO
             let sum = checked_add_counting!(ih.data[i] as i32, hh.data[i] as i32, forward_wraps);
-            comb.data[i] = sum;//.clamp(-128, 127) as i32;
+            comb.data[i] = S::from_i32(sum);//.clamp(-128, 127) as i32;
         }
 
         // TODO: Shift is for sure wrong!
@@ -108,7 +109,7 @@ impl Module for RNNCell {
         self.h_prev = Some(h_next.clone());
         h_next
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
         let combined_grad = match self.d_h_next.take() {
             Some(carry) => {
                 let mut combined = grad_output.clone();
@@ -168,8 +169,8 @@ impl Module for RNNCell {
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
 
-impl HasWeights for RNNCell {
-    fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
+impl<S: Scalar> HasWeights<S> for RNNCell<S> {
+    fn get_all_weights(&self) -> Vec<&Tensor<S::Acc>> {
         vec![
             &self.w_ih.weights.master,
             &self.w_ih.bias.master,

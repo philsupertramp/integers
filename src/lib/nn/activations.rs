@@ -1,39 +1,39 @@
-use crate::{Tensor, XorShift64};
+use crate::{Tensor, XorShift64, Scalar, Numeric};
 use crate::nn::{ModuleInfo, Module, compute_shift_for_max};
 use crate::nn::kernels;
 
 use std::any::Any;
 
-pub struct ReLU {
-    pub cache: Vec<Tensor<i32>>,
+pub struct ReLU<S: Scalar> {
+    pub cache: Vec<Tensor<S>>,
     /// Automatically tracks what shift was applied to inputs
     pub input_shift: Option<u32>,
     pub output_shift: Option<u32>,
 }
 
-impl Default for ReLU {
+impl<S: Scalar> Default for ReLU<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ReLU {
+impl<S: Scalar> ReLU<S> {
     pub fn new() -> Self {
         Self { cache: Vec::new(), input_shift: None, output_shift: None }
     }
 }
 
-impl Module for ReLU {
+impl<S: Scalar + 'static> Module<S> for ReLU<S> {
     fn get_output_shift(&self) -> u32 {
         self.output_shift.expect("ReLU::get_output_shift: Didn't call forward!")
     }
 
-    fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32> {
+    fn forward(&mut self, input: &Tensor<S>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<S> {
         self.input_shift = Some(input_shift);
         self.output_shift = Some(input_shift);
 
         self.cache.push(input.clone());
-        let mut output = Tensor::<i32>::new(input.shape.clone());
+        let mut output = Tensor::<S>::new(input.shape.clone());
         for idx in 0..input.data.len() {
             output.data[idx] = if input.data[idx] > 0 {
                 input.data[idx]
@@ -43,12 +43,12 @@ impl Module for ReLU {
         }
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
         let input = self
             .cache
             .pop()
             .expect("ReLU::backward: No state registered. Perform forward pass first!");
-        let mut output = Tensor::<i32>::new(grad_output.shape.clone());
+        let mut output = Tensor::<S::Acc>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
             output.data[o] = if input.data[o] > 0 {
                 grad_output.data[o]
@@ -76,32 +76,33 @@ impl Module for ReLU {
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
 
-pub struct Tanh {
-    pub cache: Vec<Tensor<i32>>,
+pub struct Tanh<S: Scalar> {
+    pub cache: Vec<Tensor<S>>,
     /// Automatically tracks what shift was applied to inputs
     pub input_shift: Option<u32>,
     pub output_shift: Option<u32>,
 }
 
-impl Default for Tanh {
+impl<S: Scalar> Default for Tanh<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Tanh {
+impl<S: Scalar> Tanh<S> {
     pub fn new() -> Self {
         Self { cache: Vec::new(), input_shift: None, output_shift: None }
     }
 }
 
-impl Module for Tanh {
-    fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32> {
+impl<S: Scalar + 'static> Module<S> for Tanh<S> {
+    fn forward(&mut self, input: &Tensor<S>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<S> {
         self.input_shift = Some(input_shift);
 
         self.cache.push(input.clone());
-        let mut output = Tensor::<i32>::new(input.shape.clone());
+        let mut output = Tensor::<S>::new(input.shape.clone());
         for (o, &x) in output.data.iter_mut().zip(&input.data) {
+            // TODO
             *o = kernels::tanh_i8(x.clamp(-128, 127) as i8) as i32;
         }
 
@@ -117,7 +118,7 @@ impl Module for Tanh {
 
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
         let input = self
             .cache
             .pop()
@@ -128,8 +129,9 @@ impl Module for Tanh {
             .expect("Tanh::backward: No state registered. Perform forward pass first.");
 
 
-        let mut output = Tensor::<i32>::new(grad_output.shape.clone());
+        let mut output = Tensor::<S::Acc>::new(grad_output.shape.clone());
         for o in 0..grad_output.data.len() {
+            // TODO
             let t = kernels::tanh_i8(input.data[o] as i8) as i64;
             let dtanh_num = (127 * 127) - (t * t); // [0, 16129]
             let grad = grad_output.data[o] as i64;

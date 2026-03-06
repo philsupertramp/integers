@@ -15,6 +15,75 @@ use std::ops::{Shr, Shl};
 use crate::nn::kernels;
 
 
+pub trait Numeric: Copy + Clone + Default + fmt::Debug {
+    fn add(self, other: Self) -> Self;
+    fn sub(self, other: Self) -> Self;
+    fn mul(self, other: Self) -> Self;
+    fn div(self, other: Self) -> Self;
+    fn zero() -> Self { Self::default() }
+}
+
+impl Numeric for f32 {
+    fn add(self, other: Self) -> Self { self + other }
+    fn sub(self, other: Self) -> Self { self - other }
+    fn mul(self, other: Self) -> Self { self * other }
+    fn div(self, other: Self) -> Self { self / other }
+}
+
+impl Numeric for i32 {
+    fn add(self, other: Self) -> Self { self.saturating_add(other) }
+    fn sub(self, other: Self) -> Self { self.saturating_sub(other) }
+    fn mul(self, other: Self) -> Self { self.saturating_mul(other) }
+    fn div(self, other: Self) -> Self { if other == 0 { 0 } else { self / other } }
+}
+
+pub trait Scalar: Copy + Clone + Default + fmt::Debug {
+    type Acc: Numeric;
+
+    /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
+    /// stochastic downcasting)
+    fn downcast(acc: Self::Acc, shift: u32, rng: &mut XorShift64) -> Self;
+
+    /// cast the scalar from normalized float [0, 1] or [-1, 1] to the desired scalar space.
+    /// E.g. for i8 from [-1, 1] to [-127, 127]
+    fn from_normalized(val: f32) -> Self;
+
+    /// Casts own value to accumulator type
+    fn into_acc(self) -> Self::Acc;
+
+    fn from_i32(self, val: i32) -> Self::Acc;
+    fn to_f32(self) -> f32;
+
+    /// Multiplies two scalars and produces Acc
+    /// for instance two i8 values produce a i32 value
+    fn mul(self, other: Self) -> Self::Acc;
+}
+
+impl Scalar for f32 {
+    type Acc = f32;
+
+    fn from_normalized(val: f32) -> f32 { val }
+    fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
+    fn to_f32(self) -> f32 { self }
+    fn from_i32(self, val: i32) -> f32 { val as f32 }
+    fn into_acc(self) -> f32 { self }
+    fn mul(self, other: Self) -> f32 { self * other }
+}
+
+impl Scalar for i32 {
+    type Acc = i32;
+
+    fn from_normalized(val: f32) -> i32 {
+        (val * Self::Acc::MAX as f32).round().clamp(Self::Acc::MIN as f32, Self::Acc::MAX as f32) as i32
+    }
+    fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
+    fn to_f32(self) -> f32 { self as f32 / i32::MAX as f32 }
+    fn from_i32(self, val: i32) -> i32 { val }
+    fn into_acc(self) -> i32 { self }
+    fn mul(self, other: Self) -> i32 { self * other }
+}
+
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tensor<T>
 where
@@ -189,54 +258,6 @@ where
             data: shifted_data,
             shape: self.shape.clone(),
         }
-    }
-}
-
-pub trait Scalar: Copy + Clone + Default + fmt::Debug {
-    type Acc: Copy;
-
-    /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
-    /// stochastic downcasting)
-    fn downcast(acc: Self::Acc, shift: u32, rng: &mut XorShift64) -> Self;
-
-    /// cast the scalar from normalized float [0, 1] or [-1, 1] to the desired scalar space.
-    /// E.g. for i8 from [-1, 1] to [-127, 127]
-    fn from_normalized(val: f32) -> Self;
-
-    //TODO might be irrelevant
-    /// cast the scalar value to f32
-    fn to_f32(self) -> f32;
-}
-
-impl Scalar for f32 {
-    type Acc = f32;
-
-    fn from_normalized(val: f32) -> f32 {
-        val
-    }
-
-    fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self {
-        acc / (1 << shift) as f32
-    }
-
-    fn to_f32(self) -> f32 {
-        self
-    }
-}
-
-impl Scalar for i32 {
-    type Acc = i32;
-
-    fn from_normalized(val: f32) -> i32 {
-        (val * i32::MAX as f32).round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
-    }
-
-    fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self {
-        kernels::stochastic_downcast(acc, shift, rng)
-    }
-
-    fn to_f32(self) -> f32 {
-        self as f32 / i32::MAX as f32
     }
 }
 

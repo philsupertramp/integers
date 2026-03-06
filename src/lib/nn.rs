@@ -9,7 +9,7 @@ pub mod rnn;
 #[path = "nn/activations.rs"]
 pub mod activations;
 
-use crate::{Tensor, XorShift64};
+use crate::{Tensor, XorShift64, Scalar};
 use crate::nn::optim::{OptimizerConfig, OptimizerState};
 use crate::{checked_add_counting};
 
@@ -41,7 +41,8 @@ impl ModuleInfo {
         )
     }
 }
-pub trait Module: Any {
+
+pub trait Module<S: Scalar>: Any {
     /// Implements a forward pass for the module.
     ///
     /// Must keep track of internal scale shifts
@@ -68,7 +69,7 @@ pub trait Module: Any {
     ///     output_shift: Option<u32>,
     /// }
     ///
-    /// impl Module for XPlusN {
+    /// impl<S: Scalar + 'static> Module<S> for XPlusN {
     ///     fn backward(&mut self, grad: &Tensor<i32>) -> Tensor<i32> {
     ///         grad.clone()
     ///     }
@@ -99,8 +100,8 @@ pub trait Module: Any {
     /// assert_eq!(output.data[1], 3);
     /// assert_eq!(output.data[2], 4);
     /// ```
-    fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i32>;
-    fn backward(&mut self, grad: &Tensor<i32>) -> Tensor<i32>;
+    fn forward(&mut self, input: &Tensor<S>, input_shift: u32, rng: &mut XorShift64) -> Tensor<S>;
+    fn backward(&mut self, grad: &Tensor<S::Acc>) -> Tensor<S::Acc>;
 
     /// quantize i32 master weights -> i32 storage. No-op for non-parameterized modules.
     fn sync_weights(&mut self, _rng: &mut XorShift64) {}
@@ -142,7 +143,7 @@ pub trait Module: Any {
         }
     }
 
-    fn restore_with_shift(&self, data: &Tensor<i32>, shift: u32) -> Tensor<i32>{
+    fn restore_with_shift(&self, data: &Tensor<S>, shift: u32) -> Tensor<S>{
         data << shift
     }
 
@@ -151,15 +152,15 @@ pub trait Module: Any {
 }
 
 #[derive(Debug)]
-pub struct Params {
+pub struct Params<S: Scalar> {
     /// Weights used for training
-    pub master: Tensor<i32>,
+    pub master: Tensor<S::Acc>,
 
     /// Actual weights for inference
-    pub storage: Tensor<i32>,
+    pub storage: Tensor<S::Acc>,
 
     /// Accumulated gradient from backward pass
-    pub grads: Option<Tensor<i32>>,
+    pub grads: Option<Tensor<S::Acc>>,
 
     /// State of optimizer
     pub state: Option<OptimizerState>,
@@ -174,13 +175,13 @@ pub struct Params {
     pub quant_shift: u32,
 }
 
-impl Params {
+impl<S: Scalar> Params<S> {
     pub fn new(shape: Vec<usize>, shift: u32) -> Self {
         // shift >= 0 given due to u32
         assert!(shift <= 8, "Weight shift must be 0-8, got {}", shift);
         Self {
-            master: Tensor::new(shape.clone()),
-            storage: Tensor::new(shape),
+            master: Tensor::<S::Acc>::new(shape.clone()),
+            storage: Tensor::<S::Acc>::new(shape),
             grads: None,
             state: None,
             quant_shift: shift,
@@ -208,24 +209,24 @@ impl Params {
 
     pub fn sync(&mut self, rng: &mut XorShift64) {
         for (m, s) in self.master.data.iter().zip(self.storage.data.iter_mut()) {
-            *s = kernels::stochastic_downcast(*m, self.quant_shift, rng);
+            *s = S::downcast(*m, self.quant_shift, rng);
         }
     }
 
-    pub fn accumulate_grads(&mut self, new_grads: &Tensor<i32>) {
+    pub fn accumulate_grads(&mut self, new_grads: &Tensor<S::Acc>) {
         match self.grads.as_mut() {
             Some(existing) => {
                 // Saturating add to avoid wrapping on large accumulated signals
                 for (e, n) in existing.data.iter_mut().zip(new_grads.data.iter()) {
-                    *e = e.saturating_add(*n as i32);
+                    *e = e.add(*n);
                 }
             }
             None => {
-                let mut i32_grads = Tensor::<i32>::new(new_grads.shape.clone());
+                let mut grads = Tensor::<S::Acc>::new(new_grads.shape.clone());
                 for (i, &n) in new_grads.data.iter().enumerate() {
-                    i32_grads.data[i] = n as i32;
+                    grads.data[i] = S::from_normalized(n);
                 }
-                self.grads = Some(i32_grads);
+                self.grads = Some(grads);
             }
         }
     }
@@ -256,7 +257,7 @@ pub fn compute_shift_for_max(max_magnitude: u32) -> u32 {
     shift.max(0).min(8)
 }
 
-pub trait HasWeights {
+pub trait HasWeights<S: Scalar> {
     /// Implements trait to dynamically infer current shift of weights
     ///
     /// Must implement
@@ -269,19 +270,19 @@ pub trait HasWeights {
     /// use integers::nn::{HasWeights, Params};
     ///
     /// struct MyModule {
-    ///     weights: Params,
-    ///     bias: Params,
+    ///     weights: Params<i32>,
+    ///     bias: Params<i32>,
     /// }
     ///
-    /// impl HasWeights for MyModule {
+    /// impl HasWeights<i32> for MyModule {
     ///     fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
     ///         vec![&self.weights.master, &self.bias.master]
     ///     }
     /// }
     ///
     /// let module = MyModule {
-    ///     weights: Params::new(vec![2, 1], 0),
-    ///     bias: Params::new(vec![1, 1], 0),
+    ///     weights: Params::<i32>::new(vec![2, 1], 0),
+    ///     bias: Params::<i32>::new(vec![1, 1], 0),
     /// };
     ///
     /// // magnitude is 0, so we fall back to 4
@@ -290,7 +291,7 @@ pub trait HasWeights {
 
     /// Get all weight parameters (master i32 tensors) in this module.
     /// Useful for analysis, initialization, and automatic shift detection.
-    fn get_all_weights(&self) -> Vec<&Tensor<i32>>;
+    fn get_all_weights(&self) -> Vec<&Tensor<S::Acc>>;
     
     /// Infer an appropriate scale_shift based on weight magnitudes.
     /// Returns a shift value in the range [0, 8].
@@ -318,11 +319,11 @@ pub trait HasWeights {
 }
 
 #[derive(Debug)]
-pub struct Linear {
+pub struct Linear<S: Scalar> {
     /// all weights are of Transposed Form [out, in] for memory reasons
-    pub weights: Params,
-    pub bias: Params,
-    pub cache: Vec<Tensor<i32>>,
+    pub weights: Params<S>,
+    pub bias: Params<S>,
+    pub cache: Vec<Tensor<S>>,
 
 
     /// Used to track what shift was applied to inputs
@@ -331,7 +332,7 @@ pub struct Linear {
     pub output_shift: u32,
 }
 
-impl Linear {
+impl<S: Scalar> Linear<S> {
     pub fn new(input_dim: usize, output_dim: usize) -> Self {
         let acc_shift = (usize::BITS - input_dim.leading_zeros()) as u32; // ceil(log2)
         let back_acc_shift = (usize::BITS - output_dim.leading_zeros()) as u32;
@@ -360,7 +361,7 @@ impl Linear {
     }
 }
 
-impl Module for Linear {
+impl<S: Scalar + 'static> Module<S> for Linear<S> {
     fn zero_grads(&mut self){
         self.weights.zero_grads();
         self.bias.zero_grads();
@@ -375,7 +376,7 @@ impl Module for Linear {
         self.output_shift
     }
 
-    fn forward(&mut self, raw_input: &Tensor<i32>, input_shift: u32, rng: &mut XorShift64) -> Tensor<i32> {
+    fn forward(&mut self, raw_input: &Tensor<S>, input_shift: u32, rng: &mut XorShift64) -> Tensor<S> {
         assert_eq!(
             raw_input.shape[1], self.weights.storage.shape[1],
             "Linear::forward: Input in wrong dimension for weights! {} vs {}",
@@ -385,28 +386,18 @@ impl Module for Linear {
         let input_dim = raw_input.shape[1];
         let output_dim = self.weights.storage.shape[0];
 
-        let input = raw_input.clone();//self.restore_with_shift(&raw_input, input_shift);
+        let input = raw_input.clone();
 
         self.cache.push(input.clone());
-        //let mut out = Tensor::new(vec![batch, output_dim]);
-        let mut out_raw = Tensor::<i32>::new(vec![batch, output_dim]);
+        let mut out_raw = Tensor::<S>::new(vec![batch, output_dim]);
 
         for b in 0..batch {
             let in_row = &input.data[b * input_dim..(b + 1) * input_dim];
             for o in 0..output_dim {
                 let w_row = &self.weights.storage.data[o * input_dim..(o + 1) * input_dim];
-
-                let raw_val = kernels::stochastic_downcast(
-                    kernels::dot_product_scalar(in_row, w_row),
-                    self.weights.quant_shift + self.input_shift,
-                    rng
-                );
-
-                out_raw.data[b * output_dim + o] = checked_add_counting!(
-                    raw_val as i64,
-                    self.bias.storage.data[o] as i64,
-                    forward_wraps
-                ) as i32;
+                let mut raw_val = kernels::dot_product_scalar::<S>(in_row, w_row);
+                raw_val = raw_val.add(self.bias.storage.data[o].into_acc());
+                out_raw.data[b * output_dim + o] = S::downcast(raw_val, self.weights.shift + self.input_shift, rng);
             }
         }
 
@@ -428,7 +419,7 @@ impl Module for Linear {
         out_raw
     }
 
-    fn backward(&mut self, shifted_grad_output: &Tensor<i32>) -> Tensor<i32> {
+    fn backward(&mut self, shifted_grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
         // not required to shift anymore, we did that in the forward pass already
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward");
 
@@ -445,14 +436,12 @@ impl Module for Linear {
         let input_dim = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
 
-        let mut grad_input = Tensor::<i32>::new(vec![batch, input_dim]);
-        let mut grad_weights = Tensor::<i32>::new(vec![output_dim, input_dim]);
-        let mut grad_bias = Tensor::<i32>::new(vec![output_dim]);
+        let mut grad_input = Tensor::<S::Acc>::new(vec![batch, input_dim]);
+        let mut grad_weights = Tensor::<S::Acc>::new(vec![output_dim, input_dim]);
+        let mut grad_bias = Tensor::<S::Acc>::new(vec![output_dim]);
 
         let grad_output = shifted_grad_output; //shifted_grad_output >> output_shift;
                                                //
-        let weight_shift: i32 = (self.output_shift + self.input_shift) as i32 - self.weights.quant_shift as i32;
-
         for b in 0..batch {
             for o in 0..output_dim {
                 let g = grad_output.data[b * output_dim + o];
@@ -461,45 +450,28 @@ impl Module for Linear {
                 }
 
                 // Bias update is an accumulator, so apply gshift
-                grad_bias.data[o] = grad_bias.data[o].saturating_add(g);
+                grad_bias.data[o] = grad_bias.data[o].add(
+                    g.div(S::Acc::from_i32(1 << self.input_shift))
+                );
 
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
+                    let w = self.weights.storage.data[o * input_dim + i];
 
-                    let dw = if weight_shift >= 0 {
-                        kernels::mul_mixed_scalar(g, x) >> weight_shift
-                    } else {
-                        kernels::mul_mixed_scalar(g, x) << (-1 * weight_shift)
-                    };
+                    let weight_align = (self.output_shift + self.input_shift).saturating_add(self.weights.quant_shift);
 
                     // --- Weight Gradient ---
                     // dL/dw = grad_output * input_i32
-                    // Both terms are quantized:
-                    //  grad_output is quantized by output_shift
-                    //  input_i32 is quantized by input_shift
-                    // Weight update is an accumulator, so apply gshift
-                    grad_weights.data[o * input_dim + i] = checked_add_counting!(
-                        grad_weights.data[o * input_dim + i], 
-                        dw as i32,
-                        backward_wraps
+                    let dw = g.mul(x.into_acc());
+                    grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i].add(
+                        dw.div(S::Acc::from_i32(1 << weight_align))
                     );
-
-                    let w = self.weights.storage.data[o * input_dim + i];
 
                     // --- Input Gradient ---
                     // dL/d(input) = grad_output * weight_i32
-                    // Both terms are quantized:
-                    //  grad_output is quantized by output_shift
-                    //  input_i32 is quantized by weight_shift
-                    let dx = {
-                        kernels::mul_mixed_scalar(g, w) >> (self.weights.quant_shift + self.output_shift)
-                    };
-
-                    // Input gradient flows back through the network, apply wshift!
-                    grad_input.data[b * input_dim + i] = checked_add_counting!(
-                        grad_input.data[b * input_dim + i],
-                        dx as i32,
-                        backward_wraps
+                    let dx = g.mul(w.into_acc());
+                    grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i].add(
+                        dx.div(S::Acc::from_i32(1 << (self.weights.quant_shift + self.output_shift)))
                     );
                 }
             }
@@ -547,29 +519,29 @@ impl Module for Linear {
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
 
-impl HasWeights for Linear {
-    fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
+impl<S: Scalar> HasWeights<S> for Linear<S> {
+    fn get_all_weights(&self) -> Vec<&Tensor<S::Acc>> {
         vec![&self.weights.master, &self.bias.master]
     }
 }
 
 
-pub struct Sequential {
-    pub modules: Vec<Box<dyn Module>>,
+pub struct Sequential<S: Scalar> {
+    pub modules: Vec<Box<dyn Module<S>>>,
 }
 
-impl Default for Sequential {
+impl<S: Scalar> Default for Sequential<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Sequential {
+impl<S: Scalar> Sequential<S> {
     pub fn new() -> Self {
         Self { modules: vec![] }
     }
 
-    pub fn add(&mut self, m: impl Module + 'static) -> &mut Self {
+    pub fn add(&mut self, m: impl Module<S> + 'static) -> &mut Self {
         self.modules.push(Box::new(m));
         self
     }
@@ -581,8 +553,8 @@ impl Sequential {
     }
 }
 
-impl Module for Sequential {
-    fn forward(&mut self, input: &Tensor<i32>, mut input_shift: u32, rng: &mut XorShift64) -> Tensor<i32> {
+impl<S: Scalar + 'static> Module<S> for Sequential<S> {
+    fn forward(&mut self, input: &Tensor<S>, mut input_shift: u32, rng: &mut XorShift64) -> Tensor<S> {
         let mut output = input.clone();
         for m in self.modules.iter_mut() {
             output = m.forward(&output, input_shift, rng);
@@ -590,7 +562,7 @@ impl Module for Sequential {
         }
         output
     }
-    fn backward(&mut self, grad_output: &Tensor<i32>) -> Tensor<i32> {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
         let mut output = grad_output.clone();
         for m in self.modules.iter_mut().rev() {
             output = m.backward(&output);
