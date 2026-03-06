@@ -1,18 +1,18 @@
 use crate::nn::kernels;
-use crate::{checked_sub_counting, checked_add_counting};
+use crate::{checked_sub_counting, checked_add_counting, Scalar, Numeric};
 
 use std::fmt;
 
-pub trait OptimizerConfig {
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState, quant_shift: u32);
-    fn init_state(&self, len: usize) -> OptimizerState;
+pub trait OptimizerConfig<S: Scalar> {
+    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32);
+    fn init_state(&self, len: usize) -> OptimizerState<S>;
 }
 
 #[derive(Debug, PartialEq)]
-pub enum OptimizerState {
+pub enum OptimizerState<S: Scalar> {
     None,
-    SGD { velocity: Vec<i32> },
-    Adam { m: Vec<i32>, v: Vec<i32> },
+    SGD { velocity: Vec<S::Acc> },
+    Adam { m: Vec<S::Acc>, v: Vec<S::Acc> },
 }
 
 // SGD
@@ -60,17 +60,17 @@ impl SGDConfig {
     }
 }
 
-impl OptimizerConfig for SGDConfig {
-    fn init_state(&self, len: usize) -> OptimizerState {
+impl<S: Scalar> OptimizerConfig<S> for SGDConfig {
+    fn init_state(&self, len: usize) -> OptimizerState<S> {
         match self.momentum_shift {
             Some(_) => OptimizerState::SGD {
-                velocity: vec![0; len],
+                velocity: vec![S::Acc::zero(); len],
             },
             None => OptimizerState::None,
         }
     }
 
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState, quant_shift: u32) {
+    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32) {
         assert_eq!(
             weights.len(),
             grads.len(),
@@ -78,35 +78,23 @@ impl OptimizerConfig for SGDConfig {
             weights.len(),
             grads.len(),
         );
-        let lr_div = 1 << self.lr_shift;
+        let lr_div = S::Acc::from_i32(1 << self.lr_shift);
 
         match (self.momentum_shift, state) {
             (Some(m_shift), OptimizerState::SGD { velocity }) => {
-                let m_div = 1 << m_shift;
+                let m_div = S::Acc::from_i32(1 << m_shift);
                 for ((w, m), g) in weights
                     .iter_mut()
                     .zip(velocity.iter_mut())
                     .zip(grads.iter())
                 {
-                    let mut decay = *m / m_div;
-                    if decay == 0 && *m != 0 {
-                        decay = m.signum();
-                    }
-                    *m = m.saturating_sub(decay).saturating_add(*g);
-                    *w = checked_sub_counting!(
-                        w,
-                        (*m / lr_div) >> quant_shift,
-                        backward_wraps
-                    );
+                    *m = m.sub(m.div(m_div)).add(g.div(m_div));
+                    *w = w.sub(m.div(lr_div));
                 }
             }
             _ => {
                 for (w, g) in weights.iter_mut().zip(grads) {
-                    *w = checked_sub_counting!(
-                        w,
-                        (*g / lr_div) >> quant_shift,
-                        backward_wraps
-                    );
+                    *w = w.sub(g.div(lr_div));
                 }
             }
         }
@@ -170,39 +158,29 @@ impl fmt::Display for AdamConfig {
         write!(f, "Adam(lr={}, β1={}, β2={})", self.lr_shift, self.b1_shift, self.b2_shift)
     }
 }
-impl OptimizerConfig for AdamConfig {
-    fn init_state(&self, len: usize) -> OptimizerState {
+impl<S: Scalar> OptimizerConfig<S> for AdamConfig {
+    fn init_state(&self, len: usize) -> OptimizerState<S> {
         OptimizerState::Adam {
-            m: vec![0; len],
-            v: vec![0i32; len],
+            m: vec![S::Acc::zero(); len],
+            v: vec![S::Acc::zero(); len],
         }
     }
 
-    fn update(&self, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState, quant_shift: u32) {
+    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32) {
         if let OptimizerState::Adam { m, v } = state {
-            let b1_div = 1 << self.b1_shift;
-            let b2_div = 1 << self.b2_shift;
-            let lr_div = 1 << self.lr_shift;
+            let b1_div = S::Acc::from_i32(1 << self.b1_shift);
+            let b2_div = S::Acc::from_i32(1 << self.b2_shift);
+            let lr_div = S::Acc::from_i32(1 << self.lr_shift);
+
+            let eps = S::Acc::from_i32(self.eps);
 
             for i in 0..weights.len() {
                 let g = grads[i];
-                let g_64 = grads[i] as i64;
-                m[i] = checked_add_counting!(
-                    m[i].saturating_sub(m[i] / b1_div),
-                    (g / b1_div) >> quant_shift,
-                    backward_wraps
-                );
-                v[i] = checked_add_counting!(
-                    v[i].saturating_sub(v[i] / (b2_div as i32)),
-                    ((g_64 * g_64 / b2_div) >> quant_shift ) as i32,
-                    backward_wraps
-                );
-                let denom = kernels::isqrt_64(v[i].max(0) as u64) as i32 + self.eps;
-                weights[i] = checked_sub_counting!(
-                    weights[i],
-                    (m[i] / lr_div) / denom,
-                    backward_wraps
-                );
+                m[i] = m[i].sub(m[i].div(b1_div)).add(g.div(b1_div));
+                v[i] = v[i].sub(v[i].div(b2_div)).add(g.mul(g).div(b2_div));
+
+                let denom = v[i].sqrt().add(eps);
+                weights[i] = weights[i].sub(m[i].div(lr_div).div(denom));
             }
         }
     }

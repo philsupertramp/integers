@@ -6,9 +6,7 @@ use std::any::Any;
 
 pub struct ReLU<S: Scalar> {
     pub cache: Vec<Tensor<S>>,
-    /// Automatically tracks what shift was applied to inputs
-    pub input_shift: Option<u32>,
-    pub output_shift: Option<u32>,
+    pub s_x_cache: Vec<u32>,
 }
 
 impl<S: Scalar> Default for ReLU<S> {
@@ -19,44 +17,35 @@ impl<S: Scalar> Default for ReLU<S> {
 
 impl<S: Scalar> ReLU<S> {
     pub fn new() -> Self {
-        Self { cache: Vec::new(), input_shift: None, output_shift: None }
+        Self { cache: Vec::new(), s_x_cache: Vec::new() }
     }
 }
 
 impl<S: Scalar + 'static> Module<S> for ReLU<S> {
     fn get_output_shift(&self) -> u32 {
-        self.output_shift.expect("ReLU::get_output_shift: Didn't call forward!")
+        0
     }
 
-    fn forward(&mut self, input: &Tensor<S>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<S> {
-        self.input_shift = Some(input_shift);
-        self.output_shift = Some(input_shift);
-
+    fn forward(&mut self, input: &Tensor<S>, s_x: u32, _rng: &mut XorShift64) -> (Tensor<S>, u32) {
         self.cache.push(input.clone());
+        self.s_x_cache.push(s_x);
         let mut output = Tensor::<S>::new(input.shape.clone());
-        for idx in 0..input.data.len() {
-            output.data[idx] = if input.data[idx] > 0 {
-                input.data[idx]
-            } else {
-                0
-            };
+        for (o, &x) in output.data.iter_mut().zip(input.data.iter()) {
+            *o = S::relu(x);
         }
-        output
+        (output, s_x)
     }
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
         let input = self
             .cache
             .pop()
             .expect("ReLU::backward: No state registered. Perform forward pass first!");
+        let s_x = self.s_x_cache.pop().expect("ReLU::backward: Backward called without forward.");
         let mut output = Tensor::<S::Acc>::new(grad_output.shape.clone());
-        for o in 0..grad_output.data.len() {
-            output.data[o] = if input.data[o] > 0 {
-                grad_output.data[o]
-            } else {
-                0
-            };
+        for (o, (&g, &x)) in output.data.iter_mut().zip(grad_output.data.iter().zip(input.data.iter())) {
+            *o = if S::is_positive(x) { g } else { S::Acc::zero() };
         }
-        output
+        (output, s_g)
     }
     fn memory_report(&self) -> (usize, usize) {
         let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
@@ -78,9 +67,7 @@ impl<S: Scalar + 'static> Module<S> for ReLU<S> {
 
 pub struct Tanh<S: Scalar> {
     pub cache: Vec<Tensor<S>>,
-    /// Automatically tracks what shift was applied to inputs
-    pub input_shift: Option<u32>,
-    pub output_shift: Option<u32>,
+    pub s_x_cache: Vec<u32>,
 }
 
 impl<S: Scalar> Default for Tanh<S> {
@@ -91,58 +78,35 @@ impl<S: Scalar> Default for Tanh<S> {
 
 impl<S: Scalar> Tanh<S> {
     pub fn new() -> Self {
-        Self { cache: Vec::new(), input_shift: None, output_shift: None }
+        Self { cache: Vec::new(), s_x_cache: Vec::new() }
     }
 }
 
 impl<S: Scalar + 'static> Module<S> for Tanh<S> {
-    fn forward(&mut self, input: &Tensor<S>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<S> {
-        self.input_shift = Some(input_shift);
-
+    fn forward(&mut self, input: &Tensor<S>, s_x: u32, _rng: &mut XorShift64) -> (Tensor<S>, u32) {
         self.cache.push(input.clone());
+        self.s_x_cache.push(s_x);
         let mut output = Tensor::<S>::new(input.shape.clone());
         for (o, &x) in output.data.iter_mut().zip(&input.data) {
-            // TODO
-            *o = kernels::tanh_i8(x.clamp(-128, 127) as i8) as i32;
+            *o = S::tanh(x);
         }
-
-        let max_magnitude = output.data
-            .iter()
-            .map(|x| x.abs() as u32)
-            .max()
-            // TODO: (SHIFT#1) Potentially an issue. Empty input is shifted?
-            .unwrap_or(0);
-
-        let output_shift = compute_shift_for_max(max_magnitude);
-        self.output_shift = Some(output_shift);
-
-        output
+        (output, S::unit_shift())
     }
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
+    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
         let input = self
             .cache
             .pop()
             .expect("Tanh::backward: No state registered. Perform forward pass first.");
+        let _s_x = self.s_x_cache.pop().expect("Tanh::backward: Backward called without forward.");
 
-        let input_shift = self.input_shift.expect("Tanh::backward: No state registered. Perform forward pass first.");
-        let output_shift = self.output_shift
-            .expect("Tanh::backward: No state registered. Perform forward pass first.");
-
-
-        let mut output = Tensor::<S::Acc>::new(grad_output.shape.clone());
-        for o in 0..grad_output.data.len() {
-            // TODO
-            let t = kernels::tanh_i8(input.data[o] as i8) as i64;
-            let dtanh_num = (127 * 127) - (t * t); // [0, 16129]
-            let grad = grad_output.data[o] as i64;
-            // TODO: For more accurate results we can divide by 16129
-            //       This divides by 16384
-            let dout = (grad * dtanh_num) >> 14;
-            let _shift = output_shift.saturating_sub(input_shift);
-            let adjusted = dout;// >> shift;
-            output.data[o] = adjusted.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let mut output = Tensor::<S::Acc>::new(grad.shape.clone());
+        for (o, (&g, &x)) in output.data.iter_mut().zip(grad.data.iter().zip(input.data.iter())) {
+            let t = S::tanh(x);
+            let dtanh = S::dtanh(t);
+            *o = g.mul(dtanh);
         }
-        output
+        let s_g_prev = s_g.saturating_sub(S::unit_shift());
+        (output, s_g_prev)
     }
     fn memory_report(&self) -> (usize, usize) {
         let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
@@ -159,8 +123,7 @@ impl<S: Scalar + 'static> Module<S> for Tanh<S> {
     }
 
     fn get_output_shift(&self) -> u32 {
-        self.output_shift
-            .expect("No forward call.")
+        0
     }
 
     fn as_any(&self) -> &dyn Any { self }

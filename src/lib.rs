@@ -15,12 +15,18 @@ use std::ops::{Shr, Shl};
 use crate::nn::kernels;
 
 
-pub trait Numeric: Copy + Clone + Default + fmt::Debug {
+pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
     fn add(self, other: Self) -> Self;
     fn sub(self, other: Self) -> Self;
     fn mul(self, other: Self) -> Self;
     fn div(self, other: Self) -> Self;
+    fn sqrt(self) -> Self;
     fn zero() -> Self { Self::default() }
+    fn abs(self) -> Self;
+    fn from_i32(val: i32) -> Self;
+    fn gt(self, other: Self) -> bool;
+    fn eq(self, other: Self) -> bool;
+    fn to_u32(self) -> u32;
 }
 
 impl Numeric for f32 {
@@ -28,6 +34,12 @@ impl Numeric for f32 {
     fn sub(self, other: Self) -> Self { self - other }
     fn mul(self, other: Self) -> Self { self * other }
     fn div(self, other: Self) -> Self { self / other }
+    fn sqrt(self) -> Self { self.sqrt() }
+    fn from_i32(val: i32) -> f32 { val as f32 }
+    fn abs(self) -> f32 { self.abs() }
+    fn gt(self, other: f32) -> bool { self > other }
+    fn eq(self, other: f32) -> bool { self == other }
+    fn to_u32(self) -> u32 { self as u32 }
 }
 
 impl Numeric for i32 {
@@ -35,6 +47,12 @@ impl Numeric for i32 {
     fn sub(self, other: Self) -> Self { self.saturating_sub(other) }
     fn mul(self, other: Self) -> Self { self.saturating_mul(other) }
     fn div(self, other: Self) -> Self { if other == 0 { 0 } else { self / other } }
+    fn sqrt(self) -> Self { kernels::isqrt_64(self.max(0) as u32) as i32 }
+    fn from_i32(val: i32) -> i32 { val }
+    fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
+    fn gt(self, other: i32) -> bool { self > other }
+    fn eq(self, other: i32) -> bool { self == other }
+    fn to_u32(self) -> u32 { self.max(0) as u32 }
 }
 
 pub trait Scalar: Copy + Clone + Default + fmt::Debug {
@@ -51,12 +69,29 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug {
     /// Casts own value to accumulator type
     fn into_acc(self) -> Self::Acc;
 
-    fn from_i32(self, val: i32) -> Self::Acc;
+    fn from_i32(val: i32) -> Self::Acc;
     fn to_f32(self) -> f32;
+
+    fn to_u32(self) -> u32;
 
     /// Multiplies two scalars and produces Acc
     /// for instance two i8 values produce a i32 value
     fn mul(self, other: Self) -> Self::Acc;
+
+    /// Absolute value of scalar
+    fn abs(self) -> Self;
+
+    fn relu(value: Self) -> Self;
+
+    fn tanh(value: Self) -> Self;
+    fn dtanh(value: Self) -> Self::Acc;
+
+    fn is_positive(value: Self) -> bool;
+
+    /// default shift when converting into base representation,
+    /// only required for integer types, otherwise 0
+    fn unit_shift() -> u32;
+
 }
 
 impl Scalar for f32 {
@@ -65,9 +100,22 @@ impl Scalar for f32 {
     fn from_normalized(val: f32) -> f32 { val }
     fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
     fn to_f32(self) -> f32 { self }
-    fn from_i32(self, val: i32) -> f32 { val as f32 }
+    fn to_u32(self) -> u32 { self as u32 }
+    fn from_i32(val: i32) -> f32 { val as f32 }
     fn into_acc(self) -> f32 { self }
     fn mul(self, other: Self) -> f32 { self * other }
+    fn abs(self) -> f32 { if self > self.default() { self } else { self.abs() }}
+    fn unit_shift() -> u32 { 0u32 }
+    fn is_positive(value: f32) -> bool { value > 0.0 }
+    fn relu(value: f32) -> f32 {
+        if value > 0.0 {
+            value
+        } else {
+            0.0
+        }
+    }
+    fn tanh(value: f32) -> f32 { value.tanh() }
+    fn dtanh(value: f32) -> f32 { 1.0 - value * value }
 }
 
 impl Scalar for i32 {
@@ -78,9 +126,22 @@ impl Scalar for i32 {
     }
     fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
     fn to_f32(self) -> f32 { self as f32 / i32::MAX as f32 }
-    fn from_i32(self, val: i32) -> i32 { val }
+    fn to_u32(self) -> u32 { self as u32 }
+    fn from_i32(val: i32) -> i32 { val as i32 }
     fn into_acc(self) -> i32 { self }
     fn mul(self, other: Self) -> i32 { self * other }
+    fn abs(self) -> i32 { if self > self.default() { self } else { self.abs() }}
+    fn unit_shift() -> u32 { 31u32 }
+    fn is_positive(value: i32) -> bool { value > 0 }
+    fn relu(value: i32) -> i32 {
+        if value > 0 {
+            value
+        } else {
+            0
+        }
+    }
+    fn tanh(value: i32) -> i32 { kernels::tanh_i8(value) }
+    fn dtanh(value: i32) -> i32 { i32::MAX.sub((value.mul(value)).div(i32::MAX)) }
 }
 
 

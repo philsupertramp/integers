@@ -1,7 +1,7 @@
 use crate::nn::{Linear, ModuleInfo, Module, HasWeights, compute_shift_for_max};
 use crate::nn::activations::{Tanh};
 use crate::nn::optim::{OptimizerConfig};
-use crate::{Tensor, XorShift64, checked_add_counting, Scalar};
+use crate::{Tensor, XorShift64, checked_add_counting, Scalar, Numeric};
 use crate::nn::kernels;
 
 use std::any::Any;
@@ -13,10 +13,11 @@ pub struct RNNCell<S: Scalar> {
     pub h_prev: Option<Tensor<S>>,
     pub hidden_dim: usize,
 
-    d_h_next: Option<Tensor<S>>,
+    // caches
+    s_x_cache: Vec<u32>,
+    s_h_cache: Vec<u32>,
+    d_h_next: Option<(Tensor<S::Acc>, u32)>,
 
-    pub input_shift: Option<u32>,
-    pub output_shift: Option<u32>,
 }
 
 impl<S: Scalar + 'static> RNNCell<S> {
@@ -25,11 +26,11 @@ impl<S: Scalar + 'static> RNNCell<S> {
             w_ih: Linear::new(input_dim, hidden_dim),
             w_hh: Linear::new(hidden_dim, hidden_dim),
             act: Tanh::new(),
+            s_x_cache: Vec::new(),
+            s_h_cache: Vec::new(),
             h_prev: None,
             hidden_dim,
             d_h_next: None,
-            input_shift: None,
-            output_shift: None,
         }
     }
 
@@ -42,6 +43,8 @@ impl<S: Scalar + 'static> RNNCell<S> {
         self.w_ih.cache.clear();
         self.w_hh.cache.clear();
         self.act.cache.clear();
+        self.s_x_cache.clear();
+        self.s_h_cache.clear();
     }
 
     pub fn init_weights(&mut self, rng: &mut XorShift64) {
@@ -73,69 +76,65 @@ impl<S: Scalar + 'static> RNNCell<S> {
 
 impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
     fn get_output_shift(&self) -> u32 {
-        self.output_shift.unwrap_or(0)
+        0
     }
-    fn forward(&mut self, input: &Tensor<S>, input_shift: u32, rng: &mut XorShift64) -> Tensor<S> {
+    fn forward(&mut self, input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32) {
         let batch = input.shape[0];
 
         let h = self
             .h_prev
             .get_or_insert_with(|| Tensor::new(vec![batch, self.hidden_dim]));
 
-        // h_t = tanh(W_ih * x_t + W_hh * h_{t-1})
-        // We do both linear transforms, add elementwise, then tanh.
-        // Simplest: pass through w_ih, add w_hh output, apply tanh.
-        //
-        // Note: adding two i32 tensors before tanh risks overflow.
-        // Accumulate in i32, then downcast before tanh.
-        let ih = self.w_ih.forward(input, input_shift, rng);
-        let hh = self.w_hh.forward(h, input_shift, rng);
+        let s_h = self.s_h_cache.last().copied().unwrap_or(0);
+
+        let (ih, s_ih) = self.w_ih.forward(input, s_x, rng);
+        let (hh, s_hh) = self.w_hh.forward(h, s_h, rng);
 
         let mut comb = Tensor::<S>::new(vec![batch, self.hidden_dim]);
         for i in 0..comb.data.len() {
-            // TODO
-            let sum = checked_add_counting!(ih.data[i] as i32, hh.data[i] as i32, forward_wraps);
-            comb.data[i] = S::from_i32(sum);//.clamp(-128, 127) as i32;
+            let sum = ih.data[i].into_acc().add(hh.data[i].into_acc());
+            // TODO: we might need to tune shifting here, for integer spaces
+            comb.data[i] = S::downcast(sum, 1, rng);
         }
 
-        // TODO: Shift is for sure wrong!
-        let h_next = self.act.forward(&comb, input_shift, rng);
-        let max_magnitude = h_next.data.iter().map(|x| x.abs() as u32).max().unwrap_or(1);
-        let out_shift = compute_shift_for_max(max_magnitude);
-        self.output_shift = Some(out_shift);
+        let s_comb = s_ih.min(s_hh).saturating_sub(1);
 
-        // h_next = h_next << out_shift;
+        let (h_next, s_out) = self.act.forward(&comb, s_comb, rng);
 
+        self.s_x_cache.push(s_x);
+        self.s_h_cache.push(s_out);
         self.h_prev = Some(h_next.clone());
-        h_next
+
+        (h_next, s_out)
     }
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>) -> Tensor<S::Acc> {
-        let combined_grad = match self.d_h_next.take() {
-            Some(carry) => {
+
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
+        let (combined_grad, combined_s_g) = match self.d_h_next.take() {
+            Some((carry, carry_s_g)) => {
                 let mut combined = grad_output.clone();
                 for (c, k) in combined.data.iter_mut().zip(carry.data.iter()) {
-                    *c = c.saturating_add(*k);
+                    *c = c.add(*k);
                 }
-                combined
+                (combined, s_g.min(carry_s_g))
             }
-            None => grad_output.clone(),
+            None => (grad_output.clone(), s_g),
         };
 
-        let d_comb = self.act.backward(&combined_grad);
+        let (d_comb, s_g_act) = self.act.backward(&combined_grad, combined_s_g);
 
-        let d_ih = self.w_ih.backward(&d_comb);
-        let d_hh = self.w_hh.backward(&d_comb); // compute it...
+        let (d_ih, s_g_ih) = self.w_ih.backward(&d_comb, s_g_act);
+        let (d_hh, s_g_hh) = self.w_hh.backward(&d_comb, s_g_act); // compute it...
         // d_hh should be fed back as the grad for h_prev in the next BPTT step
-        self.d_h_next = Some(d_hh);
+        self.d_h_next = Some((d_hh, s_g_hh));
 
-        d_ih
+        (d_ih, s_g_ih)
     }
     fn sync_weights(&mut self, rng: &mut XorShift64) {
         self.w_ih.sync_weights(rng);
         self.w_hh.sync_weights(rng);
     }
 
-    fn step(&mut self, optim: &dyn OptimizerConfig) {
+    fn step(&mut self, optim: &dyn OptimizerConfig<S>) {
         self.w_ih.step(optim);
         self.w_hh.step(optim);
     }
