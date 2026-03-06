@@ -4,11 +4,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::Tensor;
+use crate::{Tensor, Scalar};
 use crate::quant::{minmax_quantize, standard_score_quantize};
 use parquet::file::reader::FileReader;
 use parquet::file::reader::SerializedFileReader;
 use parquet::record::Field;
+
+use std::marker::PhantomData;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -78,28 +80,33 @@ impl DatasetConfig {
 // ─── Builder API ──────────────────────────────────────────────────────────────
 
 /// Fluent builder for dataset loading.
-pub struct DatasetBuilder {
+pub struct DatasetBuilder<S: Scalar> {
     path: std::path::PathBuf,
     config: DatasetConfig,
+
+    _phantom: PhantomData<S>,
 }
 
-impl DatasetBuilder {
+impl<S: Scalar> DatasetBuilder<S> {
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default(),
+            _phantom: PhantomData,
         }
     }
     pub fn new_csv(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default_format(FileFormat::CSV),
+            _phantom: PhantomData,
         }
     }
     pub fn new_tsv(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default_format(FileFormat::TSV),
+            _phantom: PhantomData,
         }
     }
 
@@ -107,6 +114,7 @@ impl DatasetBuilder {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default_format(FileFormat::Parquet),
+            _phantom: PhantomData,
         }
     }
 
@@ -145,23 +153,23 @@ impl DatasetBuilder {
         self
     }
 
-    pub fn load(self) -> crate::data::DataResult<crate::data::Dataset> {
+    pub fn load(self) -> crate::data::DataResult<crate::data::Dataset<S>> {
         //TODO: We should consider a caching mechanism, similar to HF's 
         //      storage approach.
         //      Loading "small" parquet files is pretty slow.
         match self.config.format {
-            FileFormat::CSV | FileFormat::TSV => load_csv(&self.path, self.config),
-            FileFormat::Parquet => load_parquet(&self.path, self.config),
+            FileFormat::CSV | FileFormat::TSV => load_csv::<S>(&self.path, self.config),
+            FileFormat::Parquet => load_parquet::<S>(&self.path, self.config),
         }
     }
 }
 
 // ─── CSV Loader ───────────────────────────────────────────────────────────────
 
-fn load_csv(
+fn load_csv<S: Scalar>(
     path: &Path,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset> {
+) -> crate::data::DataResult<crate::data::Dataset<S>> {
     let f = BufReader::new(File::open(path)?);
     let delimiter = match config.format {
         FileFormat::CSV => ',',
@@ -284,23 +292,23 @@ fn load_csv(
     }
 
     // Re-interleave into row-major layout [n, n_features]
-    let mut inp_data = vec![0i32; n_samples * n_features];
+    let mut inp_data = vec![S::default(); n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
-            *cell = columns[feat_idx][sample_idx];
+            *cell = S::from_normalized(columns[feat_idx][sample_idx] as f32);
         }
     }
 
     // One-hot targets
-    let mut tgt_data = vec![0i32; n_samples * n_classes];
+    let mut tgt_data = vec![S::default(); n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt_data[i * n_classes + lbl as usize] = 96;
+        tgt_data[i * n_classes + lbl as usize] = S::from_normalized(1.0);
     }
 
-    Ok(crate::data::Dataset {
-        inputs: Tensor::from_vec(inp_data, vec![n_samples, n_features]),
+    Ok(crate::data::Dataset::<S> {
+        inputs: Tensor::<S>::from_vec(inp_data, vec![n_samples, n_features]),
         labels,
-        targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
+        targets: Tensor::<S>::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
         input_shift,
     })
@@ -308,10 +316,10 @@ fn load_csv(
 
 // ─── Parquet Loader ───────────────────────────────────────────────────────────
 
-fn load_parquet(
+fn load_parquet<S: Scalar>(
     path: &Path,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset> {
+) -> crate::data::DataResult<crate::data::Dataset<S>> {
     let file = File::open(path)?;
     let reader = SerializedFileReader::new(file)
         .map_err(|e| crate::data::DataError::ParseError(format!("Failed to read parquet: {}", e)))?;
@@ -411,11 +419,11 @@ fn load_parquet(
 
 // ─── Common finalization ──────────────────────────────────────────────────────
 
-fn finalize_dataset(
+fn finalize_dataset<S: Scalar>(
     raw_features: Vec<Vec<f32>>,
     labels: Vec<u8>,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset> {
+) -> crate::data::DataResult<crate::data::Dataset<S>> {
     let n_samples = labels.len();
     let n_features = if raw_features.is_empty() {
         0
@@ -445,23 +453,23 @@ fn finalize_dataset(
     }
 
     // Re-interleave into row-major layout [n, n_features]
-    let mut inp_data = vec![0i32; n_samples * n_features];
+    let mut inp_data = vec![S::default(); n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
-            *cell = columns[feat_idx][sample_idx];
+            *cell = S::from_normalized(columns[feat_idx][sample_idx] as f32);
         }
     }
 
     // One-hot targets
-    let mut tgt_data = vec![0i32; n_samples * n_classes];
+    let mut tgt_data = vec![S::default(); n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt_data[i * n_classes + lbl as usize] = 96;
+        tgt_data[i * n_classes + lbl as usize] = S::from_normalized(1.0);
     }
 
-    Ok(crate::data::Dataset {
-        inputs: Tensor::from_vec(inp_data, vec![n_samples, n_features]),
+    Ok(crate::data::Dataset::<S> {
+        inputs: Tensor::<S>::from_vec(inp_data, vec![n_samples, n_features]),
         labels,
-        targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
+        targets: Tensor::<S>::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
         input_shift,
     })

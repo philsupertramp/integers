@@ -12,6 +12,8 @@ pub mod quant;
 use std::fmt;
 use std::ops::{Shr, Shl};
 
+use crate::nn::kernels;
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tensor<T>
@@ -189,6 +191,55 @@ where
         }
     }
 }
+
+pub trait Scalar: Copy + Clone + Default + fmt::Debug {
+    type Acc: Copy;
+
+    /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
+    /// stochastic downcasting)
+    fn downcast(acc: Self::Acc, shift: u32, rng: &mut XorShift64) -> Self;
+
+    /// cast the scalar from normalized float [0, 1] or [-1, 1] to the desired scalar space.
+    /// E.g. for i8 from [-1, 1] to [-127, 127]
+    fn from_normalized(val: f32) -> Self;
+
+    //TODO might be irrelevant
+    /// cast the scalar value to f32
+    fn to_f32(self) -> f32;
+}
+
+impl Scalar for f32 {
+    type Acc = f32;
+
+    fn from_normalized(val: f32) -> f32 {
+        val
+    }
+
+    fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self {
+        acc / (1 << shift) as f32
+    }
+
+    fn to_f32(self) -> f32 {
+        self
+    }
+}
+
+impl Scalar for i32 {
+    type Acc = i32;
+
+    fn from_normalized(val: f32) -> i32 {
+        (val * i32::MAX as f32).round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+    }
+
+    fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self {
+        kernels::stochastic_downcast(acc, shift, rng)
+    }
+
+    fn to_f32(self) -> f32 {
+        self as f32 / i32::MAX as f32
+    }
+}
+
 
 pub fn argmax(tensor: &Tensor<i32>, axis: Option<usize>) -> Vec<usize> {
     let axis = axis.unwrap_or(1);
@@ -467,6 +518,11 @@ mod tests {
             assert!(val <= 12);
             assert!(val > 0);
         }
+    }
+
+    #[test]
+    fn test_scalar_tensor(){
+        let tensor = Tensor::<f32>::new(vec![1, 1]);
     }
 
 }

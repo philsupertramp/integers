@@ -10,10 +10,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
     const EPOCHS: i32 = 8000;
-    const SCALE_SHIFT: u32 = 1;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 12;
-    optim.momentum_shift = Some(4);
+    optim.lr_shift = 2;
+    optim.momentum_shift = Some(0);
 
     let mut l1 = Linear::new(4, 8);
     let mut l2 = Linear::new(8, 3);
@@ -29,14 +28,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(l2);
 
     // Load datasets (unwrap Results with ?)
-    let train_ds = DatasetBuilder::new("data/iris_train.tsv")
+    let train_ds = DatasetBuilder::<i32>::new("data/iris_train.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
         .with_quantization(QuantizationMethod::StandardScore)
         .load()?;  // ← Unwrap Result<Dataset, DataError>
     
-    let test_ds = DatasetBuilder::new("data/iris_test.tsv")
+    let test_ds = DatasetBuilder::<i32>::new("data/iris_test.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)

@@ -1,6 +1,6 @@
 use std::io::{self};
 
-use crate::Tensor;
+use crate::{Tensor, Scalar};
 
 // ─── Error type ──────────────────────────────────────────────────────────────
 
@@ -44,15 +44,15 @@ pub type DataResult<T> = Result<T, DataError>;
 /// `inputs`  shape: [n_samples, n_features]
 /// `labels`  length: n_samples  (class index 0..n_classes)
 /// `targets` shape: [n_samples, n_classes]  (one-hot i32, see module docs)
-pub struct Dataset {
-    pub inputs:   Tensor<i32>,
+pub struct Dataset<S: Scalar> {
+    pub inputs:   Tensor<S>,
     pub labels:   Vec<u8>,
-    pub targets:  Tensor<i32>,
+    pub targets:  Tensor<S>,
     pub n_classes: usize,
     pub input_shift: u32,
 }
 
-impl Dataset {
+impl<S: Scalar + std::cmp::Ord> Dataset<S> {
     pub fn len(&self) -> usize {
         self.labels.len()
     }
@@ -66,21 +66,21 @@ impl Dataset {
     }
 
     /// Return a single sample as a [1, n_features] tensor (no allocation on inputs slice).
-    pub fn get_input(&self, idx: usize) -> Tensor<i32> {
+    pub fn get_input(&self, idx: usize) -> Tensor<S> {
         let nf = self.n_features();
         let start = idx * nf;
-        Tensor::from_vec(self.inputs.data[start..start + nf].to_vec(), vec![1, nf])
+        Tensor::<S>::from_vec(self.inputs.data[start..start + nf].to_vec(), vec![1, nf])
     }
 
     /// Return a single one-hot target as a [1, n_classes] tensor.
-    pub fn get_target(&self, idx: usize) -> Tensor<i32> {
+    pub fn get_target(&self, idx: usize) -> Tensor<S> {
         let nc = self.n_classes;
         let start = idx * nc;
         Tensor::from_vec(self.targets.data[start..start + nc].to_vec(), vec![1, nc])
     }
 
     /// Convenience: predicted class from a [1, n_classes] output tensor.
-    pub fn argmax(output: &Tensor<i32>) -> u8 {
+    pub fn argmax(output: &Tensor<S>) -> u8 {
         output.data
             .iter()
             .enumerate()
@@ -95,13 +95,13 @@ impl Dataset {
     pub fn minibatch(
         &self,
         indices: &[usize],
-    ) -> (Tensor<i32>, Tensor<i32>) {
+    ) -> (Tensor<S>, Tensor<S>) {
         let nf = self.n_features();
         let nc = self.n_classes;
         let b  = indices.len();
 
-        let mut inp_data  = Vec::with_capacity(b * nf);
-        let mut tgt_data  = Vec::with_capacity(b * nc);
+        let mut inp_data  = Vec::<S>::with_capacity(b * nf);
+        let mut tgt_data  = Vec::<S>::with_capacity(b * nc);
 
         for &i in indices {
             let base_i = i * nf;
@@ -111,8 +111,8 @@ impl Dataset {
         }
 
         (
-            Tensor::from_vec(inp_data, vec![b, nf]),
-            Tensor::from_vec(tgt_data, vec![b, nc]),
+            Tensor::<S>::from_vec(inp_data, vec![b, nf]),
+            Tensor::<S>::from_vec(tgt_data, vec![b, nc]),
         )
     }
 }
