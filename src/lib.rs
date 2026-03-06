@@ -27,6 +27,7 @@ pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
     fn gt(self, other: Self) -> bool;
     fn eq(self, other: Self) -> bool;
     fn to_u32(self) -> u32;
+    fn signum(self) -> i32;
 }
 
 impl Numeric for f32 {
@@ -40,6 +41,7 @@ impl Numeric for f32 {
     fn gt(self, other: f32) -> bool { self > other }
     fn eq(self, other: f32) -> bool { self == other }
     fn to_u32(self) -> u32 { self as u32 }
+    fn signum(self) -> i32 { if self > 0.0 { 1 } else if self == 0.0 { 0 } else { -1 } }
 }
 
 impl Numeric for i32 {
@@ -47,16 +49,19 @@ impl Numeric for i32 {
     fn sub(self, other: Self) -> Self { self.saturating_sub(other) }
     fn mul(self, other: Self) -> Self { self.saturating_mul(other) }
     fn div(self, other: Self) -> Self { if other == 0 { 0 } else { self / other } }
-    fn sqrt(self) -> Self { kernels::isqrt_64(self.max(0) as u32) as i32 }
+    fn sqrt(self) -> Self { kernels::isqrt_64(self.max(0) as u64) as i32 }
     fn from_i32(val: i32) -> i32 { val }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
     fn gt(self, other: i32) -> bool { self > other }
     fn eq(self, other: i32) -> bool { self == other }
     fn to_u32(self) -> u32 { self.max(0) as u32 }
+    fn signum(self) -> i32 { if self > 0 { 1 } else if self == 0 { 0 } else { -1 } }
 }
 
-pub trait Scalar: Copy + Clone + Default + fmt::Debug {
+pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     type Acc: Numeric;
+    const MAX: Self;
+    const MIN: Self;
 
     /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
     /// stochastic downcasting)
@@ -77,6 +82,8 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug {
     /// Multiplies two scalars and produces Acc
     /// for instance two i8 values produce a i32 value
     fn mul(self, other: Self) -> Self::Acc;
+    
+    fn sub(self, other: Self) -> Self::Acc;
 
     /// Absolute value of scalar
     fn abs(self) -> Self;
@@ -96,6 +103,8 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug {
 
 impl Scalar for f32 {
     type Acc = f32;
+    const MAX: f32 = f32::MAX;
+    const MIN: f32 = f32::MIN;
 
     fn from_normalized(val: f32) -> f32 { val }
     fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
@@ -103,8 +112,9 @@ impl Scalar for f32 {
     fn to_u32(self) -> u32 { self as u32 }
     fn from_i32(val: i32) -> f32 { val as f32 }
     fn into_acc(self) -> f32 { self }
-    fn mul(self, other: Self) -> f32 { self * other }
-    fn abs(self) -> f32 { if self > self.default() { self } else { self.abs() }}
+    fn mul(self, other: f32) -> f32 { self * other }
+    fn sub(self, other: Self) -> f32 { self - other }
+    fn abs(self) -> f32 { if self > 0.0 { self } else { self.abs() }}
     fn unit_shift() -> u32 { 0u32 }
     fn is_positive(value: f32) -> bool { value > 0.0 }
     fn relu(value: f32) -> f32 {
@@ -120,6 +130,8 @@ impl Scalar for f32 {
 
 impl Scalar for i32 {
     type Acc = i32;
+    const MAX: i32 = i32::MAX;
+    const MIN: i32 = i32::MIN;
 
     fn from_normalized(val: f32) -> i32 {
         (val * Self::Acc::MAX as f32).round().clamp(Self::Acc::MIN as f32, Self::Acc::MAX as f32) as i32
@@ -129,8 +141,9 @@ impl Scalar for i32 {
     fn to_u32(self) -> u32 { self as u32 }
     fn from_i32(val: i32) -> i32 { val as i32 }
     fn into_acc(self) -> i32 { self }
-    fn mul(self, other: Self) -> i32 { self * other }
-    fn abs(self) -> i32 { if self > self.default() { self } else { self.abs() }}
+    fn mul(self, other: i32) -> i32 { self.saturating_mul(other) }
+    fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
+    fn abs(self) -> i32 { if self > 0 { self } else { self.abs() }}
     fn unit_shift() -> u32 { 31u32 }
     fn is_positive(value: i32) -> bool { value > 0 }
     fn relu(value: i32) -> i32 {
@@ -140,8 +153,8 @@ impl Scalar for i32 {
             0
         }
     }
-    fn tanh(value: i32) -> i32 { kernels::tanh_i8(value) }
-    fn dtanh(value: i32) -> i32 { i32::MAX.sub((value.mul(value)).div(i32::MAX)) }
+    fn tanh(value: i32) -> i32 { kernels::tanh_i8(value as i8) as i32 }
+    fn dtanh(value: i32) -> i32 { i32::MAX - (value * value) / i32::MAX }
 }
 
 
@@ -323,7 +336,7 @@ where
 }
 
 
-pub fn argmax(tensor: &Tensor<i32>, axis: Option<usize>) -> Vec<usize> {
+pub fn argmax<S: Scalar>(tensor: &Tensor<S>, axis: Option<usize>) -> Vec<usize> {
     let axis = axis.unwrap_or(1);
     
     // Only supports 2D tensors
@@ -345,8 +358,8 @@ pub fn argmax(tensor: &Tensor<i32>, axis: Option<usize>) -> Vec<usize> {
             let (max_idx, _) = row
                 .iter()
                 .enumerate()
-                .max_by_key(|&(_, &v)| v)
-                .unwrap_or((0, &i32::MIN));
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, &S::default()));
             
             result.push(max_idx);
         }
@@ -356,8 +369,8 @@ pub fn argmax(tensor: &Tensor<i32>, axis: Option<usize>) -> Vec<usize> {
         for col_idx in 0..cols {
             let (max_idx, _) = (0..rows)
                 .map(|r| (r, tensor.data[r * cols + col_idx]))
-                .max_by_key(|&(_, v)| v)
-                .unwrap_or((0, i32::MIN));
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, S::default()));
             
             result.push(max_idx);
         }

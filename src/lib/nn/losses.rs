@@ -1,55 +1,55 @@
-use crate::Tensor;
+use crate::{Tensor, Scalar, Numeric};
 
 
-pub trait Loss {
-    fn forward(&self, preds: &Tensor<i32>, targets: &Tensor<i32>) -> (i32, Tensor<i32>);
+pub trait Loss<S: Scalar> {
+    fn forward(&self, preds: &Tensor<S>, targets: &Tensor<S>) -> (S::Acc, Tensor<S::Acc>);
 }
 
 pub struct MSE;
 pub struct MAE;
 
-impl Loss for MSE {
-    fn forward(&self, preds: &Tensor<i32>, targets: &Tensor<i32>) -> (i32, Tensor<i32>) {
+impl<S: Scalar> Loss<S> for MSE {
+    fn forward(&self, preds: &Tensor<S>, targets: &Tensor<S>) -> (S::Acc, Tensor<S::Acc>) {
         assert_eq!(
             preds.len(),
             targets.len(),
             "MSE::forward: vector sizes don't match."
         );
-        let mut loss: i64 = 0;
-        let mut grad = Tensor::<i32>::new(preds.shape.clone());
+        let mut loss: S::Acc = S::Acc::zero();
+        let mut grad = Tensor::<S::Acc>::new(preds.shape.clone());
 
         if preds.data.len() == 0 {
-            return (0, grad);
+            return (S::Acc::zero(), grad);
         }
         for i in 0..preds.data.len() {
-            let error = preds.data[i] as i64 - targets.data[i] as i64;
+            let error = preds.data[i].sub(targets.data[i]);
             // Cast to i32 BEFORE multiplying
-            loss = loss.saturating_add((error).saturating_mul(error));
-            grad.data[i] = error as i32;
+            loss = loss.add((error).mul(error));
+            grad.data[i] = error;
         }
-        (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32 / preds.data.len() as i32, grad)
+        (loss.div(S::Acc::from_i32(preds.data.len() as i32)), grad)
     }
 }
 
-impl Loss for MAE {
-    fn forward(&self, preds: &Tensor<i32>, targets: &Tensor<i32>) -> (i32, Tensor<i32>) {
+impl<S: Scalar> Loss<S> for MAE {
+    fn forward(&self, preds: &Tensor<S>, targets: &Tensor<S>) -> (S::Acc, Tensor<S::Acc>) {
         assert_eq!(
             preds.len(),
             targets.len(),
             "MAE::forward: vector sizes don't match."
         );
-        let mut loss: i64 = 0;
-        let mut grad = Tensor::<i32>::new(preds.shape.clone());
+        let mut loss: S::Acc = S::Acc::zero();
+        let mut grad = Tensor::<S::Acc>::new(preds.shape.clone());
 
         if preds.data.len() == 0 {
-            return (0i32, grad);
+            return (S::Acc::zero(), grad);
         }
         for i in 0..preds.data.len() {
-            let error = preds.data[i] as i32 - targets.data[i] as i32;
-            loss += error.abs() as i64;
-            grad.data[i] = error.signum();
+            let error = preds.data[i].sub(targets.data[i]);
+            loss = loss.add(error.abs());
+            grad.data[i] = S::Acc::from_i32(error.signum());
         }
-        (loss.clamp(i32::MIN as i64, i32::MAX as i64) as i32 / (preds.data.len() as i32), grad)
+        (loss.div(S::Acc::from_i32(preds.data.len() as i32)), grad)
     }
 }
 

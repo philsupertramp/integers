@@ -52,7 +52,7 @@ pub struct Dataset<S: Scalar> {
     pub input_shift: u32,
 }
 
-impl<S: Scalar + std::cmp::Ord> Dataset<S> {
+impl<S: Scalar> Dataset<S> {
     pub fn len(&self) -> usize {
         self.labels.len()
     }
@@ -81,12 +81,12 @@ impl<S: Scalar + std::cmp::Ord> Dataset<S> {
 
     /// Convenience: predicted class from a [1, n_classes] output tensor.
     pub fn argmax(output: &Tensor<S>) -> u8 {
-        output.data
+        let (max_idx, _) = output.data
             .iter()
             .enumerate()
-            .max_by_key(|&(_, &v)| v)
-            .map(|(i, _)| i as u8)
-            .unwrap_or(0)
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or((0, &S::default()));
+        return max_idx as u8;
     }
 
     /// Build a random mini-batch of `batch_size` samples.

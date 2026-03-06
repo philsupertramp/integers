@@ -393,7 +393,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
             let in_row = &input.data[b * input_dim..(b + 1) * input_dim];
             for o in 0..output_dim {
                 let w_row = &self.weights.storage.data[o * input_dim..(o + 1) * input_dim];
-                let mut raw_val = kernels::dot_product_scalar_mixed::<S>(in_row, w_row);
+                let mut raw_val = kernels::dot_product_scalar::<S>(in_row, w_row);
                 raw_val = raw_val.add(self.bias.storage.data[o].into_acc());
                 out_raw.data[b * output_dim + o] = S::downcast(raw_val, self.weights.quant_shift + self.input_shift, rng);
             }
@@ -531,13 +531,13 @@ pub struct Sequential<S: Scalar> {
     pub modules: Vec<Box<dyn Module<S>>>,
 }
 
-impl<S: Scalar> Default for Sequential<S> {
+impl<S: Scalar + 'static> Default for Sequential<S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Scalar> Sequential<S> {
+impl<S: Scalar + 'static> Sequential<S> {
     pub fn new() -> Self {
         Self { modules: vec![] }
     }

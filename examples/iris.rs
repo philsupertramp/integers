@@ -14,28 +14,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     optim.lr_shift = 2;
     optim.momentum_shift = Some(0);
 
-    let mut l1 = Linear::new(4, 8);
-    let mut l2 = Linear::new(8, 3);
+    let mut l1 = Linear::<f32>::new(4, 8);
+    let mut l2 = Linear::<f32>::new(8, 3);
 
     l1.init(&mut sync_rng);
     l2.init(&mut sync_rng);
     
     // Build model for Iris: 4 input features → 3 output classes
-    let mut model = Sequential::new();
+    let mut model = Sequential::<f32>::new();
     model
         .add(l1)
         .add(ReLU::new())
         .add(l2);
 
     // Load datasets (unwrap Results with ?)
-    let train_ds = DatasetBuilder::<i32>::new("data/iris_train.tsv")
+    let train_ds = DatasetBuilder::<f32>::new("data/iris_train.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
         .with_quantization(QuantizationMethod::StandardScore)
         .load()?;  // ← Unwrap Result<Dataset, DataError>
     
-    let test_ds = DatasetBuilder::<i32>::new("data/iris_test.tsv")
+    let test_ds = DatasetBuilder::<f32>::new("data/iris_test.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
@@ -50,24 +50,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for epoch in 0..EPOCHS {
         model.sync_weights(&mut sync_rng);
-        let mut epoch_loss: i64 = 0;
+        let mut epoch_loss = 0.0;
 
         for t in 0..(train_ds.len()) {
             model.sync_weights(&mut sync_rng);
             let x_t = train_ds.get_input(t);
             let target = train_ds.get_target(t);
 
-            let pred = model.forward(&x_t, train_ds.input_shift, &mut rng);
+            let (pred, s_out) = model.forward(&x_t, 0, &mut rng);
 
             let (loss, grad_out) = mse.forward(&pred, &target);
-            epoch_loss += loss as i64;
+            epoch_loss += loss;
 
             //println!("T: {} = {:?}", t, x_t);
             //println!("{:?} vs. {:?}", target, pred);
             //println!("Loss: {:?}; Grad: {:?}", loss, grad_out);
 
             model.zero_grads();
-            model.backward(&grad_out);
+            model.backward(&grad_out, s_out);
             model.step(&optim);
         }
         if epoch % 100 == 0 {
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get_overflow_stats();
                 reset_overflow_stats();
             }
-            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / train_ds.len() as i64);
+            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / train_ds.len() as f32);
         }
     }
     #[cfg(debug_assertions)]
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for t in 0..test_ds.len() {
         let x_t = test_ds.get_input(t);
         let target = test_ds.get_target(t);
-        let pred = model.forward(&x_t, test_ds.input_shift, &mut rng);
+        let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
         let (loss, grad_out) = mse.forward(&pred, &target);
         eval_loss += loss as i64;
     }
@@ -104,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (test_inputs, _test_targets) = test_ds.minibatch(&test_indices);
     
     // Forward pass
-    let predictions_tensor = model.forward(&test_inputs, test_ds.input_shift, &mut rng);
+    let (predictions_tensor, shfit) = model.forward(&test_inputs, test_ds.input_shift, &mut rng);
     
     // Get predicted classes [batch_size]
     let predicted_classes = argmax(&predictions_tensor, Some(1));
