@@ -125,7 +125,7 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
     {
                     *c = (*g).shr(diff_g).add((*k).shr(diff_carry));
                 }
-                (combined, s_g.min(carry_s_g))
+                (combined, s_combined)
             }
             None => (grad_output.clone(), s_g),
         };

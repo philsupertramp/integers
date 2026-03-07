@@ -229,6 +229,7 @@ impl<S: Scalar> Params<S> {
 
     pub fn zero_grads(&mut self) {
         self.grads = None;
+        self.state = None;
     }
 
     pub fn step(&mut self, optim: &dyn OptimizerConfig<S>) {
@@ -361,7 +362,9 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.weights.zero_grads();
         self.bias.zero_grads();
 
-        // TODO: reset caches
+
+        self.cache = Vec::new();
+        self.s_x_cache = Vec::new();
     }
 
     fn sync_weights(&mut self, rng: &mut XorShift64) {
@@ -388,6 +391,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.cache.push(input.clone());
         self.s_x_cache.push(s_x);
         let mut out_raw = Tensor::<S>::new(vec![batch, output_dim]);
+        let out_shift = self.weights.quant_shift + self.input_shift + s_x;
 
         for b in 0..batch {
             let in_row = &input.data[b * input_dim..(b + 1) * input_dim];
@@ -395,43 +399,21 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
                 let w_row = &self.weights.storage.data[o * input_dim..(o + 1) * input_dim];
                 let mut raw_val = kernels::dot_product_scalar::<S>(in_row, w_row);
                 raw_val = raw_val.add(self.bias.storage.data[o].into_acc());
-                out_raw.data[b * output_dim + o] = S::downcast(raw_val, self.weights.quant_shift + self.input_shift, rng);
+                out_raw.data[b * output_dim + o] = S::downcast(raw_val, out_shift, rng);
             }
         }
 
-        //let max_val = out_raw.data
-        //    .iter()
-        //    .map(|x| x.abs() as u32)
-        //    .max()
-        //    // TODO: (SHIFT#1) Potentially an issue. Empty input is shifted?
-        //    .unwrap_or(1);
-
-        //let output_shift = compute_shift_for_max(max_val);
-        //self.weights.input_shift = Some(input_shift);
-        //self.weights.output_shift = Some(output_shift);
-
-        //for (raw_out_val, out_val) in out_raw.data.iter().zip(&mut out.data) {
-        //    *out_val = kernels::stochastic_downcast(*raw_out_val, output_shift, rng);
-        //}
-
-        (out_raw, self.weights.quant_shift + self.input_shift)
+        (out_raw, out_shift)
     }
 
     fn backward(&mut self, shifted_grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
         // not required to shift anymore, we did that in the forward pass already
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward.");
         let s_x = self.s_x_cache.pop().expect("Linear::backward: Backward called without forward.");
-        let local_delta = self.weights.quant_shift + self.input_shift;
 
-        // input_shift: The shift applied to `input`
-        // output_shift: The shift applied to the processed `input`
-        // TODO:
-        // used to shift back into the original input space
-        //let _input_shift = self.weights.input_shift.expect("Linear::backward: Backward called without forward.");
+        let local_delta_w = s_g + s_x;
+        let local_delta_x = self.weights.quant_shift + self.output_shift;
 
-        //let _output_shift = self.weights.output_shift.expect("Linear::backward: Backward called without forward.");
-
-        // Mathematically required for the chain rule:
         let batch = input.shape[0];
         let input_dim = input.shape[1];
         let output_dim = self.weights.storage.shape[0];
@@ -462,14 +444,14 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
                     // dL/dw = grad_output * input_i32
                     let dw = g.mul(x.into_acc());
                     grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i].add(
-                        dw.div(S::Acc::from_i32(1 << local_delta))
+                        dw.div(S::Acc::from_i32(1 << local_delta_w))
                     );
 
                     // --- Input Gradient ---
                     // dL/d(input) = grad_output * weight_i32
                     let dx = g.mul(w.into_acc());
                     grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i].add(
-                        dx.div(S::Acc::from_i32(1 << (self.weights.quant_shift + self.output_shift)))
+                        dx.div(S::Acc::from_i32(1 << local_delta_x))
                     );
                 }
             }
@@ -479,7 +461,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.weights.accumulate_grads(&grad_weights);// << gshift);
         self.bias.accumulate_grads(&grad_bias);// << gshift);
                                                //
-        let s_g_prev = s_g.saturating_sub(local_delta);
+        let s_g_prev = s_g;//.saturating_sub(local_delta_x);
 
         (grad_input_shifted, s_g_prev)
     }
@@ -510,9 +492,9 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.init_xavier(rng);
 
         // After initialization, infer the appropriate shift
-        let inferred_shift = self.infer_scale_shift();
-        self.weights.quant_shift = inferred_shift;
-        self.bias.quant_shift = inferred_shift;
+        let shift = if S::unit_shift() == 0 { 0 } else { self.infer_scale_shift() };
+        self.weights.quant_shift = shift;
+        self.bias.quant_shift = shift;
     }
 
     fn as_any(&self) -> &dyn Any { self }

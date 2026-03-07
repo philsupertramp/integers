@@ -37,7 +37,7 @@ impl Numeric for f32 {
     fn sub(self, other: Self) -> Self { self - other }
     fn mul(self, other: Self) -> Self { self * other }
     fn div(self, other: Self) -> Self { self / other }
-    fn sqrt(self) -> Self { self.sqrt() }
+    fn sqrt(self) -> Self { f32::sqrt(self) }
     fn from_i32(val: i32) -> f32 { val as f32 }
     fn abs(self) -> f32 { self.abs() }
     fn gt(self, other: f32) -> bool { self > other }
@@ -80,6 +80,8 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
 
     fn from_i32(val: i32) -> Self::Acc;
     fn from_f64(val: f64) -> Self::Acc;
+    fn from_quantized(val: i32) -> Self;
+    fn dataset_input_shift(quantizer_shift: u32) -> u32;
     fn to_f32(self) -> f32;
 
     fn to_u32(self) -> u32;
@@ -122,6 +124,10 @@ impl Scalar for f32 {
     fn abs(self) -> f32 { if self > 0.0 { self } else { -1.0 * self }}
     fn unit_shift() -> u32 { 0u32 }
     fn acc_shift(fan_in: usize) -> u32 { 0u32 }
+    
+    fn from_quantized(val: i32) -> f32 { val as f32 / 127.0 }
+    fn dataset_input_shift(_: u32) -> u32 { 0 }
+
     fn is_positive(value: f32) -> bool { value > 0.0 }
     fn relu(value: f32) -> f32 {
         if value > 0.0 {
@@ -149,6 +155,10 @@ impl Scalar for i32 {
     fn mul(self, other: i32) -> i32 { self.saturating_mul(other) }
     fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
+    
+    fn from_quantized(val: i32) -> i32 { val }
+    fn dataset_input_shift(quantizer_shift: u32) -> u32 { quantizer_shift }
+
     fn unit_shift() -> u32 { 31u32 }
     fn acc_shift(fan_in: usize) -> u32 { (usize::BITS - fan_in.leading_zeros()) as u32 }
     fn is_positive(value: i32) -> bool { value > 0 }
@@ -226,17 +236,15 @@ where
 /// assert_eq!(o.len(), 1);
 /// assert_eq!(o.data[0], 2);
 /// ```
-impl<T> Shr<u32> for Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+impl<S: Scalar + Numeric> Shr<u32> for Tensor<S>
 {
-    type Output = Tensor<T>;
+    type Output = Tensor<S>;
 
-    fn shr(self, shift: u32) -> Tensor<T> {
+    fn shr(self, shift: u32) -> Tensor<S> {
         let shifted_data = self
             .data
             .into_iter()
-            .map(|val| val >> shift)
+            .map(|val| val.shr(shift))
             .collect();
 
         Tensor {
@@ -258,17 +266,15 @@ where
 /// assert_eq!(o.data[0], 2);
 /// assert_eq!(t.data[0], 4);
 /// ```
-impl<T> Shr<u32> for &Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+impl<S: Scalar + Numeric> Shr<u32> for &Tensor<S>
 {
-    type Output = Tensor<T>;
+    type Output = Tensor<S>;
 
-    fn shr(self, shift: u32) -> Tensor<T> {
+    fn shr(self, shift: u32) -> Tensor<S> {
         let shifted_data = self
             .data
             .iter()
-            .map(|&val| val >> shift)
+            .map(|&val| val.shr(shift))
             .collect();
 
         Tensor {

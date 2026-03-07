@@ -295,14 +295,14 @@ fn load_csv<S: Scalar>(
     let mut inp_data = vec![S::default(); n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
-            *cell = S::from_normalized(columns[feat_idx][sample_idx] as f32);
+            *cell = S::from_quantized(columns[feat_idx][sample_idx]);
         }
     }
 
     // One-hot targets
     let mut tgt_data = vec![S::default(); n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt_data[i * n_classes + lbl as usize] = S::from_normalized(1.0);
+        tgt_data[i * n_classes + lbl as usize] = S::from_quantized(127);
     }
 
     Ok(crate::data::Dataset::<S> {
@@ -310,7 +310,7 @@ fn load_csv<S: Scalar>(
         labels,
         targets: Tensor::<S>::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
-        input_shift,
+        input_shift: S::dataset_input_shift(input_shift),
     })
 }
 
@@ -456,14 +456,14 @@ fn finalize_dataset<S: Scalar>(
     let mut inp_data = vec![S::default(); n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
-            *cell = S::from_normalized(columns[feat_idx][sample_idx] as f32);
+            *cell = S::from_quantized(columns[feat_idx][sample_idx]);
         }
     }
 
     // One-hot targets
     let mut tgt_data = vec![S::default(); n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt_data[i * n_classes + lbl as usize] = S::from_normalized(1.0);
+        tgt_data[i * n_classes + lbl as usize] = S::from_quantized(127);
     }
 
     Ok(crate::data::Dataset::<S> {
@@ -471,7 +471,7 @@ fn finalize_dataset<S: Scalar>(
         labels,
         targets: Tensor::<S>::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
-        input_shift,
+        input_shift: S::dataset_input_shift(input_shift),
     })
 }
 
