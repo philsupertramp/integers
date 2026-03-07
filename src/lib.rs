@@ -114,7 +114,7 @@ impl Scalar for f32 {
     fn into_acc(self) -> f32 { self }
     fn mul(self, other: f32) -> f32 { self * other }
     fn sub(self, other: Self) -> f32 { self - other }
-    fn abs(self) -> f32 { if self > 0.0 { self } else { self.abs() }}
+    fn abs(self) -> f32 { if self > 0.0 { self } else { -1.0 * self }}
     fn unit_shift() -> u32 { 0u32 }
     fn is_positive(value: f32) -> bool { value > 0.0 }
     fn relu(value: f32) -> f32 {
@@ -143,7 +143,7 @@ impl Scalar for i32 {
     fn into_acc(self) -> i32 { self }
     fn mul(self, other: i32) -> i32 { self.saturating_mul(other) }
     fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
-    fn abs(self) -> i32 { if self > 0 { self } else { self.abs() }}
+    fn abs(self) -> i32 { if self > 0 { self } else { -1.0 * self }}
     fn unit_shift() -> u32 { 31u32 }
     fn is_positive(value: i32) -> bool { value > 0 }
     fn relu(value: i32) -> i32 {
@@ -154,7 +154,7 @@ impl Scalar for i32 {
         }
     }
     fn tanh(value: i32) -> i32 { kernels::tanh_i8(value as i8) as i32 }
-    fn dtanh(value: i32) -> i32 { i32::MAX - (value * value) / i32::MAX }
+    fn dtanh(value: i32) -> i32 { (127 * 127) - (value * value) }
 }
 
 

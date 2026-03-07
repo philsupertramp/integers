@@ -91,13 +91,18 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
         let (hh, s_hh) = self.w_hh.forward(h, s_h, rng);
 
         let mut comb = Tensor::<S>::new(vec![batch, self.hidden_dim]);
+
+        let s_comb = s_ih.max(s_hh);
+        let diff_ih = s_comb - s_ih;
+        let diff_hh = s_comb - s_hh;
         for i in 0..comb.data.len() {
-            let sum = ih.data[i].into_acc().add(hh.data[i].into_acc());
-            // TODO: we might need to tune shifting here, for integer spaces
+            let ih_aligned = ih.data[i].into_acc() >> diff_ih;
+            let hh_aligned = hh.data[i].into_acc() >> diff_hh;
+            let sum = ih_aligned.add(hh_aligned);
             comb.data[i] = S::downcast(sum, 1, rng);
         }
 
-        let s_comb = s_ih.min(s_hh).saturating_sub(1);
+        let s_comb = s_comb + 1;
 
         let (h_next, s_out) = self.act.forward(&comb, s_comb, rng);
 
@@ -111,9 +116,14 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
     fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
         let (combined_grad, combined_s_g) = match self.d_h_next.take() {
             Some((carry, carry_s_g)) => {
-                let mut combined = grad_output.clone();
-                for (c, k) in combined.data.iter_mut().zip(carry.data.iter()) {
-                    *c = c.add(*k);
+                let s_combined = s_g.max(carry_s_g);
+                let diff_g = s_combined - s_g;
+                let diff_carry = s_combined - carry_s_g;
+                let mut combined = Tensor::<S::Acc>::new(grad_output.shape.clone());
+                for (c, (g, k)) in combined.data.iter_mut()
+        .zip(grad_output.data.iter().zip(carry.data.iter()))
+    {
+                    *c = (*g >> diff_g).add(*k >> diff_carry);
                 }
                 (combined, s_g.min(carry_s_g))
             }

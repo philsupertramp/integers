@@ -450,14 +450,14 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
 
                 // Bias update is an accumulator, so apply gshift
                 grad_bias.data[o] = grad_bias.data[o].add(
-                    g.div(S::Acc::from_i32(1 << s_x))
+                    g
                 );
 
                 for i in 0..input_dim {
                     let x = input.data[b * input_dim + i];
                     let w = self.weights.storage.data[o * input_dim + i];
 
-                    let weight_align = (s_g + s_x).saturating_add(self.weights.quant_shift);
+                    let weight_align = (s_g + s_x).saturating_sub(self.weights.quant_shift);
 
                     // --- Weight Gradient ---
                     // dL/dw = grad_output * input_i32
@@ -480,7 +480,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.weights.accumulate_grads(&grad_weights);// << gshift);
         self.bias.accumulate_grads(&grad_bias);// << gshift);
                                                //
-        let s_g_prev = s_g + self.weights.quant_shift + self.output_shift;
+        let s_g_prev = s_g.saturating_sub(self.output_shift);
 
         (grad_input_shifted, s_g_prev)
     }
@@ -559,7 +559,7 @@ impl<S: Scalar + 'static> Module<S> for Sequential<S> {
         let mut output = input.clone();
         let mut shift = s_x;
         for m in self.modules.iter_mut() {
-            let (out, s_o) = m.forward(&output, s_x, rng);
+            let (out, s_o) = m.forward(&output, shift, rng);
             //input_shift = m.get_output_shift();
             output = out;
             shift = s_o;
