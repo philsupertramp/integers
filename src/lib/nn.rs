@@ -114,10 +114,6 @@ pub trait Module<S: Scalar>: Any {
     /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
     fn step(&mut self, _optim: &dyn OptimizerConfig<S>) {}
 
-    fn get_output_shift(&self) -> u32 {
-        0
-    }
-
     fn memory_report(&self) -> (usize, usize) {
         (0, 0)
     }
@@ -359,19 +355,11 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
     fn zero_grads(&mut self){
         self.weights.zero_grads();
         self.bias.zero_grads();
-
-
-        self.cache = Vec::new();
-        self.s_x_cache = Vec::new();
     }
 
     fn sync_weights(&mut self, rng: &mut XorShift64) {
         self.weights.sync(rng);
         self.bias.sync(rng);
-    }
-
-    fn get_output_shift(&self) -> u32 {
-        self.output_shift
     }
 
     fn forward(&mut self, raw_input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32) {
@@ -539,7 +527,6 @@ impl<S: Scalar + 'static> Module<S> for Sequential<S> {
         let mut shift = s_x;
         for m in self.modules.iter_mut() {
             let (out, s_o) = m.forward(&output, shift, rng);
-            //input_shift = m.get_output_shift();
             output = out;
             shift = s_o;
         }
@@ -654,7 +641,6 @@ mod tests {
         assert_eq!(out.shape, input.shape);
 
         // Contract: output shift must be set consistently
-        let shift = module.get_output_shift();
     }
 
     #[test]
@@ -680,7 +666,6 @@ mod tests {
         module.step(&mut optim);
         assert_eq!(rng.state, 420);
 
-        assert_eq!(module.get_output_shift(), 0);
         assert_eq!(module.memory_report(), (0, 0));
         assert_eq!(module.describe(), ModuleInfo{name: "unknown", params: 0, static_bytes: 0, children: vec![]});
     }
@@ -978,17 +963,6 @@ mod tests {
         assert_eq!(lin.weights.storage.data[1], 0);
         assert_eq!(lin.weights.storage.data[2], 0);
         assert_eq!(lin.weights.storage.data[3], 1);
-    }
-
-    #[test]
-    fn test_get_output_shift(){
-        let mut layer = Linear::new(10, 5);
-
-        assert_eq!(layer.get_output_shift(), 0);
-
-        layer.weights.output_shift = Some(4);
-
-        assert_eq!(layer.get_output_shift(), 4);
     }
 
     #[test]

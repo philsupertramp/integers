@@ -22,9 +22,6 @@ impl<S: Scalar> ReLU<S> {
 }
 
 impl<S: Scalar + 'static> Module<S> for ReLU<S> {
-    fn get_output_shift(&self) -> u32 {
-        0
-    }
 
     fn forward(&mut self, input: &Tensor<S>, s_x: u32, _rng: &mut XorShift64) -> (Tensor<S>, u32) {
         self.cache.push(input.clone());
@@ -122,10 +119,6 @@ impl<S: Scalar + 'static> Module<S> for Tanh<S> {
         }
     }
 
-    fn get_output_shift(&self) -> u32 {
-        0
-    }
-
     fn as_any(&self) -> &dyn Any { self }
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
@@ -166,27 +159,6 @@ mod tests {
 
         assert_eq!(relu.input_shift, Some(8));
         assert_eq!(relu.output_shift, Some(8));
-    }
-
-    #[test]
-    fn test_relu_get_output_shift(){
-        let mut rng = XorShift64::new(420);
-        let mut relu = ReLU::new();
-        let input = Tensor::from_vec(vec![1], vec![1, 1]);
-
-        relu.forward(&input, 0, &mut rng);
-
-        assert_eq!(relu.get_output_shift(), 0);
-    }
-
-    #[test]
-    #[should_panic(
-        expected="ReLU::get_output_shift: Didn't call forward!"
-    )]
-    fn test_relu_get_output_shift_no_forward_call(){
-        let relu = ReLU::new();
-
-        relu.get_output_shift();
     }
 
     #[test]
@@ -487,23 +459,5 @@ mod tests {
         assert_eq!(info.params, 0);
         assert_eq!(info.static_bytes, 0);
         assert_eq!(info.children, vec![]);
-    }
-
-    #[test]
-    #[should_panic(
-        expected="No forward call."
-    )]
-    fn test_tanh_get_output_shift_no_shift(){
-        let tanh = Tanh::new();
-
-        tanh.get_output_shift();
-    }
-
-    #[test]
-    fn test_tanh_get_output_shift(){
-        let mut tanh = Tanh::new();
-        tanh.output_shift = Some(1);
-
-        assert_eq!(tanh.get_output_shift(), 1u32);
     }
 }
