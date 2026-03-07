@@ -1,12 +1,13 @@
 use std::sync::OnceLock;
-use crate::nn::XorShift64;
+use crate::nn::{XorShift64};
+use crate::{Scalar, Numeric};
 use crate::debug::{increase_clamp_downcast};
 
 /// A global reference to our dynamically generated lookup table.
 static TANH_LUT: OnceLock<[i8; 256]> = OnceLock::new();
 
 /// Generates the LUT based on a specific input scale.
-fn generate_tanh_lut(input_scale: f32) -> [i8; 256] {
+fn generate_tanh_lut_i8(input_scale: f32) -> [i8; 256] {
     let mut lut = [0i8; 256];
 
     for i in -128..=127 {
@@ -23,7 +24,7 @@ fn generate_tanh_lut(input_scale: f32) -> [i8; 256] {
 }
 
 fn clamp_i8(shifted: i32) -> i8 {
-    let mut val = shifted as i8;
+    let mut val = shifted as i32;
     let mut clamp = true;
     if shifted > 127 {
         val = 127;
@@ -37,25 +38,44 @@ fn clamp_i8(shifted: i32) -> i8 {
             increase_clamp_downcast();
         }
     }
-    val
+    val as i8
 }
 
-pub fn mul_mixed_scalar(a: i16, b: i8) -> i32 {
-    (a as i32) * (b as i32)
+pub fn mul_mixed_scalar(a: i32, b: i32) -> i32 {
+    let result = (a as i64) * (b as i64);
+    result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-pub fn dot_product_scalar(a: &[i8], b: &[i8]) -> i32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| (x as i32) * (y as i32))
-        .sum()
+pub fn mul_mixed_scalar_scaled(a: i32, b: i32, shift: u32) -> i32 {
+    let result = (a as i64) * (b as i64) >> shift;
+    result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-pub fn dot_product_mixed_scalar(a: &[i8], b: &[i16]) -> i32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| (x as i32) * (y as i32))
-        .sum()
+
+pub fn dot_product_scalar<S: Scalar>(a: &[S], b: &[S]) -> S::Acc {
+    let mut sum: S::Acc = S::Acc::zero();
+    for (x, y) in a.iter().zip(b.iter()){
+        sum = sum.add(x.mul(*y));
+    }
+    sum
+}
+
+pub fn dot_product_scalar_mixed<S: Scalar>(a: &[S], b: &[S::Acc]) -> S::Acc {
+    let mut sum: S::Acc = S::Acc::zero();
+    for (x, y) in a.iter().zip(b.iter()){
+        sum = sum.add(x.into_acc().mul(*y));
+    }
+    sum
+}
+
+pub fn dot_product_scalar_scaled(a: &[i32], b: &[i32], shift: u32) -> i32 {
+    // TODO: implement dot product that computes
+    //       sum((a[i] as i64 * b[i] as i64) >> shift)
+    let mut sum: i64 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        sum = sum.saturating_add(((*x as i64) * (*y as i64)) >> shift);
+    }
+    sum.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 /// Newton-Raphson Method
@@ -84,19 +104,19 @@ pub fn isqrt_64(n: u64) -> u64 {
     x
 }
 
-/// Tanh via piecewise linear approximation over i8 domain.
+/// Tanh via piecewise linear approximation over i32 domain.
 /// Real tanh saturates at ~ +/- 3, so we map
-/// |x| >= 64 (i8 scale) -> +/- 127
+/// |x| >= 64 (i32 scale) -> +/- 127
 /// and linear in between
 pub fn tanh_i8(x: i8) -> i8 {
     // Get the table, initializing it on the very first call if necessary.
-    let lut = TANH_LUT.get_or_init(|| generate_tanh_lut(127.0));
+    let lut = TANH_LUT.get_or_init(|| generate_tanh_lut_i8(127.0));
 
     let index = (x as i16 + 128) as usize;
     lut[index]
 }
 
-pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i8 {
+pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i32 {
     let mask = (1 << shift) - 1;
     let frac = val & mask;
 
@@ -105,14 +125,15 @@ pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i8 {
 
     let shifted = (val >> shift) + round_bit;
 
-    clamp_i8(shifted)
+    //clamp_i32(shifted)
+    shifted
 }
 
 #[cfg(target_arch = "aarch64")]
 pub mod arm_neon {
     use std::arch::aarch64::*;
 
-    pub unsafe fn dot_product_neon_raw(a: &[i8], b: &[i8]) -> i32 {
+    pub unsafe fn dot_product_neon_raw(a: &[i32], b: &[i32]) -> i32 {
         // 1. Initialize accumulator to zero
         let mut sum_vec = vdupq_n_s32(0);
 
@@ -132,11 +153,11 @@ pub mod arm_neon {
             let va_hi = vget_high_s8(va);
             let vb_hi = vget_high_s8(vb);
 
-            // Multiply i8 -> i16
+            // Multiply i32 -> i32
             let prod_lo = vmull_s8(va_lo, vb_lo);
             let prod_hi = vmull_s8(va_hi, vb_hi);
 
-            // Accumulate i16 -> i32
+            // Accumulate i32 -> i32
             sum_vec = vpadalq_s16(sum_vec, prod_lo);
             sum_vec = vpadalq_s16(sum_vec, prod_hi);
 
@@ -153,8 +174,57 @@ mod tests {
     use super::*;
     // Kernel tests
     #[test]
-    fn test_kernel_mul_mixed_scalar() {
-        assert_eq!(mul_mixed_scalar(5 as i16, 3 as i8), 15 as i32);
+    fn test_kernel_clamp_i8(){
+        assert_eq!(clamp_i8(10000), 127);
+        assert_eq!(clamp_i8(128), 127);
+        assert_eq!(clamp_i8(127), 127);
+        assert_eq!(clamp_i8(0), 0);
+        assert_eq!(clamp_i8(-127), -127);
+        assert_eq!(clamp_i8(-128), -128);
+        assert_eq!(clamp_i8(-129), -128);
+        assert_eq!(clamp_i8(-10000), -128);
+    }
+
+    #[test]
+    fn test_kernel_mul_mixed_scalar(){
+        assert_eq!(mul_mixed_scalar(127, 128), 127 * 128);
+    }
+
+    #[test]
+    fn test_kernel_isqrt_64(){
+        assert_eq!(isqrt_64(4), 2);
+        assert_eq!(isqrt_64(10000), 100);
+        assert_eq!(isqrt_64(1000000), 1000);
+    }
+
+    #[test]
+    fn test_generate_tanh_lut_i8() {
+        let lut = generate_tanh_lut_i8(127.0);
+        let inputs: Vec<i8> = (-128..=127).collect();
+
+        for inp in inputs {
+            let expected = ((inp as f32 / 127.0).tanh() * 127.0).round().clamp(-128.0, 127.0) as i8;
+            let index = (inp as i16 + 128) as usize;
+            assert_eq!(
+                lut[index],
+                expected, 
+                "mismatch at input {inp}: got {}, expected {expected}", tanh_i8(inp)
+            );
+        }
+    }
+
+    #[test]
+    fn test_kernel_tanh_i8() {
+        let inputs: Vec<i8> = (-128..=127).collect();
+
+        for inp in inputs {
+            let expected = ((inp as f32 / 127.0).tanh() * 127.0).round().clamp(-128.0, 127.0) as i8;
+            assert_eq!(
+                tanh_i8(inp), 
+                expected, 
+                "mismatch at input {inp}: got {}, expected {expected}", tanh_i8(inp)
+            );
+        }
     }
 
     #[test]
@@ -163,16 +233,6 @@ mod tests {
         let vec2 = [1, 1, 1];
 
         let res = dot_product_scalar(&vec1, &vec2);
-
-        assert_eq!(res, 3);
-    }
-
-    #[test]
-    fn test_kernel_dot_product_mixed_scalar() {
-        let vec1: &[i8] = &[1, 1, 1];
-        let vec2: &[i16] = &[1, 1, 1];
-
-        let res = dot_product_mixed_scalar(&vec1, &vec2);
 
         assert_eq!(res, 3);
     }
@@ -211,12 +271,12 @@ mod tests {
         let mut rng = XorShift64::new(111);
 
         // Value: 1000. Shift: 0. Should clamp to 127.
-        let res = stochastic_downcast(1000, 0, &mut rng);
-        assert_eq!(res, 127);
+        let res = stochastic_downcast(2147483647, 0, &mut rng);
+        assert_eq!(res, 2147483647);
 
         // Value: -1000. Shift: 0. Should clamp to -128.
-        let res = stochastic_downcast(-1000, 0, &mut rng);
-        assert_eq!(res, -128);
+        let res = stochastic_downcast(-2147483648, 0, &mut rng);
+        assert_eq!(res, -2147483648);
     }
 
     #[test]
@@ -277,14 +337,14 @@ mod tests {
     #[test]
     #[cfg(target_arch = "aarch64")]
     fn test_kernel_dot_product_neon() {
-        let vec1 = [1i8; 16];
-        let vec2 = [1i8; 16];
+        let vec1 = [1i32; 16];
+        let vec2 = [1i32; 16];
 
         let res = unsafe { arm_neon::dot_product_neon_raw(&vec1, &vec2) };
 
         assert_eq!(res, 16);
 
-        let vec3 = [-1i8; 16];
+        let vec3 = [-1i32; 16];
         let res_neg = unsafe { arm_neon::dot_product_neon_raw(&vec1, &vec3) };
         assert_eq!(res_neg, -16);
     }

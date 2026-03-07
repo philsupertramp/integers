@@ -6,8 +6,162 @@ pub mod nn;
 pub mod data;
 #[path = "lib/dataset_loaders.rs"]
 pub mod dataset_loaders;
+#[path = "lib/quant.rs"]
+pub mod quant;
 
 use std::fmt;
+use std::ops::{Shr, Shl};
+
+use crate::nn::kernels;
+
+
+pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
+    fn add(self, other: Self) -> Self;
+    fn sub(self, other: Self) -> Self;
+    fn mul(self, other: Self) -> Self;
+    fn div(self, other: Self) -> Self;
+    fn sqrt(self) -> Self;
+    fn zero() -> Self { Self::default() }
+    fn abs(self) -> Self;
+    fn from_i32(val: i32) -> Self;
+    fn gt(self, other: Self) -> bool;
+    fn to_u32(self) -> u32;
+    fn signum(self) -> i32;
+    fn shr(self, shift: u32) -> Self;
+    fn shl(self, shift: u32) -> Self;
+    fn max(self, other: Self) -> Self;
+}
+
+impl Numeric for f32 {
+    fn add(self, other: Self) -> Self { self + other }
+    fn sub(self, other: Self) -> Self { self - other }
+    fn mul(self, other: Self) -> Self { self * other }
+    fn div(self, other: Self) -> Self { self / other }
+    fn sqrt(self) -> Self { self.sqrt() }
+    fn from_i32(val: i32) -> f32 { val as f32 }
+    fn abs(self) -> f32 { self.abs() }
+    fn gt(self, other: f32) -> bool { self > other }
+    fn to_u32(self) -> u32 { self as u32 }
+    fn signum(self) -> i32 { if self > 0.0 { 1 } else if self == 0.0 { 0 } else { -1 } }
+    fn shr(self, shift: u32) -> f32 { self / (1u32 << shift) as f32 }
+    fn shl(self, shift: u32) -> f32 { self * (1u32 << shift) as f32 }
+    fn max(self, other: f32) -> f32 { if self > other { self } else { other }}
+}
+
+impl Numeric for i32 {
+    fn add(self, other: Self) -> Self { self.saturating_add(other) }
+    fn sub(self, other: Self) -> Self { self.saturating_sub(other) }
+    fn mul(self, other: Self) -> Self { self.saturating_mul(other) }
+    fn div(self, other: Self) -> Self { if other == 0 { 0 } else { self / other } }
+    fn sqrt(self) -> Self { let v = if self > 0 { self as u64 } else { 0u64 }; kernels::isqrt_64(v) as i32 }
+    fn from_i32(val: i32) -> i32 { val }
+    fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
+    fn gt(self, other: i32) -> bool { self > other }
+    fn to_u32(self) -> u32 { if self < 0i32 { 0u32 } else { self as u32 } }
+    fn signum(self) -> i32 { if self > 0 { 1 } else if self == 0 { 0 } else { -1 } }
+    fn shr(self, shift: u32) -> i32 { self >> shift }
+    fn shl(self, shift: u32) -> i32 { self.saturating_mul(1i32 << shift) }
+    fn max(self, other: i32) -> i32 { if self > other { self } else { other }}
+}
+
+pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
+    type Acc: Numeric;
+
+    /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
+    /// stochastic downcasting)
+    fn downcast(acc: Self::Acc, shift: u32, rng: &mut XorShift64) -> Self;
+
+    /// cast the scalar from normalized float [0, 1] or [-1, 1] to the desired scalar space.
+    /// E.g. for i8 from [-1, 1] to [-127, 127]
+    fn from_normalized(val: f32) -> Self;
+
+    /// Casts own value to accumulator type
+    fn into_acc(self) -> Self::Acc;
+
+    fn from_i32(val: i32) -> Self::Acc;
+    fn from_f64(val: f64) -> Self::Acc;
+    fn to_f32(self) -> f32;
+
+    fn to_u32(self) -> u32;
+
+    /// Multiplies two scalars and produces Acc
+    /// for instance two i8 values produce a i32 value
+    fn mul(self, other: Self) -> Self::Acc;
+    
+    fn sub(self, other: Self) -> Self::Acc;
+
+    /// Absolute value of scalar
+    fn abs(self) -> Self;
+
+    fn relu(value: Self) -> Self;
+
+    fn tanh(value: Self) -> Self;
+    fn dtanh(value: Self) -> Self::Acc;
+
+    fn is_positive(value: Self) -> bool;
+
+    /// default shift when converting into base representation,
+    /// only required for integer types, otherwise 0
+    fn unit_shift() -> u32;
+
+    fn acc_shift(fan_in: usize) -> u32;
+}
+
+impl Scalar for f32 {
+    type Acc = f32;
+
+    fn from_normalized(val: f32) -> f32 { val }
+    fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
+    fn to_f32(self) -> f32 { self }
+    fn to_u32(self) -> u32 { self as u32 }
+    fn from_i32(val: i32) -> f32 { val as f32 }
+    fn from_f64(val: f64) -> f32 { val as f32 }
+    fn into_acc(self) -> f32 { self }
+    fn mul(self, other: f32) -> f32 { self * other }
+    fn sub(self, other: Self) -> f32 { self - other }
+    fn abs(self) -> f32 { if self > 0.0 { self } else { -1.0 * self }}
+    fn unit_shift() -> u32 { 0u32 }
+    fn acc_shift(fan_in: usize) -> u32 { 0u32 }
+    fn is_positive(value: f32) -> bool { value > 0.0 }
+    fn relu(value: f32) -> f32 {
+        if value > 0.0 {
+            value
+        } else {
+            0.0
+        }
+    }
+    fn tanh(value: f32) -> f32 { value.tanh() }
+    fn dtanh(value: f32) -> f32 { 1.0 - value * value }
+}
+
+impl Scalar for i32 {
+    type Acc = i32;
+
+    fn from_normalized(val: f32) -> i32 {
+        (val * Self::Acc::MAX as f32).round().clamp(Self::Acc::MIN as f32, Self::Acc::MAX as f32) as i32
+    }
+    fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
+    fn to_f32(self) -> f32 { self as f32 / i32::MAX as f32 }
+    fn to_u32(self) -> u32 { self as u32 }
+    fn from_i32(val: i32) -> i32 { val as i32 }
+    fn from_f64(val: f64) -> i32 { (val * 127.0).round() as i32 }
+    fn into_acc(self) -> i32 { self }
+    fn mul(self, other: i32) -> i32 { self.saturating_mul(other) }
+    fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
+    fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
+    fn unit_shift() -> u32 { 31u32 }
+    fn acc_shift(fan_in: usize) -> u32 { (usize::BITS - fan_in.leading_zeros()) as u32 }
+    fn is_positive(value: i32) -> bool { value > 0 }
+    fn relu(value: i32) -> i32 {
+        if value > 0 {
+            value
+        } else {
+            0
+        }
+    }
+    fn tanh(value: i32) -> i32 { kernels::tanh_i8(value as i8) as i32 }
+    fn dtanh(value: i32) -> i32 { (127 * 127) - (value * value) }
+}
 
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,7 +214,135 @@ where
         self.data.len() * std::mem::size_of::<T>()
     }
 }
-pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
+
+///
+/// Right shift operator for Tensors
+///
+/// Example:
+/// ```
+/// use integers::Tensor;
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = t >> 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 2);
+/// ```
+impl<T> Shr<u32> for Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shr(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .into_iter()
+            .map(|val| val >> shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape,
+        }
+    }
+}
+
+///
+/// Right shift operator for Tensors [by reference]
+///
+/// Example:
+/// ```
+/// use integers::Tensor;
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = &t >> 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 2);
+/// assert_eq!(t.data[0], 4);
+/// ```
+impl<T> Shr<u32> for &Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shr(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .iter()
+            .map(|&val| val >> shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape.clone(),
+        }
+    }
+}
+
+///
+/// Left shift operator for Tensors
+///
+/// Example:
+/// ```
+/// use integers::Tensor;
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = t << 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 8);
+/// ```
+impl<T> Shl<u32> for Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shl<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shl(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .into_iter()
+            .map(|val| val << shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape,
+        }
+    }
+}
+
+///
+/// Left shift operator for Tensors [by reference]
+///
+/// Example:
+/// ```
+/// use integers::Tensor;
+/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+/// let o = &t << 1u32;
+/// assert_eq!(o.len(), 1);
+/// assert_eq!(o.data[0], 8);
+/// assert_eq!(t.data[0], 4);
+/// ```
+impl<T> Shl<u32> for &Tensor<T>
+where
+    T: Clone + Copy + fmt::Debug + Default + Shl<u32, Output = T>,
+{
+    type Output = Tensor<T>;
+
+    fn shl(self, shift: u32) -> Tensor<T> {
+        let shifted_data = self
+            .data
+            .iter()
+            .map(|&val| val << shift)
+            .collect();
+
+        Tensor {
+            data: shifted_data,
+            shape: self.shape.clone(),
+        }
+    }
+}
+
+
+pub fn argmax<S: Scalar>(tensor: &Tensor<S>, axis: Option<usize>) -> Vec<usize> {
     let axis = axis.unwrap_or(1);
     
     // Only supports 2D tensors
@@ -82,8 +364,8 @@ pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
             let (max_idx, _) = row
                 .iter()
                 .enumerate()
-                .max_by_key(|&(_, &v)| v)
-                .unwrap_or((0, &i8::MIN));
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, &S::default()));
             
             result.push(max_idx);
         }
@@ -93,8 +375,8 @@ pub fn argmax(tensor: &Tensor<i8>, axis: Option<usize>) -> Vec<usize> {
         for col_idx in 0..cols {
             let (max_idx, _) = (0..rows)
                 .map(|r| (r, tensor.data[r * cols + col_idx]))
-                .max_by_key(|&(_, v)| v)
-                .unwrap_or((0, i8::MIN));
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, S::default()));
             
             result.push(max_idx);
         }
@@ -209,10 +491,52 @@ mod tests {
     }
 
     #[test]
+    fn test_tensor_shl_borrow(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = t << 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 8);
+        // not allowed
+        // assert_eq!(t.data[0], 4);
+    }
+
+    #[test]
+    fn test_tensor_shl_reference(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = &t << 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 8);
+        assert_eq!(t.data[0], 4);
+    }
+
+    #[test]
+    fn test_tensor_shr_borrow(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = t >> 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 2);
+        // not allowed
+        // assert_eq!(t.data[0], 4);
+    }
+
+    #[test]
+    fn test_tensor_shr_reference(){
+        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
+
+        let o = &t >> 1u32;
+        assert_eq!(o.len(), 1);
+        assert_eq!(o.data[0], 2);
+        assert_eq!(t.data[0], 4);
+    }
+
+    #[test]
     fn test_argmax_batch() {
         // Batch of 3 samples, 4 classes each
         let data = vec![
-            10i8, 5, 3, 2,      // Sample 0: max at index 0
+            10i32, 5, 3, 2,      // Sample 0: max at index 0
             2, 15, 8, 1,        // Sample 1: max at index 1
             1, 2, 20, 5,        // Sample 2: max at index 2
         ];
@@ -226,7 +550,7 @@ mod tests {
     fn test_argmax_axis_0() {
         // 3 rows, 2 columns
         let data = vec![
-            10i8, 2,
+            10i32, 2,
             5, 15,
             3, 1,
         ];
@@ -241,7 +565,7 @@ mod tests {
     #[test]
     fn test_argmax_single_sample() {
         // Single sample [1, 5]
-        let data = vec![2i8, 8, 5, 3, 1];
+        let data = vec![2i32, 8, 5, 3, 1];
         let tensor = Tensor::from_vec(data, vec![1, 5]);
         
         let result = argmax(&tensor, Some(1));
@@ -250,7 +574,13 @@ mod tests {
 
     // accuracy tests
     // TODO
+    #[test]
+    fn test_accuracy(){
+        let preds: &[usize] = &[0, 1, 0, 1];
+        let ground_truth: &[u8] = &[0, 1, 0, 1];
 
+        assert_eq!(accuracy(preds, ground_truth), 1.0);
+    }
 
 
     // XorShift64 tests
@@ -289,6 +619,11 @@ mod tests {
             assert!(val <= 12);
             assert!(val > 0);
         }
+    }
+
+    #[test]
+    fn test_scalar_tensor(){
+        let tensor = Tensor::<f32>::new(vec![1, 1]);
     }
 
 }

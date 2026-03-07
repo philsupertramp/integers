@@ -4,12 +4,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::Tensor;
+use crate::{Tensor, Scalar};
+use crate::quant::{minmax_quantize, standard_score_quantize};
 use parquet::file::reader::FileReader;
 use parquet::file::reader::SerializedFileReader;
-use arrow::record_batch::RecordBatch;
 use parquet::record::Field;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+use std::marker::PhantomData;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -79,28 +80,33 @@ impl DatasetConfig {
 // ─── Builder API ──────────────────────────────────────────────────────────────
 
 /// Fluent builder for dataset loading.
-pub struct DatasetBuilder {
+pub struct DatasetBuilder<S: Scalar> {
     path: std::path::PathBuf,
     config: DatasetConfig,
+
+    _phantom: PhantomData<S>,
 }
 
-impl DatasetBuilder {
+impl<S: Scalar> DatasetBuilder<S> {
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default(),
+            _phantom: PhantomData,
         }
     }
     pub fn new_csv(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default_format(FileFormat::CSV),
+            _phantom: PhantomData,
         }
     }
     pub fn new_tsv(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default_format(FileFormat::TSV),
+            _phantom: PhantomData,
         }
     }
 
@@ -108,6 +114,7 @@ impl DatasetBuilder {
         Self {
             path: path.as_ref().to_path_buf(),
             config: DatasetConfig::default_format(FileFormat::Parquet),
+            _phantom: PhantomData,
         }
     }
 
@@ -146,55 +153,23 @@ impl DatasetBuilder {
         self
     }
 
-    pub fn load(self) -> crate::data::DataResult<crate::data::Dataset> {
+    pub fn load(self) -> crate::data::DataResult<crate::data::Dataset<S>> {
+        //TODO: We should consider a caching mechanism, similar to HF's 
+        //      storage approach.
+        //      Loading "small" parquet files is pretty slow.
         match self.config.format {
-            FileFormat::CSV | FileFormat::TSV => load_csv(&self.path, self.config),
-            FileFormat::Parquet => load_parquet(&self.path, self.config),
+            FileFormat::CSV | FileFormat::TSV => load_csv::<S>(&self.path, self.config),
+            FileFormat::Parquet => load_parquet::<S>(&self.path, self.config),
         }
     }
 }
 
-// ─── Quantization Helpers ─────────────────────────────────────────────────────
-
-fn minmax_quantize(values: &[f32]) -> Vec<i8> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let min = values.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let range = (max - min).max(1e-6);
-    values
-        .iter()
-        .map(|&v| {
-            let norm = (v - min) / range; // [0, 1]
-            let scaled = norm * 254.0 - 127.0; // [-127, 127]
-            scaled.round().clamp(-127.0, 127.0) as i8
-        })
-        .collect()
-}
-
-fn standard_score_quantize(values: &[f32]) -> Vec<i8> {
-    if values.is_empty() {
-        return Vec::new();
-    }
-    let mean = values.iter().sum::<f32>() / values.len() as f32;
-    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32;
-    let std = variance.sqrt().max(1e-6);
-    values
-        .iter()
-        .map(|&v| {
-            let zscore = (v - mean) / std;
-            zscore.round().clamp(-127.0, 127.0) as i8
-        })
-        .collect()
-}
-
 // ─── CSV Loader ───────────────────────────────────────────────────────────────
 
-fn load_csv(
+fn load_csv<S: Scalar>(
     path: &Path,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset> {
+) -> crate::data::DataResult<crate::data::Dataset<S>> {
     let f = BufReader::new(File::open(path)?);
     let delimiter = match config.format {
         FileFormat::CSV => ',',
@@ -299,10 +274,11 @@ fn load_csv(
         .unwrap_or(labels.iter().max().map(|&x| x as usize + 1).unwrap_or(0));
 
     // Quantize per-column
-    let mut columns: Vec<Vec<i8>> = Vec::with_capacity(n_features);
+    let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
+    let mut input_shift: u32 = 0;
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
-        let quantized = match config.quantization {
+        let (quantized, shift) = match config.quantization {
             QuantizationMethod::MinMax => minmax_quantize(&col),
             QuantizationMethod::StandardScore => standard_score_quantize(&col),
             QuantizationMethod::Custom => {
@@ -311,37 +287,39 @@ fn load_csv(
                 ))
             }
         };
+        input_shift = shift;
         columns.push(quantized);
     }
 
     // Re-interleave into row-major layout [n, n_features]
-    let mut inp_data = vec![0i8; n_samples * n_features];
+    let mut inp_data = vec![S::default(); n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
-            *cell = columns[feat_idx][sample_idx];
+            *cell = S::from_normalized(columns[feat_idx][sample_idx] as f32);
         }
     }
 
     // One-hot targets
-    let mut tgt_data = vec![0i8; n_samples * n_classes];
+    let mut tgt_data = vec![S::default(); n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt_data[i * n_classes + lbl as usize] = 96;
+        tgt_data[i * n_classes + lbl as usize] = S::from_normalized(1.0);
     }
 
-    Ok(crate::data::Dataset {
-        inputs: Tensor::from_vec(inp_data, vec![n_samples, n_features]),
+    Ok(crate::data::Dataset::<S> {
+        inputs: Tensor::<S>::from_vec(inp_data, vec![n_samples, n_features]),
         labels,
-        targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
+        targets: Tensor::<S>::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
+        input_shift,
     })
 }
 
 // ─── Parquet Loader ───────────────────────────────────────────────────────────
 
-fn load_parquet(
+fn load_parquet<S: Scalar>(
     path: &Path,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset> {
+) -> crate::data::DataResult<crate::data::Dataset<S>> {
     let file = File::open(path)?;
     let reader = SerializedFileReader::new(file)
         .map_err(|e| crate::data::DataError::ParseError(format!("Failed to read parquet: {}", e)))?;
@@ -372,7 +350,7 @@ fn load_parquet(
 
         // Extract features from this record
         let mut row = Vec::with_capacity(feature_cols.len());
-        for (idx, (name, value)) in record.get_column_iter().enumerate() {
+        for (idx, (_name, value)) in record.get_column_iter().enumerate() {
             if !feature_cols.contains(&idx) {
                 continue;
             }
@@ -396,9 +374,11 @@ fn load_parquet(
 
         // Extract label
         let mut label_field = &Field::Null;
-        for (idx, (name, value)) in record.get_column_iter().enumerate() {
+        for (idx, (_name, value)) in record.get_column_iter().enumerate() {
             if idx == config.label_column {
                 label_field = value;
+                // there's only one label column
+                break;
             }
         }
 
@@ -439,11 +419,11 @@ fn load_parquet(
 
 // ─── Common finalization ──────────────────────────────────────────────────────
 
-fn finalize_dataset(
+fn finalize_dataset<S: Scalar>(
     raw_features: Vec<Vec<f32>>,
     labels: Vec<u8>,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset> {
+) -> crate::data::DataResult<crate::data::Dataset<S>> {
     let n_samples = labels.len();
     let n_features = if raw_features.is_empty() {
         0
@@ -455,10 +435,11 @@ fn finalize_dataset(
         .unwrap_or(labels.iter().max().map(|&x| x as usize + 1).unwrap_or(0));
 
     // Quantize per-column
-    let mut columns: Vec<Vec<i8>> = Vec::with_capacity(n_features);
+    let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
+    let mut input_shift: u32 = 0;
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
-        let quantized = match config.quantization {
+        let (quantized, shift) = match config.quantization {
             QuantizationMethod::MinMax => minmax_quantize(&col),
             QuantizationMethod::StandardScore => standard_score_quantize(&col),
             QuantizationMethod::Custom => {
@@ -467,28 +448,30 @@ fn finalize_dataset(
                 ))
             }
         };
+        input_shift = shift;
         columns.push(quantized);
     }
 
     // Re-interleave into row-major layout [n, n_features]
-    let mut inp_data = vec![0i8; n_samples * n_features];
+    let mut inp_data = vec![S::default(); n_samples * n_features];
     for (sample_idx, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (feat_idx, cell) in row.iter_mut().enumerate() {
-            *cell = columns[feat_idx][sample_idx];
+            *cell = S::from_normalized(columns[feat_idx][sample_idx] as f32);
         }
     }
 
     // One-hot targets
-    let mut tgt_data = vec![0i8; n_samples * n_classes];
+    let mut tgt_data = vec![S::default(); n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt_data[i * n_classes + lbl as usize] = 96;
+        tgt_data[i * n_classes + lbl as usize] = S::from_normalized(1.0);
     }
 
-    Ok(crate::data::Dataset {
-        inputs: Tensor::from_vec(inp_data, vec![n_samples, n_features]),
+    Ok(crate::data::Dataset::<S> {
+        inputs: Tensor::<S>::from_vec(inp_data, vec![n_samples, n_features]),
         labels,
-        targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
+        targets: Tensor::<S>::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
+        input_shift,
     })
 }
 
@@ -582,9 +565,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(ds.len(), 3);
-        // Values should be in i8 range
+        // Values should be in i32 range
         for &v in &ds.inputs.data {
-            assert!(v >= -127 && v <= 127);
+            assert!(v >= -127);  // v <= 127 given by data type
         }
     }
 }
