@@ -27,6 +27,9 @@ pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
     fn gt(self, other: Self) -> bool;
     fn to_u32(self) -> u32;
     fn signum(self) -> i32;
+    fn shr(self, shift: u32) -> Self;
+    fn shl(self, shift: u32) -> Self;
+    fn max(self, other: Self) -> Self;
 }
 
 impl Numeric for f32 {
@@ -40,6 +43,9 @@ impl Numeric for f32 {
     fn gt(self, other: f32) -> bool { self > other }
     fn to_u32(self) -> u32 { self as u32 }
     fn signum(self) -> i32 { if self > 0.0 { 1 } else if self == 0.0 { 0 } else { -1 } }
+    fn shr(self, shift: u32) -> f32 { self / (1u32 << shift) as f32 }
+    fn shl(self, shift: u32) -> f32 { self * (1u32 << shift) as f32 }
+    fn max(self, other: f32) -> f32 { if self > other { self } else { other }}
 }
 
 impl Numeric for i32 {
@@ -47,12 +53,15 @@ impl Numeric for i32 {
     fn sub(self, other: Self) -> Self { self.saturating_sub(other) }
     fn mul(self, other: Self) -> Self { self.saturating_mul(other) }
     fn div(self, other: Self) -> Self { if other == 0 { 0 } else { self / other } }
-    fn sqrt(self) -> Self { kernels::isqrt_64(self.max(0) as u64) as i32 }
+    fn sqrt(self) -> Self { let v = if self > 0 { self as u64 } else { 0u64 }; kernels::isqrt_64(v) as i32 }
     fn from_i32(val: i32) -> i32 { val }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
     fn gt(self, other: i32) -> bool { self > other }
-    fn to_u32(self) -> u32 { self.max(0) as u32 }
+    fn to_u32(self) -> u32 { if self < 0i32 { 0u32 } else { self as u32 } }
     fn signum(self) -> i32 { if self > 0 { 1 } else if self == 0 { 0 } else { -1 } }
+    fn shr(self, shift: u32) -> i32 { self >> shift }
+    fn shl(self, shift: u32) -> i32 { self.saturating_mul(1i32 << shift) }
+    fn max(self, other: i32) -> i32 { if self > other { self } else { other }}
 }
 
 pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
@@ -70,6 +79,7 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     fn into_acc(self) -> Self::Acc;
 
     fn from_i32(val: i32) -> Self::Acc;
+    fn from_f64(val: f64) -> Self::Acc;
     fn to_f32(self) -> f32;
 
     fn to_u32(self) -> u32;
@@ -94,6 +104,7 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     /// only required for integer types, otherwise 0
     fn unit_shift() -> u32;
 
+    fn acc_shift(fan_in: usize) -> u32;
 }
 
 impl Scalar for f32 {
@@ -104,11 +115,13 @@ impl Scalar for f32 {
     fn to_f32(self) -> f32 { self }
     fn to_u32(self) -> u32 { self as u32 }
     fn from_i32(val: i32) -> f32 { val as f32 }
+    fn from_f64(val: f64) -> f32 { val as f32 }
     fn into_acc(self) -> f32 { self }
     fn mul(self, other: f32) -> f32 { self * other }
     fn sub(self, other: Self) -> f32 { self - other }
     fn abs(self) -> f32 { if self > 0.0 { self } else { -1.0 * self }}
     fn unit_shift() -> u32 { 0u32 }
+    fn acc_shift(fan_in: usize) -> u32 { 0u32 }
     fn is_positive(value: f32) -> bool { value > 0.0 }
     fn relu(value: f32) -> f32 {
         if value > 0.0 {
@@ -131,11 +144,13 @@ impl Scalar for i32 {
     fn to_f32(self) -> f32 { self as f32 / i32::MAX as f32 }
     fn to_u32(self) -> u32 { self as u32 }
     fn from_i32(val: i32) -> i32 { val as i32 }
+    fn from_f64(val: f64) -> i32 { (val * 127.0).round() as i32 }
     fn into_acc(self) -> i32 { self }
     fn mul(self, other: i32) -> i32 { self.saturating_mul(other) }
     fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
-    fn abs(self) -> i32 { if self > 0 { self } else { -1.0 * self }}
+    fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
     fn unit_shift() -> u32 { 31u32 }
+    fn acc_shift(fan_in: usize) -> u32 { (usize::BITS - fan_in.leading_zeros()) as u32 }
     fn is_positive(value: i32) -> bool { value > 0 }
     fn relu(value: i32) -> i32 {
         if value > 0 {

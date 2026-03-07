@@ -9,13 +9,13 @@ use integers::nn::optim::{SGDConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
-    const EPOCHS: i32 = 8000;
+    const EPOCHS: i32 = 4000;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 2;
-    optim.momentum_shift = Some(0);
+    optim.lr_shift = 9;
+    optim.momentum_shift = Some(4);
 
-    let mut l1 = Linear::<f32>::new(4, 8);
-    let mut l2 = Linear::<f32>::new(8, 3);
+    let mut l1 = Linear::<f32>::new(4, 16);
+    let mut l2 = Linear::<f32>::new(16, 3);
 
     l1.init(&mut sync_rng);
     l2.init(&mut sync_rng);
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (pred, s_out) = model.forward(&x_t, 0, &mut rng);
 
             let (loss, grad_out) = mse.forward(&pred, &target);
-            epoch_loss += loss;
+            epoch_loss += loss as f64;
 
             //println!("T: {} = {:?}", t, x_t);
             //println!("{:?} vs. {:?}", target, pred);
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get_overflow_stats();
                 reset_overflow_stats();
             }
-            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / train_ds.len() as f32);
+            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / train_ds.len() as f64);
         }
     }
     #[cfg(debug_assertions)]
@@ -89,15 +89,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\n{:<6} {:>10} {:>10} {:>8}",
         "t", "target", "pred", "error"
     );
-    let mut eval_loss: i64 = 0;
+    let mut eval_loss: f64 = 0.0;
     for t in 0..test_ds.len() {
         let x_t = test_ds.get_input(t);
         let target = test_ds.get_target(t);
-        let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
+        let (pred, s_out) = model.forward(&x_t, 0, &mut rng);
+        println!("{:?} -> {:?}", pred, target);
         let (loss, grad_out) = mse.forward(&pred, &target);
-        eval_loss += loss as i64;
+        eval_loss += loss as f64;
+        println!("{:<6} {:>10} {:>10} {:>8}", t, argmax(&target, Some(1))[0], argmax(&pred, Some(1))[0], loss);
     }
-    println!("Eval  total  MSE : {}", eval_loss / test_ds.len() as i64);
+    println!("Eval  total  MSE : {}", eval_loss / test_ds.len() as f64);
 
     // Get a batch of test samples
     let test_indices: Vec<usize> = (0..test_ds.len()).collect();

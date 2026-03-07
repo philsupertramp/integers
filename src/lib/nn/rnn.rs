@@ -60,7 +60,7 @@ impl<S: Scalar + 'static> RNNCell<S> {
 
         let xavier_limit_master = xavier_limit_i32 * (1 << self.w_hh.weights.quant_shift);
         let range = xavier_limit_master.min(spectral_cap_master);
-        self.w_hh.weights.init_uniform(rng, range);
+        //self.w_hh.weights.init_uniform(rng, range);
     }
 
     pub fn init_weights_auto(&mut self, rng: &mut XorShift64) {
@@ -96,8 +96,8 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
         let diff_ih = s_comb - s_ih;
         let diff_hh = s_comb - s_hh;
         for i in 0..comb.data.len() {
-            let ih_aligned = ih.data[i].into_acc() >> diff_ih;
-            let hh_aligned = hh.data[i].into_acc() >> diff_hh;
+            let ih_aligned = ih.data[i].into_acc().shr(diff_ih);
+            let hh_aligned = hh.data[i].into_acc().shr(diff_hh);
             let sum = ih_aligned.add(hh_aligned);
             comb.data[i] = S::downcast(sum, 1, rng);
         }
@@ -123,7 +123,7 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
                 for (c, (g, k)) in combined.data.iter_mut()
         .zip(grad_output.data.iter().zip(carry.data.iter()))
     {
-                    *c = (*g >> diff_g).add(*k >> diff_carry);
+                    *c = (*g).shr(diff_g).add((*k).shr(diff_carry));
                 }
                 (combined, s_g.min(carry_s_g))
             }

@@ -18,14 +18,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ─── Load Data ─────────────────────────────────────────────────────────
     println!("Loading datasets...");
     let train_start = Instant::now();
-    let train_ds = DatasetBuilder::new("data/mnist_train.parquet")
+    let train_ds = DatasetBuilder::<f32>::new("data/mnist_train.parquet")
         .format(FileFormat::Parquet)
         .with_features((0..784).collect())
         .with_label_column(784)
         .with_num_classes(10)
         .with_quantization(QuantizationMethod::StandardScore)
         .load()?;
-    let test_ds = DatasetBuilder::new("data/mnist_test.parquet")
+    let test_ds = DatasetBuilder::<f32>::new("data/mnist_test.parquet")
         .format(FileFormat::Parquet)
         .with_features((0..784).collect())
         .with_label_column(784)
@@ -58,34 +58,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Start with CONSERVATIVE, monitor diagnostics below ↓
     
-    let input_shift: u32 = 1;
-    let grad_shift: u32 = 9;       // ← INCREASED from 6
     let batch_size: usize = 32;    // ← REDUCED from 32
     let epochs = 150i32;         // ← INCREASED from 50
 
     println!("Model Configuration (RECOMMENDED):");
-    println!("  grad_shift = {} (handles 3-layer gradient cascade)", grad_shift);
     println!("  batch_size = {}", batch_size);
     println!("  epochs = {}\n", epochs);
     let mut rng = XorShift64::new(42);
 
-    let mut l1 = Linear::new(784, 128)
-        .with_shift(1);
-    l1.init(&mut rng);
-    let mut l2 = Linear::new(128, 10)
-        .with_shift(1);
-    l2.init(&mut rng);
-    let mut model = Sequential::new();
+    let l1 = Linear::<f32>::new(784, 128);
+    let l2 = Linear::<f32>::new(128, 128);  // ← second hidden layer
+    let l3 = Linear::<f32>::new(128, 10);   // ← output layer
+    let mut model = Sequential::<f32>::new();
+
     model
         .add(l1)
-        .add(ReLU::new())
-        .add(l2);
+        .add(ReLU::<f32>::new())
+        .add(l2)
+        .add(ReLU::<f32>::new())
+        .add(l3);
+    model.init_all(&mut rng);
 
     let optim = AdamConfig {
-        lr_shift: 1,
+        lr_shift: 7,
         b1_shift: 3,
         b2_shift: 4,
-        eps: 2
+        eps: 1
     };
     
     // Print architecture
@@ -108,23 +106,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Shuffle
         let indices = shuffled_indices(train_ds.len(), &mut rng);
 
-        let mut epoch_loss: i64 = 0;
+        let mut epoch_loss: f64 = 0.0;
         let mut batches_processed = 0;
 
-        model.sync_weights(&mut rng);
         // Minibatches
         for batch_start in (0..train_ds.len()).step_by(batch_size) {
+            model.sync_weights(&mut rng);
             let batch_end = (batch_start + batch_size).min(train_ds.len());
             let batch_indices = &indices[batch_start..batch_end];
             let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
 
-            let preds = model.forward(&batch_inputs, input_shift, &mut rng);
+            let (preds, shift) = model.forward(&batch_inputs, 0, &mut rng);
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
-            epoch_loss += loss as i64;
+            epoch_loss += loss as f64;
             batches_processed += 1;
 
-            model.backward(&grad_out);
+            model.zero_grads();
+            model.backward(&grad_out, shift);
             model.step(&optim);
         }
 
@@ -134,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for t in 0..test_ds.len().min(1000) {
             let x = test_ds.get_input(t);
             let target_cls = test_ds.labels[t];
-            let pred = model.forward(&x, 0, &mut rng);
+            let (pred, shift) = model.forward(&x, 0, &mut rng);
             let pred_cls = argmax(&pred, Some(1))[0] as u8;
             if pred_cls == target_cls {
                 correct += 1;
@@ -149,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("{:>6} {:>12} {:>11.1}% {:>10.2} {:>8}",
                 epoch,
-                epoch_loss / batches_processed as i64,
+                epoch_loss / (batches_processed as f64),
                 accuracy * 100.0,
                 elapsed,
                 overflow_stats.downcast_clamps
@@ -161,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("{:>6} {:>12} {:>11.1}% {:>10.2} {:>8}",
                 epoch,
-                epoch_loss / batches_processed as i64,
+                epoch_loss / (batches_processed as f64),
                 accuracy * 100.0,
                 elapsed,
                 -1
@@ -190,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let x = test_ds.get_input(t);
         let target_cls = test_ds.labels[t] as usize;
         model.sync_weights(&mut rng);
-        let pred = model.forward(&x, input_shift, &mut rng);
+        let (pred, shift) = model.forward(&x, 0, &mut rng);
         let pred_cls = argmax(&pred, Some(1))[0] as usize;
 
         if pred_cls == target_cls {

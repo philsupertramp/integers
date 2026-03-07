@@ -189,18 +189,18 @@ impl<S: Scalar> Params<S> {
         self
     }
 
-    pub fn init_uniform(&mut self, rng: &mut XorShift64, range: i32) {
-        let range = range.max(1);
-        let spread = (2 * range) as u32;
+    pub fn init_uniform(&mut self, rng: &mut XorShift64, range: S::Acc) {
+        let range = range.max(S::Acc::from_i32(1));
+        let spread = (2 * range.to_u32()) as u32;
         for w in self.master.data.iter_mut() {
-            *w = S::from_i32(rng.gen_range(spread) as i32 - range);
+            *w = S::Acc::from_i32(rng.gen_range(spread) as i32).sub(range);
         }
     }
 
     pub fn init_xavier_uniform(&mut self, rng: &mut XorShift64, fan_in: usize, fan_out: usize) {
         let limit = (6.0 / (fan_in + fan_out) as f64).sqrt();
-        let limit_i32 = (limit * 127.0).round() as i32;
-        self.init_uniform(rng, limit_i32.max(1));
+        let range = S::from_f64(limit);
+        self.init_uniform(rng, range);
     }
 
     pub fn sync(&mut self, rng: &mut XorShift64) {
@@ -328,8 +328,8 @@ pub struct Linear<S: Scalar> {
 
 impl<S: Scalar> Linear<S> {
     pub fn new(input_dim: usize, output_dim: usize) -> Self {
-        let acc_shift = (usize::BITS - input_dim.leading_zeros()) as u32; // ceil(log2)
-        let back_acc_shift = (usize::BITS - output_dim.leading_zeros()) as u32;
+        let acc_shift = S::acc_shift(input_dim); // ceil(log2)
+        let back_acc_shift = S::acc_shift(output_dim);
         Self {
             weights: Params::new(vec![output_dim, input_dim], 0),
             bias: Params::new(vec![output_dim], 0),
@@ -421,6 +421,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         // not required to shift anymore, we did that in the forward pass already
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward.");
         let s_x = self.s_x_cache.pop().expect("Linear::backward: Backward called without forward.");
+        let local_delta = self.weights.quant_shift + self.input_shift;
 
         // input_shift: The shift applied to `input`
         // output_shift: The shift applied to the processed `input`
@@ -457,13 +458,11 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
                     let x = input.data[b * input_dim + i];
                     let w = self.weights.storage.data[o * input_dim + i];
 
-                    let weight_align = (s_g + s_x).saturating_sub(self.weights.quant_shift);
-
                     // --- Weight Gradient ---
                     // dL/dw = grad_output * input_i32
                     let dw = g.mul(x.into_acc());
                     grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i].add(
-                        dw.div(S::Acc::from_i32(1 << weight_align))
+                        dw.div(S::Acc::from_i32(1 << local_delta))
                     );
 
                     // --- Input Gradient ---
@@ -480,7 +479,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.weights.accumulate_grads(&grad_weights);// << gshift);
         self.bias.accumulate_grads(&grad_bias);// << gshift);
                                                //
-        let s_g_prev = s_g.saturating_sub(self.output_shift);
+        let s_g_prev = s_g.saturating_sub(local_delta);
 
         (grad_input_shifted, s_g_prev)
     }
