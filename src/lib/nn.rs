@@ -190,10 +190,8 @@ impl<S: Scalar> Params<S> {
     }
 
     pub fn init_uniform(&mut self, rng: &mut XorShift64, range: S::Acc) {
-        let range = range.max(S::Acc::from_i32(1));
-        let spread = (2 * range.to_u32()) as u32;
         for w in self.master.data.iter_mut() {
-            *w = S::Acc::from_i32(rng.gen_range(spread) as i32).sub(range);
+            *w = S::random_uniform(rng, range);
         }
     }
 

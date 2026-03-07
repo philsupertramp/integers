@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let epochs: i32 = 5000;
     let batch_size: usize = 1;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 5;
+    optim.lr_shift = 4;
     optim.momentum_shift = None;//Some(8);
 
     let mut l1 = Linear::<f32>::new(4, 8);
@@ -32,9 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model = Sequential::<f32>::new();
     model
         .add(l1)
-        .add(Tanh::<f32>::new())
+        .add(ReLU::<f32>::new())
         .add(l2)
-        .add(Tanh::<f32>::new())
+        .add(ReLU::<f32>::new())
         .add(l3);
 
     // Load datasets (unwrap Results with ?)

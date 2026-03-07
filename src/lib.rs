@@ -78,6 +78,8 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     /// Casts own value to accumulator type
     fn into_acc(self) -> Self::Acc;
 
+    fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> Self::Acc;
+
     fn from_i32(val: i32) -> Self::Acc;
     fn from_f64(val: f64) -> Self::Acc;
     fn from_quantized(val: i32) -> Self;
@@ -114,6 +116,13 @@ impl Scalar for f32 {
 
     fn from_normalized(val: f32) -> f32 { val }
     fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
+
+    fn random_uniform(rng: &mut XorShift64, range: f32) -> f32 {
+        // generate float in [-range, range] properly
+        let u = rng.next() as f32 / u64::MAX as f32; // [0, 1)
+        u * 2.0 * range - range
+    }
+
     fn to_f32(self) -> f32 { self }
     fn to_u32(self) -> u32 { self as u32 }
     fn from_i32(val: i32) -> f32 { val as f32 }
@@ -147,6 +156,13 @@ impl Scalar for i32 {
         (val * Self::Acc::MAX as f32).round().clamp(Self::Acc::MIN as f32, Self::Acc::MAX as f32) as i32
     }
     fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
+
+    fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> i32 {
+        let range: Self::Acc = Numeric::max(range, <i32 as Numeric>::from_i32(1i32));
+        let spread = (2 * range as u32) as u32;
+        rng.gen_range(spread) as i32 - range
+    }
+
     fn to_f32(self) -> f32 { self as f32 / i32::MAX as f32 }
     fn to_u32(self) -> u32 { self as u32 }
     fn from_i32(val: i32) -> i32 { val as i32 }
