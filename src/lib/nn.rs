@@ -6,6 +6,8 @@ pub mod kernels;
 pub mod optim;
 #[path = "nn/rnn.rs"]
 pub mod rnn;
+#[path = "nn/conv.rs"]
+pub mod conv;
 #[path = "nn/activations.rs"]
 pub mod activations;
 

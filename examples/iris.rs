@@ -10,15 +10,15 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
-    let epochs: i32 = 5000;
-    let batch_size: usize = 1;
+    let epochs: i32 = 15000;
+    let batch_size: usize = 32;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 4;
-    optim.momentum_shift = None;//Some(8);
+    optim.lr_shift = 7;
+    optim.momentum_shift = None;
 
-    let mut l1 = Linear::<f32>::new(4, 8);
-    let mut l2 = Linear::<f32>::new(8, 8);
-    let mut l3 = Linear::<f32>::new(8, 3);
+    let mut l1 = Linear::<i32>::new(4, 16);
+    let mut l2 = Linear::<i32>::new(16, 16);
+    let mut l3 = Linear::<i32>::new(16, 3);
 
     l1.init(&mut rng);
     l2.init(&mut rng);
@@ -29,23 +29,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("L3 {}: {} -> {}", l3.weights.quant_shift, l3.input_shift, l3.output_shift);
     
     // Build model for Iris: 4 input features → 3 output classes
-    let mut model = Sequential::<f32>::new();
+    let mut model = Sequential::<i32>::new();
     model
         .add(l1)
-        .add(ReLU::<f32>::new())
+        .add(ReLU::<i32>::new())
         .add(l2)
-        .add(ReLU::<f32>::new())
+        .add(ReLU::<i32>::new())
         .add(l3);
 
     // Load datasets (unwrap Results with ?)
-    let train_ds = DatasetBuilder::<f32>::new("data/iris_train.tsv")
+    let train_ds = DatasetBuilder::<i32>::new("data/iris_train.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
         .with_quantization(QuantizationMethod::StandardScore)
         .load()?;  // ← Unwrap Result<Dataset, DataError>
     
-    let test_ds = DatasetBuilder::<f32>::new("data/iris_test.tsv")
+    let test_ds = DatasetBuilder::<i32>::new("data/iris_test.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Shuffle
         let indices = shuffled_indices(train_ds.len(), &mut rng);
 
-        let mut epoch_loss: f64 = 0.0;
+        let mut epoch_loss: i64 = 0;
         let mut batches_processed = 0;
 
         let last_batch_start = batch_size * ((train_ds.len() / batch_size) - 1);
@@ -80,21 +80,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (preds, shift) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
 
             let target_shift = train_ds.input_shift; // the shift targets were stored at
-            let pred_aligned = &preds >> shift.saturating_sub(target_shift);
+            let diff = shift as i32 - target_shift as i32;
+            let pred_aligned = if diff > 0 {
+                &preds >> (diff as u32)
+            } else if diff < 0 {
+                &preds << (-diff as u32)
+            } else {
+                preds.clone()
+            };
 
             let (loss, grad_out) = MSE.forward(&pred_aligned, &batch_targets);
 
             model.zero_grads();
-            if batch_start == 0 && epoch % 100 == 0 {
-                //println!("with shift {}", shift);
-                //println!("Loss: {} for GRAD {:?}", loss, grad_out);
-                println!("{:<6} {:>10} {:>10} {:>8}", batch_start, argmax(&batch_targets, Some(1))[0], argmax(&preds, Some(1))[0], loss);
-                continue;
-            }
-            epoch_loss += loss as f64;
+            epoch_loss += loss as i64;
             batches_processed += 1;
 
-            model.backward(&grad_out, target_shift);
+            model.backward(&grad_out, shift);
             model.step(&optim);
         }
         if epoch % 100 == 0 {
@@ -103,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 get_overflow_stats();
                 reset_overflow_stats();
             }
-            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / batches_processed as f64);
+            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / batches_processed as i64);
         }
     }
     #[cfg(debug_assertions)]
@@ -116,17 +117,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\n{:<6} {:>10} {:>10} {:>8}",
         "t", "target", "pred", "error"
     );
-    let mut eval_loss: f64 = 0.0;
+    let mut eval_loss: i64 = 0;
     for t in 0..test_ds.len() {
         let x_t = test_ds.get_input(t);
         let target = test_ds.get_target(t);
-        let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
-        println!("{:?} -> {:?}", pred, target);
-        let (loss, grad_out) = mse.forward(&pred, &target);
-        eval_loss += loss as f64;
+        let (pred, shift) = model.forward(&x_t, test_ds.input_shift, &mut rng);
+        let target_shift = test_ds.input_shift; // the shift targets were stored at
+        let diff = shift as i32 - target_shift as i32;
+        let pred_aligned = if diff > 0 {
+            &pred >> (diff as u32)
+        } else if diff < 0 {
+            &pred << (-diff as u32)
+        } else {
+            pred.clone()
+        };
+
+        let (loss, grad_out) = MSE.forward(&pred_aligned, &target);
+
+        eval_loss += loss as i64;
         println!("{:<6} {:>10} {:>10} {:>8}", t, argmax(&target, Some(1))[0], argmax(&pred, Some(1))[0], loss);
     }
-    println!("Eval  total  MSE : {}", eval_loss / test_ds.len() as f64);
+    println!("Eval  total  MSE : {}", eval_loss / test_ds.len() as i64);
 
     // Get a batch of test samples
     let test_indices: Vec<usize> = (0..test_ds.len()).collect();
@@ -134,9 +145,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Forward pass
     let (predictions_tensor, shift) = model.forward(&test_inputs, test_ds.input_shift, &mut rng);
-    
+    let target_shift = test_ds.input_shift; // the shift targets were stored at
+    let diff = shift as i32 - target_shift as i32;
+    let pred_aligned = if diff > 0 {
+        &predictions_tensor >> (diff as u32)
+    } else if diff < 0 {
+        &predictions_tensor << (-diff as u32)
+    } else {
+        predictions_tensor.clone()
+    };
+
     // Get predicted classes [batch_size]
-    let predicted_classes = argmax(&predictions_tensor, Some(1));
+    let predicted_classes = argmax(&pred_aligned, Some(1));
     
     // Get ground truth labels [batch_size]
     let true_labels: Vec<u8> = test_indices
