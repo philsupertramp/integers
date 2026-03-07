@@ -25,7 +25,6 @@ pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
     fn abs(self) -> Self;
     fn from_i32(val: i32) -> Self;
     fn gt(self, other: Self) -> bool;
-    fn eq(self, other: Self) -> bool;
     fn to_u32(self) -> u32;
     fn signum(self) -> i32;
 }
@@ -39,7 +38,6 @@ impl Numeric for f32 {
     fn from_i32(val: i32) -> f32 { val as f32 }
     fn abs(self) -> f32 { self.abs() }
     fn gt(self, other: f32) -> bool { self > other }
-    fn eq(self, other: f32) -> bool { self == other }
     fn to_u32(self) -> u32 { self as u32 }
     fn signum(self) -> i32 { if self > 0.0 { 1 } else if self == 0.0 { 0 } else { -1 } }
 }
@@ -53,15 +51,12 @@ impl Numeric for i32 {
     fn from_i32(val: i32) -> i32 { val }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
     fn gt(self, other: i32) -> bool { self > other }
-    fn eq(self, other: i32) -> bool { self == other }
     fn to_u32(self) -> u32 { self.max(0) as u32 }
     fn signum(self) -> i32 { if self > 0 { 1 } else if self == 0 { 0 } else { -1 } }
 }
 
 pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     type Acc: Numeric;
-    const MAX: Self;
-    const MIN: Self;
 
     /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
     /// stochastic downcasting)
@@ -103,8 +98,6 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
 
 impl Scalar for f32 {
     type Acc = f32;
-    const MAX: f32 = f32::MAX;
-    const MIN: f32 = f32::MIN;
 
     fn from_normalized(val: f32) -> f32 { val }
     fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
@@ -130,8 +123,6 @@ impl Scalar for f32 {
 
 impl Scalar for i32 {
     type Acc = i32;
-    const MAX: i32 = i32::MAX;
-    const MIN: i32 = i32::MIN;
 
     fn from_normalized(val: f32) -> i32 {
         (val * Self::Acc::MAX as f32).round().clamp(Self::Acc::MIN as f32, Self::Acc::MAX as f32) as i32
