@@ -49,23 +49,9 @@ impl<S: Scalar + 'static> RNNCell<S> {
 
     pub fn init_weights(&mut self, rng: &mut XorShift64) {
         self.w_ih.init_xavier(rng);
+        self.w_hh.init_xavier(rng);
 
-        let hidden_dim = self.w_hh.weights.master.shape[0];
-        let spectral_cap_i32 = kernels::isqrt(16129 / (hidden_dim as u32)) as i32;
-        let spectral_cap_master = spectral_cap_i32 * (1 << self.w_hh.weights.quant_shift);
-
-        let fan_in = self.w_hh.weights.master.shape[1];
-        let fan_out = self.w_hh.weights.master.shape[0];
-        let xavier_limit_i32 = kernels::isqrt(96774 / (fan_in + fan_out) as u32) as i32;
-
-        let xavier_limit_master = xavier_limit_i32 * (1 << self.w_hh.weights.quant_shift);
-        let range = xavier_limit_master.min(spectral_cap_master);
-        //self.w_hh.weights.init_uniform(rng, range);
-    }
-
-    pub fn init_weights_auto(&mut self, rng: &mut XorShift64) {
-        self.init_weights(rng);
-
+        // After init, infer shifts for both
         let inferred_shift = self.infer_scale_shift();
         self.w_ih.weights.quant_shift = inferred_shift;
         self.w_ih.bias.quant_shift = inferred_shift;
@@ -75,9 +61,6 @@ impl<S: Scalar + 'static> RNNCell<S> {
 }
 
 impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
-    fn get_output_shift(&self) -> u32 {
-        0
-    }
     fn forward(&mut self, input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32) {
         let batch = input.shape[0];
 
@@ -125,7 +108,7 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
     {
                     *c = (*g).shr(diff_g).add((*k).shr(diff_carry));
                 }
-                (combined, s_g.min(carry_s_g))
+                (combined, s_combined)
             }
             None => (grad_output.clone(), s_g),
         };
@@ -240,31 +223,6 @@ mod tests {
     }
 
     #[test]
-    fn test_init_weights_auto(){
-        let mut rng = XorShift64::new(420);
-        let mut cell = RNNCell::new(2, 4);
-
-        // sets weights and determines quant_shift
-        cell.init_weights_auto(&mut rng);
-
-        assert_eq!(cell.w_ih.weights.master.data, vec![124, -105, 44, -53, 59, -11, 5, 35]);
-        assert_eq!(cell.w_hh.weights.master.data, vec![20, -43, 36, 22, 2, -14, 15, 29, 13, 36, -49, -42, -7, 8, 12, 0]);
-        assert_eq!(cell.w_ih.weights.quant_shift, 0);
-        assert_eq!(cell.w_hh.weights.quant_shift, 0);
-    }
-
-    #[test]
-    fn test_rnn_cell_get_output_shift(){
-        let mut cell = RNNCell::new(2, 4);
-
-        assert_eq!(cell.get_output_shift(), 0);
-
-        cell.output_shift = Some(4);
-
-        assert_eq!(cell.get_output_shift(), 4);
-    }
-
-    #[test]
     fn test_rnncell_forward(){
         let mut rng = XorShift64::new(420);
         let mut cell = RNNCell::new(2, 2);
@@ -366,7 +324,7 @@ mod tests {
         let mut cell = RNNCell::new(2, 4);
 
         // sets weights and determines quant_shift
-        cell.init_weights_auto(&mut rng);
+        cell.init_weights(&mut rng);
 
         assert_eq!(cell.w_ih.weights.master.data, vec![124, -105, 44, -53, 59, -11, 5, 35]);
         assert_eq!(cell.w_hh.weights.master.data, vec![20, -43, 36, 22, 2, -14, 15, 29, 13, 36, -49, -42, -7, 8, 12, 0]);

@@ -37,7 +37,7 @@ impl Numeric for f32 {
     fn sub(self, other: Self) -> Self { self - other }
     fn mul(self, other: Self) -> Self { self * other }
     fn div(self, other: Self) -> Self { self / other }
-    fn sqrt(self) -> Self { self.sqrt() }
+    fn sqrt(self) -> Self { f32::sqrt(self) }
     fn from_i32(val: i32) -> f32 { val as f32 }
     fn abs(self) -> f32 { self.abs() }
     fn gt(self, other: f32) -> bool { self > other }
@@ -71,16 +71,15 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     /// stochastic downcasting)
     fn downcast(acc: Self::Acc, shift: u32, rng: &mut XorShift64) -> Self;
 
-    /// cast the scalar from normalized float [0, 1] or [-1, 1] to the desired scalar space.
-    /// E.g. for i8 from [-1, 1] to [-127, 127]
-    fn from_normalized(val: f32) -> Self;
-
     /// Casts own value to accumulator type
     fn into_acc(self) -> Self::Acc;
 
+    fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> Self::Acc;
+
     fn from_i32(val: i32) -> Self::Acc;
     fn from_f64(val: f64) -> Self::Acc;
-    fn to_f32(self) -> f32;
+    fn from_quantized(val: i32) -> Self;
+    fn dataset_input_shift(quantizer_shift: u32) -> u32;
 
     fn to_u32(self) -> u32;
 
@@ -110,9 +109,14 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
 impl Scalar for f32 {
     type Acc = f32;
 
-    fn from_normalized(val: f32) -> f32 { val }
     fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
-    fn to_f32(self) -> f32 { self }
+
+    fn random_uniform(rng: &mut XorShift64, range: f32) -> f32 {
+        // generate float in [-range, range] properly
+        let u = rng.next() as f32 / u64::MAX as f32; // [0, 1)
+        u * 2.0 * range - range
+    }
+
     fn to_u32(self) -> u32 { self as u32 }
     fn from_i32(val: i32) -> f32 { val as f32 }
     fn from_f64(val: f64) -> f32 { val as f32 }
@@ -122,6 +126,10 @@ impl Scalar for f32 {
     fn abs(self) -> f32 { if self > 0.0 { self } else { -1.0 * self }}
     fn unit_shift() -> u32 { 0u32 }
     fn acc_shift(fan_in: usize) -> u32 { 0u32 }
+    
+    fn from_quantized(val: i32) -> f32 { val as f32 / 127.0 }
+    fn dataset_input_shift(_: u32) -> u32 { 0 }
+
     fn is_positive(value: f32) -> bool { value > 0.0 }
     fn relu(value: f32) -> f32 {
         if value > 0.0 {
@@ -137,18 +145,25 @@ impl Scalar for f32 {
 impl Scalar for i32 {
     type Acc = i32;
 
-    fn from_normalized(val: f32) -> i32 {
-        (val * Self::Acc::MAX as f32).round().clamp(Self::Acc::MIN as f32, Self::Acc::MAX as f32) as i32
-    }
     fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
-    fn to_f32(self) -> f32 { self as f32 / i32::MAX as f32 }
-    fn to_u32(self) -> u32 { self as u32 }
+
+    fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> i32 {
+        let range: Self::Acc = Numeric::max(range, <i32 as Numeric>::from_i32(1i32));
+        let spread = (2 * range as u32) as u32;
+        rng.gen_range(spread) as i32 - range
+    }
+
+    fn to_u32(self) -> u32 { if self < 0i32 { 0u32 } else { self as u32 } }
     fn from_i32(val: i32) -> i32 { val as i32 }
     fn from_f64(val: f64) -> i32 { (val * 127.0).round() as i32 }
     fn into_acc(self) -> i32 { self }
     fn mul(self, other: i32) -> i32 { self.saturating_mul(other) }
     fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
+    
+    fn from_quantized(val: i32) -> i32 { val }
+    fn dataset_input_shift(quantizer_shift: u32) -> u32 { quantizer_shift }
+
     fn unit_shift() -> u32 { 31u32 }
     fn acc_shift(fan_in: usize) -> u32 { (usize::BITS - fan_in.leading_zeros()) as u32 }
     fn is_positive(value: i32) -> bool { value > 0 }
@@ -226,17 +241,15 @@ where
 /// assert_eq!(o.len(), 1);
 /// assert_eq!(o.data[0], 2);
 /// ```
-impl<T> Shr<u32> for Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+impl<S: Scalar + Numeric> Shr<u32> for Tensor<S>
 {
-    type Output = Tensor<T>;
+    type Output = Tensor<S>;
 
-    fn shr(self, shift: u32) -> Tensor<T> {
+    fn shr(self, shift: u32) -> Tensor<S> {
         let shifted_data = self
             .data
             .into_iter()
-            .map(|val| val >> shift)
+            .map(|val| val.shr(shift))
             .collect();
 
         Tensor {
@@ -258,17 +271,15 @@ where
 /// assert_eq!(o.data[0], 2);
 /// assert_eq!(t.data[0], 4);
 /// ```
-impl<T> Shr<u32> for &Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default + Shr<u32, Output = T>,
+impl<S: Scalar + Numeric> Shr<u32> for &Tensor<S>
 {
-    type Output = Tensor<T>;
+    type Output = Tensor<S>;
 
-    fn shr(self, shift: u32) -> Tensor<T> {
+    fn shr(self, shift: u32) -> Tensor<S> {
         let shifted_data = self
             .data
             .iter()
-            .map(|&val| val >> shift)
+            .map(|&val| val.shr(shift))
             .collect();
 
         Tensor {

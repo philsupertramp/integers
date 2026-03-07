@@ -5,7 +5,7 @@ use integers::nn::activations::{ReLU};
 use integers::data::{shuffled_indices};
 #[cfg(debug_assertions)]
 use integers::debug::{reset_overflow_stats, get_overflow_stats};
-use integers::nn::optim::{AdamConfig};
+use integers::nn::optim::{AdamConfig, SGDConfig};
 use integers::dataset_loaders::{QuantizationMethod, DatasetBuilder, FileFormat};
 
 use std::time::Instant;
@@ -66,10 +66,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  epochs = {}\n", epochs);
     let mut rng = XorShift64::new(42);
 
-    let l1 = Linear::<f32>::new(784, 128);
-    let l2 = Linear::<f32>::new(128, 128);  // ← second hidden layer
-    let l3 = Linear::<f32>::new(128, 10);   // ← output layer
+    let mut l1 = Linear::<f32>::new(784, 128);
+    let mut l2 = Linear::<f32>::new(128, 128);  // ← second hidden layer
+    let mut l3 = Linear::<f32>::new(128, 10);   // ← output layer
     let mut model = Sequential::<f32>::new();
+
+    l1.init(&mut rng);
+    l2.init(&mut rng);
+    l3.init(&mut rng);
+
+    println!("L1 {}: {} -> {}", l1.weights.quant_shift, l1.input_shift, l1.output_shift);
+    println!("L2 {}: {} -> {}", l2.weights.quant_shift, l2.input_shift, l2.output_shift);
+    println!("L3 {}: {} -> {}", l3.weights.quant_shift, l3.input_shift, l3.output_shift);
+
 
     model
         .add(l1)
@@ -79,13 +88,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add(l3);
     model.init_all(&mut rng);
 
-    let optim = AdamConfig {
-        lr_shift: 7,
-        b1_shift: 3,
-        b2_shift: 4,
-        eps: 1
-    };
-    
+    let mut optim = SGDConfig::new();
+    optim.lr_shift = 8;
+
     // Print architecture
     println!("Architecture:");
     model.print_summary(&model.describe(), 0);
@@ -116,9 +121,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_indices = &indices[batch_start..batch_end];
             let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
 
-            let (preds, shift) = model.forward(&batch_inputs, 0, &mut rng);
+            let (preds, shift) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
+            if batch_start == 0 {
+                println!("with shift {}", shift);
+                //println!("Loss: {} for GRAD {:?}", loss, grad_out);
+            }
             epoch_loss += loss as f64;
             batches_processed += 1;
 
@@ -133,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for t in 0..test_ds.len().min(1000) {
             let x = test_ds.get_input(t);
             let target_cls = test_ds.labels[t];
-            let (pred, shift) = model.forward(&x, 0, &mut rng);
+            let (pred, shift) = model.forward(&x, test_ds.input_shift, &mut rng);
             let pred_cls = argmax(&pred, Some(1))[0] as u8;
             if pred_cls == target_cls {
                 correct += 1;
@@ -189,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let x = test_ds.get_input(t);
         let target_cls = test_ds.labels[t] as usize;
         model.sync_weights(&mut rng);
-        let (pred, shift) = model.forward(&x, 0, &mut rng);
+        let (pred, shift) = model.forward(&x, test_ds.input_shift, &mut rng);
         let pred_cls = argmax(&pred, Some(1))[0] as usize;
 
         if pred_cls == target_cls {
