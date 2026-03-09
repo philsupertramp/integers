@@ -18,14 +18,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ─── Load Data ─────────────────────────────────────────────────────────
     println!("Loading datasets...");
     let train_start = Instant::now();
-    let train_ds = DatasetBuilder::<i32>::new("data/mnist_train.parquet")
+    let train_ds = DatasetBuilder::<f32>::new("data/mnist_train.parquet")
         .format(FileFormat::Parquet)
         .with_features((0..784).collect())
         .with_label_column(784)
         .with_num_classes(10)
         .with_quantization(QuantizationMethod::StandardScore)
         .load()?;
-    let test_ds = DatasetBuilder::<i32>::new("data/mnist_test.parquet")
+    let test_ds = DatasetBuilder::<f32>::new("data/mnist_test.parquet")
         .format(FileFormat::Parquet)
         .with_features((0..784).collect())
         .with_label_column(784)
@@ -66,10 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  epochs = {}\n", epochs);
     let mut rng = XorShift64::new(42);
 
-    let mut l1 = Linear::<i32>::new(784, 128);
-    let mut l2 = Linear::<i32>::new(128, 128);  // ← second hidden layer
-    let mut l3 = Linear::<i32>::new(128, 10);   // ← output layer
-    let mut model = Sequential::<i32>::new();
+    let mut l1 = Linear::<f32>::new(784, 128);
+    let mut l2 = Linear::<f32>::new(128, 128);  // ← second hidden layer
+    let mut l3 = Linear::<f32>::new(128, 10);   // ← output layer
+    let mut model = Sequential::<f32>::new();
 
     l1.init(&mut rng);
     l2.init(&mut rng);
@@ -82,14 +82,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     model
         .add(l1)
-        .add(ReLU::<i32>::new())
+        .add(ReLU::<f32>::new())
         .add(l2)
-        .add(ReLU::<i32>::new())
+        .add(ReLU::<f32>::new())
         .add(l3);
     model.init_all(&mut rng);
 
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 2;
+    optim.lr_shift = 8;
 
     // Print architecture
     println!("Architecture:");
@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Shuffle
         let indices = shuffled_indices(train_ds.len(), &mut rng);
 
-        let mut epoch_loss: i64 = 0;
+        let mut epoch_loss: f64 = 0.0;
         let mut batches_processed = 0;
 
         // Minibatches
@@ -121,19 +121,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_indices = &indices[batch_start..batch_end];
             let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
 
-            let (preds, shift) = model.forward(&batch_inputs, 0, &mut rng);
+            let (preds, shift) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
             if batch_start == 0 {
                 println!("with shift {}", shift);
                 //println!("Loss: {} for GRAD {:?}", loss, grad_out);
             }
-            epoch_loss += loss as i64;
+            epoch_loss += loss as f64;
             batches_processed += 1;
 
             model.zero_grads();
             model.backward(&grad_out, shift);
-            model.step(&mut optim);
+            model.step(&optim);
         }
 
         // ─── Evaluation ────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for t in 0..test_ds.len().min(1000) {
             let x = test_ds.get_input(t);
             let target_cls = test_ds.labels[t];
-            let (pred, shift) = model.forward(&x, 0, &mut rng);
+            let (pred, shift) = model.forward(&x, test_ds.input_shift, &mut rng);
             let pred_cls = argmax(&pred, Some(1))[0] as u8;
             if pred_cls == target_cls {
                 correct += 1;
@@ -169,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("{:>6} {:>12} {:>11.1}% {:>10.2} {:>8}",
                 epoch,
-                epoch_loss / (batches_processed as i64),
+                epoch_loss / (batches_processed as f64),
                 accuracy * 100.0,
                 elapsed,
                 -1
@@ -198,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let x = test_ds.get_input(t);
         let target_cls = test_ds.labels[t] as usize;
         model.sync_weights(&mut rng);
-        let (pred, shift) = model.forward(&x, 0, &mut rng);
+        let (pred, shift) = model.forward(&x, test_ds.input_shift, &mut rng);
         let pred_cls = argmax(&pred, Some(1))[0] as usize;
 
         if pred_cls == target_cls {
@@ -228,3 +228,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n✓ Done!");
     Ok(())
 }
+
