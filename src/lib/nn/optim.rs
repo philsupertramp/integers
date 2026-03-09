@@ -114,11 +114,7 @@ impl SGDUpdater<i32> for SGDConfig {
                     let m_decay = *m >> m_shift; 
                     let g_scaled = g_clipped >> m_shift; 
                     
-                    let val = Numeric::add(m_decay, g_scaled);
-                    if val != Numeric::from_i32(0i32) {
-                        println!("M: {}, G: {}", m_decay, g_scaled);
-                    }
-                    *m = Numeric::sub(*m, val);
+                    *m = Numeric::add(Numeric::sub(*m, m_decay), g_scaled);
 
                     // 3. Apply Stochastic Rounding to the final parameter update
                     // Instead of truncating: w = w - (m >> combined_shift)
