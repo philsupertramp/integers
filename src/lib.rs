@@ -410,6 +410,7 @@ pub fn accuracy(predictions: &[usize], ground_truth: &[u8]) -> f32 {
 
 
 /// RNG State
+#[derive(Debug, PartialEq)]
 pub struct XorShift64 {
     pub state: u64,
 }

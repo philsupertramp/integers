@@ -5,16 +5,17 @@ use integers::nn::activations::{ReLU, Tanh};
 use integers::dataset_loaders::*;
 use integers::data::{shuffled_indices};
 use integers::debug::*;
-use integers::nn::optim::{SGDConfig};
+use integers::nn::optim::{SGDConfig, AdamConfig};
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
     let epochs: i32 = 5000;
-    let batch_size: usize = 128;
-    let mut optim = SGDConfig::new();
-    optim.lr_shift = 11;
-    optim.momentum_shift = Some(2);
+    let batch_size: usize = 32;
+    let mut optim = AdamConfig::new();
+    optim.lr_shift = 10;
+    optim.eps = 0;
+    //optim.momentum_shift = Some(0);
 
     let mut l1 = Linear::<f32>::new(4, 8);
     let mut l2 = Linear::<f32>::new(8, 8);
@@ -85,12 +86,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (loss, grad_out) = MSE.forward(&pred_aligned, &batch_targets);
 
             model.zero_grads();
-            //if batch_start == 0 && epoch % 100 == 0 {
-            //    //println!("with shift {}", shift);
-            //    //println!("Loss: {} for GRAD {:?}", loss, grad_out);
-            //    //println!("{:<6} {:>10} {:>10} {:>8}", batch_start, argmax(&batch_targets, Some(1))[0], argmax(&preds, Some(1))[0], loss);
-            //    continue;
-            //}
+            // if batch_start == 0 && epoch % 100 == 0 {
+            //     println!("with shift {}", shift);
+            //     println!("Loss: {} for GRAD {:?}", loss, grad_out);
+            //     println!("{:<6} {:>10} {:>10} {:>8}", batch_start, argmax(&batch_targets, Some(1))[0], argmax(&preds, Some(1))[0], loss);
+            //     continue;
+            // }
             epoch_loss += loss as f64;
             batches_processed += 1;
 

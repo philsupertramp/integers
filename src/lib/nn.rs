@@ -114,7 +114,7 @@ pub trait Module<S: Scalar>: Any {
     fn zero_grads(&mut self) {}
 
     /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
-    fn step(&mut self, _optim: &dyn OptimizerConfig<S>) {}
+    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {}
 
     fn memory_report(&self) -> (usize, usize) {
         (0, 0)
@@ -228,7 +228,7 @@ impl<S: Scalar> Params<S> {
         self.state = None;
     }
 
-    pub fn step(&mut self, optim: &dyn OptimizerConfig<S>) {
+    pub fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
         if let Some(grads) = self.grads.take() {
             let state = self
                 .state
@@ -454,7 +454,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         (grad_input_shifted, s_g_prev)
     }
 
-    fn step(&mut self, optim: &dyn OptimizerConfig<S>) {
+    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
         self.weights.step(optim);
         self.bias.step(optim);
     }
@@ -547,7 +547,7 @@ impl<S: Scalar + 'static> Module<S> for Sequential<S> {
     fn sync_weights(&mut self, rng: &mut XorShift64) {
         for m in self.modules.iter_mut() { m.sync_weights(rng); }
     }
-    fn step(&mut self, optim: &dyn OptimizerConfig<S>) {
+    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
         for m in self.modules.iter_mut() { m.step(optim); }
     }
 

@@ -134,7 +134,7 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
         self.w_hh.sync_weights(rng);
     }
 
-    fn step(&mut self, optim: &dyn OptimizerConfig<S>) {
+    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
         self.w_ih.step(optim);
         self.w_hh.step(optim);
     }

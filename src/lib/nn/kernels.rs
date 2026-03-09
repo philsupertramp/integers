@@ -117,6 +117,8 @@ pub fn tanh_i8(x: i8) -> i8 {
 }
 
 pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i32 {
+    if shift == 0 { return val; }
+
     let mask = (1 << shift) - 1;
     let frac = val & mask;
 
