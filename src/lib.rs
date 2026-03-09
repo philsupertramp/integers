@@ -157,14 +157,14 @@ impl Scalar for i32 {
     fn from_i32(val: i32) -> i32 { val as i32 }
     fn from_f64(val: f64) -> i32 { (val * 127.0).round() as i32 }
     fn into_acc(self) -> i32 { self }
-    fn mul(self, other: i32) -> i32 { self.saturating_mul(other) }
+    fn mul(self, other: i32) -> i32 { self * other }
     fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
     
     fn from_quantized(val: i32) -> i32 { val }
     fn dataset_input_shift(quantizer_shift: u32) -> u32 { quantizer_shift }
 
-    fn unit_shift() -> u32 { 31u32 }
+    fn unit_shift() -> u32 { 15u32 }
     fn acc_shift(fan_in: usize) -> u32 { (usize::BITS - fan_in.leading_zeros()) as u32 }
     fn is_positive(value: i32) -> bool { value > 0 }
     fn relu(value: i32) -> i32 {

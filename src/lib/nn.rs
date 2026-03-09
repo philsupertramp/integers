@@ -233,7 +233,7 @@ impl<S: Scalar> Params<S> {
             let state = self
                 .state
                 .get_or_insert_with(|| optim.init_state(self.master.len()));
-            optim.update(&mut self.master.data, &grads.data, state, self.quant_shift);
+            optim.update(&mut self.master.data, &grads.data, state, self.quant_shift, (&grads).shape[0] as u32);
         }
     }
 

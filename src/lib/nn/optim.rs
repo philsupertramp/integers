@@ -4,7 +4,7 @@ use crate::{checked_sub_counting, checked_add_counting, Scalar, Numeric};
 use std::fmt;
 
 pub trait OptimizerConfig<S: Scalar> {
-    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32);
+    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32, batch_size: u32);
     fn init_state(&self, len: usize) -> OptimizerState<S>;
 }
 
@@ -70,7 +70,7 @@ impl<S: Scalar> OptimizerConfig<S> for SGDConfig {
         }
     }
 
-    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32) {
+    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32, batch_size: u32) {
         assert_eq!(
             weights.len(),
             grads.len(),
@@ -78,7 +78,8 @@ impl<S: Scalar> OptimizerConfig<S> for SGDConfig {
             weights.len(),
             grads.len(),
         );
-        let lr_div = S::Acc::from_i32(1 << self.lr_shift);
+        let batch_shift = batch_size.ilog2(); // For 32, this returns 5
+        let combined_div = S::Acc::from_i32(1 << (self.lr_shift + batch_shift)); 
 
         match (self.momentum_shift, state) {
             (Some(m_shift), OptimizerState::SGD { velocity }) => {
@@ -89,12 +90,12 @@ impl<S: Scalar> OptimizerConfig<S> for SGDConfig {
                     .zip(grads.iter())
                 {
                     *m = m.sub(m.div(m_div)).add(g.div(m_div));
-                    *w = w.sub(m.div(lr_div));
+                    *w = w.sub(m.div(combined_div));
                 }
             }
             _ => {
                 for (w, g) in weights.iter_mut().zip(grads) {
-                    *w = w.sub(g.div(lr_div));
+                    *w = w.sub(g.div(combined_div));
                 }
             }
         }
@@ -166,7 +167,7 @@ impl<S: Scalar> OptimizerConfig<S> for AdamConfig {
         }
     }
 
-    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32) {
+    fn update(&self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32, batch_size: u32) {
         if let OptimizerState::Adam { m, v } = state {
             let b1_div = S::Acc::from_i32(1 << self.b1_shift);
             let b2_div = S::Acc::from_i32(1 << self.b2_shift);
