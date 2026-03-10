@@ -4,7 +4,7 @@ use crate::{checked_sub_counting, checked_add_counting, Scalar, Numeric, XorShif
 use std::fmt;
 
 pub trait OptimizerConfig<S: Scalar> {
-    fn update(&mut self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32, batch_size: u32);
+    fn update(&mut self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, batch_size: u32);
     fn init_state(&self, len: usize) -> OptimizerState<S>;
 }
 
@@ -16,7 +16,7 @@ pub enum OptimizerState<S: Scalar> {
 }
 
 pub trait SGDUpdater<S: Scalar> {
-    fn do_update(config: &mut SGDConfig, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32, batch_size: u32);
+    fn do_update(config: &mut SGDConfig, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, batch_size: u32);
 }
 
 // SGD
@@ -66,7 +66,7 @@ impl SGDConfig {
     }
 }
 impl SGDUpdater<f32> for SGDConfig {
-    fn do_update(config: &mut SGDConfig, weights: &mut [f32], grads: &[f32], state: &mut OptimizerState<f32>, quant_shift: u32, batch_size: u32){
+    fn do_update(config: &mut SGDConfig, weights: &mut [f32], grads: &[f32], state: &mut OptimizerState<f32>, batch_size: u32){
         let batch_shift = batch_size.ilog2();
         let combined_div: f32 = <f32 as Numeric>::from_i32(1 << (config.lr_shift + batch_shift));
 
@@ -92,10 +92,11 @@ impl SGDUpdater<f32> for SGDConfig {
 }
 
 impl SGDUpdater<i32> for SGDConfig {
-    fn do_update(config: &mut SGDConfig, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState<i32>, quant_shift: u32, batch_size: u32){
+    fn do_update(config: &mut SGDConfig, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState<i32>, batch_size: u32){
         let batch_shift = batch_size.ilog2(); 
         let combined_shift = config.lr_shift + batch_shift;
-        let clip_val = 100 << batch_shift;
+        // TODO: what if we don't clip, like for f32?
+        let clip_val = 256 << batch_shift; // sqrt(i32::MAX);
         let clip_min = -clip_val;
 
         match (config.momentum_shift, state) {
@@ -147,7 +148,7 @@ where SGDConfig: SGDUpdater<S>
         }
     }
 
-    fn update(&mut self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32, batch_size: u32) {
+    fn update(&mut self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, batch_size: u32) {
         assert_eq!(
             weights.len(),
             grads.len(),
@@ -161,7 +162,6 @@ where SGDConfig: SGDUpdater<S>
             weights,
             grads,
             state,
-            quant_shift,
             batch_size,
         );
     }
@@ -232,7 +232,7 @@ impl<S: Scalar> OptimizerConfig<S> for AdamConfig {
         }
     }
 
-    fn update(&mut self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, quant_shift: u32, batch_size: u32) {
+    fn update(&mut self, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, batch_size: u32) {
         if let OptimizerState::Adam { m, v } = state {
             let b1_div = S::Acc::from_i32(1 << self.b1_shift);
             let b2_div = S::Acc::from_i32(1 << self.b2_shift);

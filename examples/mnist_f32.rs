@@ -12,7 +12,7 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔═══════════════════════════════════════════════════════════╗");
-    println!("║               MNIST INTEGER NEURAL NETWORK                 ║");
+    println!("║               MNIST FLOAT NEURAL NETWORK                  ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
     // ─── Load Data ─────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     model.init_all(&mut rng);
 
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 8;
+    optim.lr_shift = 6;
 
     // Print architecture
     println!("Architecture:");
@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             model.zero_grads();
             model.backward(&grad_out, shift);
-            model.step(&optim);
+            model.step(&mut optim);
         }
 
         // ─── Evaluation ────────────────────────────────────────────────────

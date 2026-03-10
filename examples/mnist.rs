@@ -12,7 +12,7 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╔═══════════════════════════════════════════════════════════╗");
-    println!("║               MNIST INTEGER NEURAL NETWORK                 ║");
+    println!("║               MNIST INTEGER NEURAL NETWORK                ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
     // ─── Load Data ─────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     model.init_all(&mut rng);
 
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 2;
+    optim.lr_shift = 1;
 
     // Print architecture
     println!("Architecture:");
