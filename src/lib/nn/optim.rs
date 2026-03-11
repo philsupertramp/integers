@@ -16,21 +16,23 @@ pub enum OptimizerState<S: Scalar> {
 }
 
 pub trait SGDUpdater<S: Scalar> {
-    fn do_update(config: &mut SGDConfig, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, batch_size: u32);
+    fn do_update(config: &mut SGDConfig<S>, weights: &mut [S::Acc], grads: &[S::Acc], state: &mut OptimizerState<S>, batch_size: u32);
 }
 
 // SGD
-pub struct SGDConfig {
+pub struct SGDConfig<S: Scalar> {
     pub lr_shift: u32,
     pub momentum_shift: Option<u32>,
+    pub clip_val: S::Acc,
     pub rng: XorShift64,
 }
 
-impl SGDConfig {
+impl<S: Scalar> SGDConfig<S> {
     pub fn new() -> Self {
         Self {
             lr_shift: 2,
             momentum_shift: None,
+            clip_val: S::Acc::from_i32(128),
             rng: XorShift64::new(420),
         }
     }
@@ -65,8 +67,8 @@ impl SGDConfig {
         self
     }
 }
-impl SGDUpdater<f32> for SGDConfig {
-    fn do_update(config: &mut SGDConfig, weights: &mut [f32], grads: &[f32], state: &mut OptimizerState<f32>, batch_size: u32){
+impl SGDUpdater<f32> for SGDConfig<f32> {
+    fn do_update(config: &mut SGDConfig<f32>, weights: &mut [f32], grads: &[f32], state: &mut OptimizerState<f32>, batch_size: u32){
         let batch_shift = batch_size.ilog2();
         let combined_div: f32 = <f32 as Numeric>::from_i32(1 << (config.lr_shift + batch_shift));
 
@@ -91,12 +93,12 @@ impl SGDUpdater<f32> for SGDConfig {
     }
 }
 
-impl SGDUpdater<i32> for SGDConfig {
-    fn do_update(config: &mut SGDConfig, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState<i32>, batch_size: u32){
+impl SGDUpdater<i32> for SGDConfig<i32> {
+    fn do_update(config: &mut SGDConfig<i32>, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState<i32>, batch_size: u32){
         let batch_shift = batch_size.ilog2(); 
         let combined_shift = config.lr_shift + batch_shift;
         // TODO: what if we don't clip, like for f32?
-        let clip_val = 256 << batch_shift; // sqrt(i32::MAX);
+        let clip_val = config.clip_val << batch_shift; // sqrt(i32::MAX);
         let clip_min = -clip_val;
 
         match (config.momentum_shift, state) {
@@ -136,8 +138,8 @@ impl SGDUpdater<i32> for SGDConfig {
 
 
 
-impl<S: Scalar> OptimizerConfig<S> for SGDConfig
-where SGDConfig: SGDUpdater<S>
+impl<S: Scalar> OptimizerConfig<S> for SGDConfig<S>
+where SGDConfig<S>: SGDUpdater<S>
 {
     fn init_state(&self, len: usize) -> OptimizerState<S> {
         match self.momentum_shift {

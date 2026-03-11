@@ -1,3 +1,15 @@
+pub fn none_quantize(values: &[f32]) -> (Vec<i32>, u32) {
+    if values.is_empty() {
+        return (Vec::new(), 0);
+    }
+    return (values
+        .iter()
+        .map(|&v| {
+            v.round() as i32
+        })
+        .collect(), 0);
+}
+
 pub fn minmax_quantize(values: &[f32]) -> (Vec<i32>, u32) {
     if values.is_empty() {
         return (Vec::new(), 0);

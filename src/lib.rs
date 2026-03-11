@@ -418,7 +418,7 @@ pub struct XorShift64 {
 impl XorShift64 {
     pub fn new(seed: u64) -> Self {
         // edge case handleing for state = 0
-        let state = if seed == 0 { 0xCAFEBABE } else { seed };
+        let state = if seed == 0 { 0xC0FFEE } else { seed };
         Self { state }
     }
 

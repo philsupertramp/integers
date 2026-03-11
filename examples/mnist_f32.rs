@@ -36,28 +36,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Train: {} samples, {} features", train_ds.len(), train_ds.n_features());
     println!("  Test:  {} samples, {} features\n", test_ds.len(), test_ds.n_features());
 
-    // ─── RECOMMENDED HYPERPARAMETERS ──────────────────────────────────────
-    // 
-    // CONSERVATIVE (most reliable):
-    //   grad_shift = 8   (increased from 6, handles 3-layer gradient cascade)
-    //   batch_size = 16  (reduced from 32, higher variance helps exploration)
-    //   epochs = 100     (increased from 50, integer training is noisier)
-    //   optimizer = AdamConfig::new(4)  (slower learning, more stable)
-    //
-    // AGGRESSIVE (faster, needs monitoring):
-    //   grad_shift = 7
-    //   batch_size = 32
-    //   epochs = 150
-    //   optimizer = AdamConfig::new(2)
-    //
-    // SGD+MOMENTUM (often best for integer nets):
-    //   grad_shift = 7
-    //   batch_size = 32
-    //   epochs = 150
-    //   optimizer = SGDConfig::new(4, Some(2))
-    //
-    // Start with CONSERVATIVE, monitor diagnostics below ↓
-    
     let batch_size: usize = 32;    // ← REDUCED from 32
     let epochs = 150i32;         // ← INCREASED from 50
 
@@ -124,10 +102,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (preds, shift) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
-            if batch_start == 0 {
-                println!("with shift {}", shift);
-                //println!("Loss: {} for GRAD {:?}", loss, grad_out);
-            }
             epoch_loss += loss as f64;
             batches_processed += 1;
 

@@ -13,9 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let epochs: i32 = 50000;
     let batch_size: usize = 32;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 12;
-    //optim.eps = 0;
+    optim.lr_shift = 3;
     optim.momentum_shift = Some(0);
+    optim.clip_val = 512;
 
     let mut l1 = Linear::<i32>::new(4, 8);
     let mut l2 = Linear::<i32>::new(8, 8);
@@ -57,6 +57,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Test set: [Shift: {}]  {} samples, {} features", test_ds.input_shift, test_ds.len(), test_ds.n_features());
     println!("Classes:   {}", train_ds.n_classes);
     
+    let mse = MSE;
+
+    println!("Architecture:");
+    model.print_summary(&model.describe(), 0);
+    println!();
+
+    println!("{:>6} {:>12} {:>12} {:>10} {:>8}",
+        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps");
+    println!("{}", "─".repeat(60));
+
     for epoch in 0..epochs {
         let epoch_start = Instant::now();
         #[cfg(debug_assertions)]
@@ -75,58 +85,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_end = (batch_start + batch_size).min(train_ds.len());
             let batch_indices = &indices[batch_start..batch_end];
             let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
-            let (preds, shift) = model.forward(&batch_inputs, 0, &mut rng);
+
+            let (preds, shift) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
+
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
             model.zero_grads();
+            // if batch_start == 0 && epoch % 100 == 0 {
+            //     println!("with shift {}", shift);
+            //     println!("Loss: {} for GRAD {:?}", loss, grad_out);
+            //     println!("{:<6} {:>10} {:>10} {:>8}", batch_start, argmax(&batch_targets, Some(1))[0], argmax(&preds, Some(1))[0], loss);
+            //     continue;
+            // }
             epoch_loss += loss as i64;
             batches_processed += 1;
 
             model.backward(&grad_out, shift);
             model.step(&mut optim);
-
-            if batches_processed == 1 && epoch % 100 == 0 {
-                //println!("L3 Gradients: {:?}", l3.weights.grads); // Ensure these aren't all 0
-            }
         }
-        if epoch % 100 == 0 {
-            #[cfg(debug_assertions)]
-            {
-                get_overflow_stats();
-                reset_overflow_stats();
+        #[cfg(debug_assertions)]
+        get_overflow_stats();
+
+        // ── Evaluation ────────────────────────────────────────────────────────────
+        model.sync_weights(&mut rng);
+
+        let mut eval_loss: i64 = 0;
+        let mut correct: usize = 0;
+        for t in 0..test_ds.len() {
+            let x_t = test_ds.get_input(t);
+            let target = test_ds.get_target(t);
+            let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
+            let (loss, grad_out) = mse.forward(&pred, &target);
+            eval_loss += loss as i64;
+            let pred_cls = argmax(&pred, Some(1))[0] as u8;
+            if pred_cls == test_ds.labels[t] {
+                correct += 1;
             }
-            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / batches_processed as i64);
+
         }
+        let accuracy = correct as f32 / test_ds.len() as f32;
+        let elapsed = epoch_start.elapsed().as_secs_f32();
+
+        println!("{:>6} {:>12.5} {:>11.1}% {:>10.2} {:>8}",
+            epoch,
+            epoch_loss as f64 / (batches_processed as f64),
+            accuracy * 100.0,
+            elapsed,
+            -1
+        );
+
+        // Early stopping
+        if epoch > 5 && accuracy >= 0.95 {
+            println!("\n✓ Early stopping at epoch {} (95% accuracy reached)", epoch);
+            break;
+        }
+
     }
-    #[cfg(debug_assertions)]
-    get_overflow_stats();
 
-    // ── Evaluation ────────────────────────────────────────────────────────────
-    model.sync_weights(&mut rng);
-
-    println!(
-        "\n{:<6} {:>10} {:>10} {:>8}",
-        "t", "target", "pred", "error"
-    );
-    let mut eval_loss: i64 = 0;
-    for t in 0..test_ds.len() {
-        let x_t = test_ds.get_input(t);
-        let target = test_ds.get_target(t);
-        let (pred, shift) = model.forward(&x_t, 0, &mut rng);
-        let (loss, grad_out) = MSE.forward(&pred, &target);
-
-        eval_loss += loss as i64;
-        println!("{:<6} {:>10} {:>10} {:>8}", t, argmax(&target, Some(1))[0], argmax(&pred, Some(1))[0], loss);
-    }
-    println!("Eval  total  MSE : {}", eval_loss / test_ds.len() as i64);
 
     // Get a batch of test samples
     let test_indices: Vec<usize> = (0..test_ds.len()).collect();
     let (test_inputs, _test_targets) = test_ds.minibatch(&test_indices);
     
     // Forward pass
-    let (predictions_tensor, shift) = model.forward(&test_inputs, 0, &mut rng);
-
+    let (predictions_tensor, shift) = model.forward(&test_inputs, test_ds.input_shift, &mut rng);
+    
     // Get predicted classes [batch_size]
     let predicted_classes = argmax(&predictions_tensor, Some(1));
     
@@ -151,3 +174,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+

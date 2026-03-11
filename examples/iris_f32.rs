@@ -10,12 +10,11 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
-    let epochs: i32 = 50000;
+    let epochs: i32 = 500;
     let batch_size: usize = 32;
-    let mut optim = AdamConfig::new();
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 12;
-    optim.momentum_shift = Some(0);
+    optim.lr_shift = 7;
+    optim.momentum_shift = Some(1);
 
     let mut l1 = Linear::<f32>::new(4, 8);
     let mut l2 = Linear::<f32>::new(8, 8);
@@ -59,6 +58,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let mse = MSE;
 
+    println!("Architecture:");
+    model.print_summary(&model.describe(), 0);
+    println!();
+
+    println!("{:>6} {:>12} {:>12} {:>10} {:>8}",
+        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps");
+    println!("{}", "─".repeat(60));
+
     for epoch in 0..epochs {
         let epoch_start = Instant::now();
         #[cfg(debug_assertions)]
@@ -80,10 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let (preds, shift) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
 
-            let target_shift = train_ds.input_shift; // the shift targets were stored at
-            let pred_aligned = &preds >> shift.saturating_sub(target_shift);
-
-            let (loss, grad_out) = MSE.forward(&pred_aligned, &batch_targets);
+            let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
             model.zero_grads();
             // if batch_start == 0 && epoch % 100 == 0 {
@@ -95,39 +99,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             epoch_loss += loss as f64;
             batches_processed += 1;
 
-            model.backward(&grad_out, target_shift);
+            model.backward(&grad_out, shift);
             model.step(&mut optim);
         }
-        if epoch % 100 == 0 {
-            #[cfg(debug_assertions)]
-            {
-                get_overflow_stats();
-                reset_overflow_stats();
+        #[cfg(debug_assertions)]
+        get_overflow_stats();
+
+        // ── Evaluation ────────────────────────────────────────────────────────────
+        model.sync_weights(&mut rng);
+
+        let mut eval_loss: f64 = 0.0;
+        let mut correct: usize = 0;
+        for t in 0..test_ds.len() {
+            let x_t = test_ds.get_input(t);
+            let target = test_ds.get_target(t);
+            let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
+            let (loss, grad_out) = mse.forward(&pred, &target);
+            eval_loss += loss as f64;
+            let pred_cls = argmax(&pred, Some(1))[0] as u8;
+            if pred_cls == test_ds.labels[t] {
+                correct += 1;
             }
-            println!("Epoch {:>4}: loss = {}", epoch, epoch_loss / batches_processed as f64);
+
         }
-    }
-    #[cfg(debug_assertions)]
-    get_overflow_stats();
+        let accuracy = correct as f32 / test_ds.len() as f32;
+        let elapsed = epoch_start.elapsed().as_secs_f32();
 
-    // ── Evaluation ────────────────────────────────────────────────────────────
-    model.sync_weights(&mut rng);
+        println!("{:>6} {:>12.5} {:>11.1}% {:>10.2} {:>8}",
+            epoch,
+            epoch_loss / (batches_processed as f64),
+            accuracy * 100.0,
+            elapsed,
+            -1
+        );
 
-    println!(
-        "\n{:<6} {:>10} {:>10} {:>8}",
-        "t", "target", "pred", "error"
-    );
-    let mut eval_loss: f64 = 0.0;
-    for t in 0..test_ds.len() {
-        let x_t = test_ds.get_input(t);
-        let target = test_ds.get_target(t);
-        let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
-        println!("{:?} -> {:?}", pred, target);
-        let (loss, grad_out) = mse.forward(&pred, &target);
-        eval_loss += loss as f64;
-        println!("{:<6} {:>10} {:>10} {:>8}", t, argmax(&target, Some(1))[0], argmax(&pred, Some(1))[0], loss);
+        // Early stopping
+        if epoch > 5 && accuracy >= 0.95 {
+            println!("\n✓ Early stopping at epoch {} (95% accuracy reached)", epoch);
+            break;
+        }
+
     }
-    println!("Eval  total  MSE : {}", eval_loss / test_ds.len() as f64);
+
 
     // Get a batch of test samples
     let test_indices: Vec<usize> = (0..test_ds.len()).collect();
