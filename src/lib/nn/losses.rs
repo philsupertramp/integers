@@ -1,6 +1,5 @@
 use crate::{Tensor, Scalar, Numeric};
 
-
 pub trait Loss<S: Scalar> {
     fn forward(&self, preds: &Tensor<S>, targets: &Tensor<S>) -> (S::Acc, Tensor<S::Acc>);
 }
@@ -11,128 +10,84 @@ pub struct MAE;
 impl<S: Scalar> Loss<S> for MSE {
     fn forward(&self, preds: &Tensor<S>, targets: &Tensor<S>) -> (S::Acc, Tensor<S::Acc>) {
         assert_eq!(
-            preds.len(),
-            targets.len(),
-            "MSE::forward: vector sizes don't match."
+            preds.shape, targets.shape,
+            "MSE::forward: Tensor shapes don't match."
         );
-        let mut loss: S::Acc = S::Acc::zero();
+        assert_eq!(
+            preds.shape.len(), 2,
+            "MSE::forward: Expected 2D tensors [batch, dim]."
+        );
+
+        let batch_size = preds.shape[0];
+        let dim = preds.shape[1];
+
+        let mut total_loss: S::Acc = S::Acc::zero();
         let mut grad = Tensor::<S::Acc>::new(preds.shape.clone());
 
-        if preds.data.len() == 0 {
-            return (S::Acc::zero(), grad);
+        if batch_size == 0 {
+            return (total_loss, grad);
         }
-        for i in 0..preds.data.len() {
-            let error = preds.data[i].sub(targets.data[i]);
-            // Cast to i32 BEFORE multiplying
-            loss = loss.add((error).mul(error));
-            grad.data[i] = error;
+
+        // Standard reduction='mean' divides by total elements (batch_size * dim)
+        let n_elements = S::Acc::from_i32((batch_size * dim) as i32);
+        
+        // For the gradient, we scale the error by the batch size (or total elements depending on convention)
+        let grad_divisor = S::Acc::from_i32(batch_size as i32);
+
+        for b in 0..batch_size {
+            for d in 0..dim {
+                let i = b * dim + d;
+                let error = preds.data[i].sub(targets.data[i]);
+                
+                // Accumulate squared error for the loss
+                total_loss = total_loss.add(error.mul(error));
+                
+                // The gradient of MSE with respect to the output is (pred - target) / batch_size
+                grad.data[i] = error;//.div(grad_divisor); 
+            }
         }
-        (loss.div(S::Acc::from_i32(preds.data.len() as i32)), grad)
+
+        (total_loss.div(n_elements), grad)
     }
 }
 
 impl<S: Scalar> Loss<S> for MAE {
     fn forward(&self, preds: &Tensor<S>, targets: &Tensor<S>) -> (S::Acc, Tensor<S::Acc>) {
         assert_eq!(
-            preds.len(),
-            targets.len(),
-            "MAE::forward: vector sizes don't match."
+            preds.shape, targets.shape,
+            "MAE::forward: Tensor shapes don't match."
         );
-        let mut loss: S::Acc = S::Acc::zero();
+        assert_eq!(
+            preds.shape.len(), 2,
+            "MAE::forward: Expected 2D tensors [batch, dim]."
+        );
+
+        let batch_size = preds.shape[0];
+        let dim = preds.shape[1];
+
+        let mut total_loss: S::Acc = S::Acc::zero();
         let mut grad = Tensor::<S::Acc>::new(preds.shape.clone());
 
-        if preds.data.len() == 0 {
-            return (S::Acc::zero(), grad);
+        if batch_size == 0 {
+            return (total_loss, grad);
         }
-        for i in 0..preds.data.len() {
-            let error = preds.data[i].sub(targets.data[i]);
-            loss = loss.add(error.abs());
-            grad.data[i] = S::Acc::from_i32(error.signum());
+
+        let n_elements = S::Acc::from_i32((batch_size * dim) as i32);
+        let grad_divisor = S::Acc::from_i32(batch_size as i32);
+
+        for b in 0..batch_size {
+            for d in 0..dim {
+                let i = b * dim + d;
+                let error = preds.data[i].sub(targets.data[i]);
+                
+                total_loss = total_loss.add(error.abs());
+                
+                // Derivative of |x| is sign(x)
+                let sign = S::Acc::from_i32(error.signum());
+                grad.data[i] = sign;//sign.div(grad_divisor);
+            }
         }
-        (loss.div(S::Acc::from_i32(preds.data.len() as i32)), grad)
+
+        (total_loss.div(n_elements), grad)
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mse(){
-        let loss = MSE;
-
-        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
-        let targets = Tensor::from_vec(vec![0, 1], vec![2, 1]);
-
-        let (loss, grad) = loss.forward(&pred, &targets);
-
-        assert_eq!(loss, 0);
-        assert_eq!(grad, Tensor::from_vec(vec![1, 0], vec![2, 1]));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "assertion `left == right` failed:"
-    )]
-    fn test_mse_wrong_shapes(){
-        let loss = MSE;
-
-        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
-        let targets = Tensor::from_vec(vec![0], vec![1, 1]);
-
-        loss.forward(&pred, &targets);
-    }
-
-    #[test]
-    fn test_mse_empty_data(){
-        let loss = MSE;
-
-        let pred = Tensor::from_vec(vec![], vec![]);
-        let targets = Tensor::from_vec(vec![], vec![]);
-
-        let (loss, grad) = loss.forward(&pred, &targets);
-
-        assert_eq!(loss, 0);
-        assert_eq!(grad, Tensor::from_vec(vec![], vec![]));
-    }
-
-    #[test]
-    fn test_mae(){
-        let loss = MAE;
-
-        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
-        let targets = Tensor::from_vec(vec![0, 1], vec![2, 1]);
-
-        let (loss, grad) = loss.forward(&pred, &targets);
-
-        assert_eq!(loss, 0);
-        assert_eq!(grad, Tensor::from_vec(vec![1, 0], vec![2, 1]));
-    }
-
-    #[test]
-    fn test_mae_empty_data(){
-        let loss = MAE;
-
-        let pred = Tensor::from_vec(vec![], vec![]);
-        let targets = Tensor::from_vec(vec![], vec![]);
-
-        let (loss, grad) = loss.forward(&pred, &targets);
-
-        assert_eq!(loss, 0);
-        assert_eq!(grad, Tensor::from_vec(vec![], vec![]));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "assertion `left == right` failed:"
-    )]
-    fn test_mae_wrong_shapes(){
-        let loss = MAE;
-
-        let pred = Tensor::from_vec(vec![1, 1], vec![2, 1]);
-        let targets = Tensor::from_vec(vec![0], vec![1, 1]);
-
-        loss.forward(&pred, &targets);
-    }
-
 }

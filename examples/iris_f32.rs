@@ -10,16 +10,15 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
-    let epochs: i32 = 50000;
+    let epochs: i32 = 500;
     let batch_size: usize = 32;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 3;
-    optim.momentum_shift = Some(0);
-    optim.clip_val = 512;
+    optim.lr_shift = 7;
+    optim.momentum_shift = Some(1);
 
-    let mut l1 = Linear::<i32>::new(4, 8);
-    let mut l2 = Linear::<i32>::new(8, 8);
-    let mut l3 = Linear::<i32>::new(8, 3);
+    let mut l1 = Linear::<f32>::new(4, 8);
+    let mut l2 = Linear::<f32>::new(8, 8);
+    let mut l3 = Linear::<f32>::new(8, 3);
 
     l1.init(&mut rng);
     l2.init(&mut rng);
@@ -30,23 +29,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("L3 {}: {} -> {}", l3.weights.quant_shift, l3.input_shift, l3.output_shift);
     
     // Build model for Iris: 4 input features → 3 output classes
-    let mut model = Sequential::<i32>::new();
+    let mut model = Sequential::<f32>::new();
     model
         .add(l1)
-        .add(ReLU::<i32>::new())
+        .add(ReLU::<f32>::new())
         .add(l2)
-        .add(ReLU::<i32>::new())
+        .add(ReLU::<f32>::new())
         .add(l3);
 
     // Load datasets (unwrap Results with ?)
-    let train_ds = DatasetBuilder::<i32>::new("data/iris_train.tsv")
+    let train_ds = DatasetBuilder::<f32>::new("data/iris_train.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
         .with_quantization(QuantizationMethod::StandardScore)
         .load()?;  // ← Unwrap Result<Dataset, DataError>
     
-    let test_ds = DatasetBuilder::<i32>::new("data/iris_test.tsv")
+    let test_ds = DatasetBuilder::<f32>::new("data/iris_test.tsv")
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
@@ -75,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Shuffle
         let indices = shuffled_indices(train_ds.len(), &mut rng);
 
-        let mut epoch_loss: i64 = 0;
+        let mut epoch_loss: f64 = 0.0;
         let mut batches_processed = 0;
 
         let last_batch_start = batch_size * ((train_ds.len() / batch_size) - 1);
@@ -97,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             //     println!("{:<6} {:>10} {:>10} {:>8}", batch_start, argmax(&batch_targets, Some(1))[0], argmax(&preds, Some(1))[0], loss);
             //     continue;
             // }
-            epoch_loss += loss as i64;
+            epoch_loss += loss as f64;
             batches_processed += 1;
 
             model.backward(&grad_out, shift);
@@ -109,14 +108,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ── Evaluation ────────────────────────────────────────────────────────────
         model.sync_weights(&mut rng);
 
-        let mut eval_loss: i64 = 0;
+        let mut eval_loss: f64 = 0.0;
         let mut correct: usize = 0;
         for t in 0..test_ds.len() {
             let x_t = test_ds.get_input(t);
             let target = test_ds.get_target(t);
             let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
             let (loss, grad_out) = mse.forward(&pred, &target);
-            eval_loss += loss as i64;
+            eval_loss += loss as f64;
             let pred_cls = argmax(&pred, Some(1))[0] as u8;
             if pred_cls == test_ds.labels[t] {
                 correct += 1;
@@ -128,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("{:>6} {:>12.5} {:>11.1}% {:>10.2} {:>8}",
             epoch,
-            epoch_loss as f64 / (batches_processed as f64),
+            epoch_loss / (batches_processed as f64),
             accuracy * 100.0,
             elapsed,
             -1

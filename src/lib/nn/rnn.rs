@@ -37,8 +37,6 @@ impl<S: Scalar + 'static> RNNCell<S> {
     pub fn reset_state(&mut self) {
         self.h_prev = None;
         self.d_h_next = None;
-        //self.output_shift = None;
-        //self.input_shift = None;
 
         self.w_ih.cache.clear();
         self.w_hh.cache.clear();
@@ -78,14 +76,15 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
         let s_comb = s_ih.max(s_hh);
         let diff_ih = s_comb - s_ih;
         let diff_hh = s_comb - s_hh;
+        let combine_shift: u32 = if S::unit_shift() > 0 { 1 } else { 0 };
         for i in 0..comb.data.len() {
-            let ih_aligned = ih.data[i].into_acc().shr(diff_ih);
-            let hh_aligned = hh.data[i].into_acc().shr(diff_hh);
+            let ih_aligned = ih.data[i].into_acc().shl(diff_ih);
+            let hh_aligned = hh.data[i].into_acc().shl(diff_hh);
             let sum = ih_aligned.add(hh_aligned);
-            comb.data[i] = S::downcast(sum, 1, rng);
+            comb.data[i] = S::downcast(sum, combine_shift, rng);
         }
 
-        let s_comb = s_comb + 1;
+        let s_comb = s_comb - combine_shift;
 
         let (h_next, s_out) = self.act.forward(&comb, s_comb, rng);
 
@@ -103,20 +102,28 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
                 let diff_g = s_combined - s_g;
                 let diff_carry = s_combined - carry_s_g;
                 let mut combined = Tensor::<S::Acc>::new(grad_output.shape.clone());
+                
                 for (c, (g, k)) in combined.data.iter_mut()
-        .zip(grad_output.data.iter().zip(carry.data.iter()))
-    {
-                    *c = (*g).shr(diff_g).add((*k).shr(diff_carry));
+                    .zip(grad_output.data.iter().zip(carry.data.iter())) 
+                {
+                    // FIX: Left-shift (shl) gradients to prevent precision loss
+                    *c = (*g).shl(diff_g).add((*k).shl(diff_carry));
                 }
                 (combined, s_combined)
             }
             None => (grad_output.clone(), s_g),
         };
 
+        let s_x = self.s_x_cache.pop().expect("Linear::backward: Backward called without forward.");
+
+        // Inside RNNCell::backward
+
         let (d_comb, s_g_act) = self.act.backward(&combined_grad, combined_s_g);
 
-        let (d_ih, s_g_ih) = self.w_ih.backward(&d_comb, s_g_act);
-        let (d_hh, s_g_hh) = self.w_hh.backward(&d_comb, s_g_act); // compute it...
+        let s_g_adjusted = s_g_act + 1;
+
+        let (d_ih, s_g_ih) = self.w_ih.backward(&d_comb, s_g_adjusted);
+        let (d_hh, s_g_hh) = self.w_hh.backward(&d_comb, s_g_adjusted);
         // d_hh should be fed back as the grad for h_prev in the next BPTT step
         self.d_h_next = Some((d_hh, s_g_hh));
 
@@ -127,7 +134,7 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
         self.w_hh.sync_weights(rng);
     }
 
-    fn step(&mut self, optim: &dyn OptimizerConfig<S>) {
+    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
         self.w_ih.step(optim);
         self.w_hh.step(optim);
     }
@@ -151,6 +158,11 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
             static_bytes: 0,
             children,
         }
+    }
+
+    fn zero_grads(&mut self) {
+        self.w_ih.zero_grads();
+        self.w_hh.zero_grads();
     }
 
     fn init(&mut self, rng: &mut XorShift64) {

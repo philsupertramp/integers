@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::{Tensor, Scalar};
-use crate::quant::{minmax_quantize, standard_score_quantize};
+use crate::quant::{minmax_quantize, standard_score_quantize, none_quantize};
 use parquet::file::reader::FileReader;
 use parquet::file::reader::SerializedFileReader;
 use parquet::record::Field;
@@ -23,6 +23,8 @@ pub enum FileFormat {
 
 #[derive(Clone, Debug)]
 pub enum QuantizationMethod {
+    /// Returns the pure input
+    None,
     /// Min-max scale each column to [-127, 127]
     MinMax,
     /// (value - mean) / std, clamped to [-127, 127]
@@ -58,7 +60,7 @@ impl Default for DatasetConfig {
             label_column: 4, // Common for Iris-like datasets
             has_header: false,
             class_mapping: None,
-            quantization: QuantizationMethod::MinMax,
+            quantization: QuantizationMethod::None,
             num_classes: None,
         }
     }
@@ -71,7 +73,7 @@ impl DatasetConfig {
             label_column: 4, // Common for Iris-like datasets
             has_header: false,
             class_mapping: None,
-            quantization: QuantizationMethod::MinMax,
+            quantization: QuantizationMethod::None,
             num_classes: None,
         }
     }
@@ -279,6 +281,7 @@ fn load_csv<S: Scalar>(
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
         let (quantized, shift) = match config.quantization {
+            QuantizationMethod::None => none_quantize(&col),
             QuantizationMethod::MinMax => minmax_quantize(&col),
             QuantizationMethod::StandardScore => standard_score_quantize(&col),
             QuantizationMethod::Custom => {
@@ -440,6 +443,7 @@ fn finalize_dataset<S: Scalar>(
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
         let (quantized, shift) = match config.quantization {
+            QuantizationMethod::None => none_quantize(&col),
             QuantizationMethod::MinMax => minmax_quantize(&col),
             QuantizationMethod::StandardScore => standard_score_quantize(&col),
             QuantizationMethod::Custom => {

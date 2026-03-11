@@ -32,10 +32,10 @@ fn generate_parity(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     const SEQ_LEN: usize = 10;
-    const HIDDEN: usize = 32;
+    const HIDDEN: usize = 64;
     const N_TRAIN: usize = 2000;
     const N_TEST: usize = 500;
-    const EPOCHS: i32 = 100;
+    const EPOCHS: i32 = 10000;
 
     let mut rng = XorShift64::new(42);
     let mut sync_rng = XorShift64::new(42);
@@ -70,8 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SGD + momentum works well for RNNs: momentum smooths the noisy
     // single-sample gradients from BPTT.
     let optim = SGDConfig {
-        lr_shift: 8,       // lr ≈ 1/128
-        momentum_shift: Some(3),// Some(3), // momentum ≈ 1 - 1/8 = 0.875
+        lr_shift: 6,       // lr ≈ 1/128
+        momentum_shift: Some(3),// Some(2), // momentum ≈ 1 - 1/8 = 0.875
     };
 
     println!("{:>6} {:>12} {:>10}", "Epoch", "Loss", "Accuracy");
