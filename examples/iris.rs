@@ -13,9 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let epochs: i32 = 50000;
     let batch_size: usize = 32;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 3;
-    optim.momentum_shift = Some(0);
-    optim.clip_val = 512;
+    optim.lr_shift = 7;
+    optim.momentum_shift = Some(1);
+    optim.clip_val = 2 << 13;
 
     let mut l1 = Linear::<i32>::new(4, 8);
     let mut l2 = Linear::<i32>::new(8, 8);
@@ -63,9 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     model.print_summary(&model.describe(), 0);
     println!();
 
-    println!("{:>6} {:>12} {:>12} {:>10} {:>8}",
-        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps");
-    println!("{}", "─".repeat(60));
+    println!("{:>6} {:>12} {:>12} {:>10} {:>8} {:>4} {:>4}",
+        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps", "FW Shift", "BW Shift");
+    println!("{}", "─".repeat(80));
 
     for epoch in 0..epochs {
         let epoch_start = Instant::now();
@@ -77,6 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut epoch_loss: i64 = 0;
         let mut batches_processed = 0;
+        let mut shift = 0;
+        let mut grad_shift = 0;
 
         let last_batch_start = batch_size * ((train_ds.len() / batch_size) - 1);
         // Minibatches
@@ -86,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_indices = &indices[batch_start..batch_end];
             let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
 
-            let (preds, shift) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
+            let (preds, shift_out) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
 
             let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
 
@@ -100,8 +102,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             epoch_loss += loss as i64;
             batches_processed += 1;
 
-            model.backward(&grad_out, shift);
+            let (_, grad_shift_out) = model.backward(&grad_out, shift_out);
             model.step(&mut optim);
+            shift = shift_out;
+            grad_shift = grad_shift_out;
         }
         #[cfg(debug_assertions)]
         get_overflow_stats();
@@ -124,15 +128,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         }
         let accuracy = correct as f32 / test_ds.len() as f32;
-        let elapsed = epoch_start.elapsed().as_secs_f32();
-
-        println!("{:>6} {:>12.5} {:>11.1}% {:>10.2} {:>8}",
-            epoch,
-            epoch_loss as f64 / (batches_processed as f64),
-            accuracy * 100.0,
-            elapsed,
-            -1
-        );
+        let elapsed = epoch_start.elapsed().as_micros();
+        #[cfg(debug_assertions)]
+        {
+            let overflow_stats = get_overflow_stats();
+            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}ms {:>8} {:>4} {:>4}",
+                epoch,
+                epoch_loss as f64 / (batches_processed as f64),
+                accuracy * 100.0,
+                elapsed,
+                overflow_stats.downcast_clamps,
+                shift,
+                grad_shift,
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}ms {:>8} {:>4} {:>4}",
+                epoch,
+                epoch_loss as f64 / (batches_processed as f64),
+                accuracy * 100.0,
+                elapsed,
+                -1,
+                shift,
+                grad_shift,
+            );
+        }
 
         // Early stopping
         if epoch > 5 && accuracy >= 0.95 {

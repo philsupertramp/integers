@@ -23,20 +23,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_features((0..784).collect())
         .with_label_column(784)
         .with_num_classes(10)
-        //.with_quantization(QuantizationMethod::StandardScore)
+        .with_quantization(QuantizationMethod::StandardScore)
         .load()?;
     let test_ds = DatasetBuilder::<i32>::new("data/mnist_test.parquet")
         .format(FileFormat::Parquet)
         .with_features((0..784).collect())
         .with_label_column(784)
         .with_num_classes(10)
-        //.with_quantization(QuantizationMethod::StandardScore)
+        .with_quantization(QuantizationMethod::StandardScore)
         .load()?;
     println!("✓ Loaded in {:.2}s", train_start.elapsed().as_secs_f32());
     println!("  Train[shift={}]: {} samples, {} features", train_ds.input_shift, train_ds.len(), train_ds.n_features());
     println!("  Test[shift={}]:  {} samples, {} features\n", test_ds.input_shift, test_ds.len(), test_ds.n_features());
 
-    let batch_size: usize = 1;    // ← REDUCED from 32
+    let batch_size: usize = 32;    // ← REDUCED from 32
     let epochs = 150i32;         // ← INCREASED from 50
 
     println!("Model Configuration (RECOMMENDED):");
@@ -67,8 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     model.init_all(&mut rng);
 
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 2;
-    optim.clip_val = 1024;
+    optim.lr_shift = 0;
+    optim.clip_val = 2 << 13;
 
     // Print architecture
     println!("Architecture:");
@@ -76,9 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // ─── Training Loop ────────────────────────────────────────────────────
-    println!("{:>6} {:>12} {:>12} {:>10} {:>8} {:>4}",
-        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps", "Shift");
-    println!("{}", "─".repeat(60));
+    println!("{:>6} {:>12} {:>12} {:>10} {:>8} {:>6} {:>6}",
+        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps", "FW Shift", "BW Shift");
+    println!("{}", "─".repeat(80));
 
     let training_start = Instant::now();
 
@@ -93,9 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut epoch_loss: i64 = 0;
         let mut batches_processed = 0;
         let mut shift = 0;
+        let mut grad_shift = 0;
 
         // Minibatches
-        for batch_start in (0..train_ds.len().max(100)).step_by(batch_size) {
+        for batch_start in (0..train_ds.len()).step_by(batch_size) {
             model.sync_weights(&mut rng);
             let batch_end = (batch_start + batch_size).min(train_ds.len());
             let batch_indices = &indices[batch_start..batch_end];
@@ -108,9 +109,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             batches_processed += 1;
 
             model.zero_grads();
-            model.backward(&grad_out, shift_out);
+            let (_, grad_shift_out) = model.backward(&grad_out, shift_out);
             model.step(&mut optim);
             shift = shift_out;
+            grad_shift = grad_shift_out;
         }
 
         // ─── Evaluation ────────────────────────────────────────────────────
@@ -132,26 +134,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let overflow_stats = get_overflow_stats();
             let elapsed = epoch_start.elapsed().as_secs_f32();
 
-            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2} {:>8} {:>4}",
+            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}s {:>8} {:>6} {:>6}",
                 epoch,
                 epoch_loss as f64 / (batches_processed as f64),
                 accuracy * 100.0,
                 elapsed,
                 overflow_stats.downcast_clamps,
                 shift,
+                grad_shift,
             );
         }
         #[cfg(not(debug_assertions))]
         {
             let elapsed = epoch_start.elapsed().as_secs_f32();
 
-            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2} {:>8} {:>4}",
+            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}s {:>8} {:>6} {:>6}",
                 epoch,
                 epoch_loss as f64 / (batches_processed as f64),
                 accuracy * 100.0,
                 elapsed,
                 -1,
                 shift,
+                grad_shift,
             );
         }
 

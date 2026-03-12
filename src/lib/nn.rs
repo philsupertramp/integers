@@ -225,7 +225,7 @@ impl<S: Scalar> Params<S> {
 
     pub fn zero_grads(&mut self) {
         self.grads = None;
-        self.state = None;
+        //self.state = None;
     }
 
     pub fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
@@ -400,7 +400,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         let s_x = self.s_x_cache.pop().expect("Linear::backward: Backward called without forward.");
 
         let local_delta_w = s_g + s_x;
-        let local_delta_x = self.weights.quant_shift + self.output_shift;
+        let local_delta_x = self.weights.quant_shift + self.input_shift;
 
         let batch = input.shape[0];
         let input_dim = input.shape[1];
@@ -449,7 +449,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.weights.accumulate_grads(&grad_weights);// << gshift);
         self.bias.accumulate_grads(&grad_bias);// << gshift);
                                                //
-        let s_g_prev = s_g;//.saturating_sub(local_delta_x);
+        let s_g_prev = s_g.saturating_sub(local_delta_x);
 
         (grad_input_shifted, s_g_prev)
     }
