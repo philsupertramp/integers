@@ -6,7 +6,7 @@ use std::any::Any;
 
 pub struct ReLU<S: Scalar> {
     pub cache: Vec<Tensor<S>>,
-    pub s_x_cache: Vec<u32>,
+    pub s_x_cache: Vec<i32>,
 }
 
 impl<S: Scalar> Default for ReLU<S> {
@@ -23,7 +23,7 @@ impl<S: Scalar> ReLU<S> {
 
 impl<S: Scalar + 'static> Module<S> for ReLU<S> {
 
-    fn forward(&mut self, input: &Tensor<S>, s_x: u32, _rng: &mut XorShift64) -> (Tensor<S>, u32) {
+    fn forward(&mut self, input: &Tensor<S>, s_x: i32, _rng: &mut XorShift64) -> (Tensor<S>, i32) {
         self.cache.push(input.clone());
         self.s_x_cache.push(s_x);
         let mut output = Tensor::<S>::new(input.shape.clone());
@@ -32,7 +32,7 @@ impl<S: Scalar + 'static> Module<S> for ReLU<S> {
         }
         (output, s_x)
     }
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
         let input = self
             .cache
             .pop()
@@ -64,7 +64,7 @@ impl<S: Scalar + 'static> Module<S> for ReLU<S> {
 
 pub struct Tanh<S: Scalar> {
     pub cache: Vec<Tensor<S>>,
-    pub s_x_cache: Vec<u32>,
+    pub s_x_cache: Vec<i32>,
 }
 
 impl<S: Scalar> Default for Tanh<S> {
@@ -80,16 +80,16 @@ impl<S: Scalar> Tanh<S> {
 }
 
 impl<S: Scalar + 'static> Module<S> for Tanh<S> {
-    fn forward(&mut self, input: &Tensor<S>, s_x: u32, _rng: &mut XorShift64) -> (Tensor<S>, u32) {
+    fn forward(&mut self, input: &Tensor<S>, s_x: i32, _rng: &mut XorShift64) -> (Tensor<S>, i32) {
         self.cache.push(input.clone());
         self.s_x_cache.push(s_x);
         let mut output = Tensor::<S>::new(input.shape.clone());
         for (o, &x) in output.data.iter_mut().zip(&input.data) {
             *o = S::tanh(x);
         }
-        (output, S::unit_shift())
+        (output, s_x)
     }
-    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
+    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
         let input = self
             .cache
             .pop()
@@ -102,7 +102,7 @@ impl<S: Scalar + 'static> Module<S> for Tanh<S> {
             let dtanh = S::dtanh(t);
             *o = g.mul(dtanh);
         }
-        let s_g_prev = s_g.saturating_sub(S::unit_shift());
+        let s_g_prev = s_g.saturating_sub(S::unit_shift() as i32);
         (output, s_g_prev)
     }
     fn memory_report(&self) -> (usize, usize) {

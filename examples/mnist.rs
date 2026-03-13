@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     model.init_all(&mut rng);
 
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 0;
+    optim.lr_shift = 6;
     optim.clip_val = 2 << 13;
 
     // Print architecture

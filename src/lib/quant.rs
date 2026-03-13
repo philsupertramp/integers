@@ -1,4 +1,4 @@
-pub fn none_quantize(values: &[f32]) -> (Vec<i32>, u32) {
+pub fn none_quantize(values: &[f32]) -> (Vec<i32>, i32) {
     if values.is_empty() {
         return (Vec::new(), 0);
     }
@@ -10,7 +10,7 @@ pub fn none_quantize(values: &[f32]) -> (Vec<i32>, u32) {
         .collect(), 0);
 }
 
-pub fn minmax_quantize(values: &[f32]) -> (Vec<i32>, u32) {
+pub fn minmax_quantize(values: &[f32]) -> (Vec<i32>, i32) {
     if values.is_empty() {
         return (Vec::new(), 0);
     }
@@ -27,7 +27,7 @@ pub fn minmax_quantize(values: &[f32]) -> (Vec<i32>, u32) {
         .collect(), 7);
 }
 
-pub fn standard_score_quantize(values: &[f32]) -> (Vec<i32>, u32) {
+pub fn standard_score_quantize(values: &[f32]) -> (Vec<i32>, i32) {
     if values.is_empty() {
         return (Vec::new(), 0);
     }

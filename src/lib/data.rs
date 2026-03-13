@@ -49,7 +49,7 @@ pub struct Dataset<S: Scalar> {
     pub labels:   Vec<u8>,
     pub targets:  Tensor<S>,
     pub n_classes: usize,
-    pub input_shift: u32,
+    pub input_shift: i32,
 }
 
 impl<S: Scalar> Dataset<S> {

@@ -75,7 +75,7 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
 
     /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
     /// stochastic downcasting)
-    fn downcast(acc: Self::Acc, shift: u32, rng: &mut XorShift64) -> Self;
+    fn downcast(acc: Self::Acc, shift: i32, rng: &mut XorShift64) -> Self;
 
     /// Casts own value to accumulator type
     fn into_acc(self) -> Self::Acc;
@@ -85,7 +85,7 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     fn from_i32(val: i32) -> Self::Acc;
     fn from_f64(val: f64) -> Self::Acc;
     fn from_quantized(val: i32) -> Self;
-    fn dataset_input_shift(quantizer_shift: u32) -> u32;
+    fn dataset_input_shift(quantizer_shift: i32) -> i32;
 
     fn to_u32(self) -> u32;
 
@@ -115,7 +115,7 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
 impl Scalar for f32 {
     type Acc = f32;
 
-    fn downcast(acc: f32, shift: u32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
+    fn downcast(acc: f32, shift: i32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
 
     fn random_uniform(rng: &mut XorShift64, range: f32) -> f32 {
         // generate float in [-range, range] properly
@@ -134,7 +134,7 @@ impl Scalar for f32 {
     fn acc_shift(fan_in: usize) -> u32 { 0u32 }
     
     fn from_quantized(val: i32) -> f32 { val as f32 / 127.0 }
-    fn dataset_input_shift(_: u32) -> u32 { 0 }
+    fn dataset_input_shift(_: i32) -> i32 { 0 }
 
     fn is_positive(value: f32) -> bool { value > 0.0 }
     fn relu(value: f32) -> f32 {
@@ -151,7 +151,7 @@ impl Scalar for f32 {
 impl Scalar for i32 {
     type Acc = i32;
 
-    fn downcast(acc: i32, shift: u32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
+    fn downcast(acc: i32, shift: i32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
 
     fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> i32 {
         let range: Self::Acc = Numeric::max(range, <i32 as Numeric>::from_i32(1i32));
@@ -161,14 +161,14 @@ impl Scalar for i32 {
 
     fn to_u32(self) -> u32 { if self < 0i32 { 0u32 } else { self as u32 } }
     fn from_i32(val: i32) -> i32 { val as i32 }
-    fn from_f64(val: f64) -> i32 { (val * 127.0).round() as i32 }
+    fn from_f64(val: f64) -> i32 { (val * 127.0 * 128.0).round() as i32 }
     fn into_acc(self) -> i32 { self }
     fn mul(self, other: i32) -> i32 { self * other }
     fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
     
     fn from_quantized(val: i32) -> i32 { val }
-    fn dataset_input_shift(quantizer_shift: u32) -> u32 { quantizer_shift }
+    fn dataset_input_shift(quantizer_shift: i32) -> i32 { quantizer_shift }
 
     fn unit_shift() -> u32 { 15u32 }
     fn acc_shift(fan_in: usize) -> u32 { (usize::BITS - fan_in.leading_zeros()) as u32 }

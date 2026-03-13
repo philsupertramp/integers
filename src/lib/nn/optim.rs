@@ -96,9 +96,9 @@ impl SGDUpdater<f32> for SGDConfig<f32> {
 impl SGDUpdater<i32> for SGDConfig<i32> {
     fn do_update(config: &mut SGDConfig<i32>, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState<i32>, batch_size: u32){
         let batch_shift = batch_size.ilog2(); 
-        let combined_shift = config.lr_shift + batch_shift;
+        let combined_shift = (config.lr_shift + batch_shift) as i32;
         // TODO: what if we don't clip, like for f32?
-        let clip_val = config.clip_val << batch_shift; // sqrt(i32::MAX);
+        let clip_val = config.clip_val; // sqrt(i32::MAX);
         let clip_min = -clip_val;
 
         match (config.momentum_shift, state) {

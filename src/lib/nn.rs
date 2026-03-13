@@ -102,8 +102,8 @@ pub trait Module<S: Scalar>: Any {
     /// assert_eq!(output.data[1], 3);
     /// assert_eq!(output.data[2], 4);
     /// ```
-    fn forward(&mut self, input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32);
-    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32);
+    fn forward(&mut self, input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32);
+    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32);
 
     /// quantize i32 master weights -> i32 storage. No-op for non-parameterized modules.
     fn sync_weights(&mut self, _rng: &mut XorShift64) {}
@@ -166,13 +166,13 @@ pub struct Params<S: Scalar> {
     ///     shift = 4 // for single-layer networks
     ///     shift = 5 // for 2-3 layer networks
     ///     shift = 6 // for deeper networks
-    pub quant_shift: u32,
+    pub quant_shift: i32,
 }
 
 impl<S: Scalar> Params<S> {
-    pub fn new(shape: Vec<usize>, shift: u32) -> Self {
+    pub fn new(shape: Vec<usize>, shift: i32) -> Self {
         // shift >= 0 given due to u32
-        assert!(shift <= 8, "Weight shift must be 0-8, got {}", shift);
+        //assert!(shift <= 8, "Weight shift must be 0-8, got {}", shift);
         Self {
             master: Tensor::<S::Acc>::new(shape.clone()),
             storage: Tensor::<S>::new(shape),
@@ -182,7 +182,7 @@ impl<S: Scalar> Params<S> {
         }
     }
 
-    pub fn with_shift(mut self, shift: u32) -> Self {
+    pub fn with_shift(mut self, shift: i32) -> Self {
         self.quant_shift = shift;
         self
     }
@@ -289,7 +289,7 @@ pub trait HasWeights<S: Scalar> {
     
     /// Infer an appropriate scale_shift based on weight magnitudes.
     /// Returns a shift value in the range [0, 8].
-    fn infer_scale_shift(&self) -> u32 {
+    fn infer_scale_shift(&self) -> i32 {
         let all_weights = self.get_all_weights();
         if all_weights.is_empty() {
             return 0;
@@ -305,7 +305,7 @@ pub trait HasWeights<S: Scalar> {
             return 0;
         }
 
-        compute_shift_for_max::<S>(max_magnitude.to_u32())
+        compute_shift_for_max(max_magnitude.to_u32()) as i32
     }
 }
 
@@ -315,13 +315,13 @@ pub struct Linear<S: Scalar> {
     pub weights: Params<S>,
     pub bias: Params<S>,
     pub cache: Vec<Tensor<S>>,
-    pub s_x_cache: Vec<u32>,
+    pub s_x_cache: Vec<i32>,
 
 
     /// Used to track what shift was applied to inputs
-    pub input_shift: u32,
+    pub input_shift: i32,
     /// Used to track what shift was applied to outputs before returning them
-    pub output_shift: u32,
+    pub output_shift: i32,
 }
 
 impl<S: Scalar> Linear<S> {
@@ -333,8 +333,8 @@ impl<S: Scalar> Linear<S> {
             bias: Params::new(vec![output_dim], 0),
             cache: Vec::new(),
             s_x_cache: Vec::new(),
-            input_shift: acc_shift,
-            output_shift: back_acc_shift,
+            input_shift: acc_shift as i32,
+            output_shift: back_acc_shift as i32,
         }
     }
 
@@ -347,7 +347,7 @@ impl<S: Scalar> Linear<S> {
         }
     }
 
-    pub fn with_shift(mut self, shift: u32) -> Self {
+    pub fn with_shift(mut self, shift: i32) -> Self {
         self.weights.quant_shift = shift;
         self.bias.quant_shift = shift;
         self
@@ -365,7 +365,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.bias.sync(rng);
     }
 
-    fn forward(&mut self, raw_input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32) {
+    fn forward(&mut self, raw_input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32) {
         assert_eq!(
             raw_input.shape[1], self.weights.storage.shape[1],
             "Linear::forward: Input in wrong dimension for weights! {} vs {}",
@@ -380,7 +380,8 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.cache.push(input.clone());
         self.s_x_cache.push(s_x);
         let mut out_raw = Tensor::<S>::new(vec![batch, output_dim]);
-        let out_shift = self.weights.quant_shift + self.input_shift + s_x;
+        let downcast_shift = self.weights.quant_shift as i32 + self.input_shift;
+        let out_shift = Numeric::max(s_x as i32 - self.input_shift as i32, 0);
 
         for b in 0..batch {
             let in_row = &input.data[b * input_dim..(b + 1) * input_dim];
@@ -388,20 +389,23 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
                 let w_row = &self.weights.storage.data[o * input_dim..(o + 1) * input_dim];
                 let mut raw_val = kernels::dot_product_scalar::<S>(in_row, w_row);
                 raw_val = raw_val.add(self.bias.storage.data[o].into_acc());
-                out_raw.data[b * output_dim + o] = S::downcast(raw_val, out_shift, rng);
+                out_raw.data[b * output_dim + o] = S::downcast(raw_val, downcast_shift, rng);
             }
         }
 
         (out_raw, out_shift)
     }
 
-    fn backward(&mut self, shifted_grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
+    fn backward(&mut self, shifted_grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
         // not required to shift anymore, we did that in the forward pass already
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward.");
         let s_x = self.s_x_cache.pop().expect("Linear::backward: Backward called without forward.");
 
-        let local_delta_w = s_g + s_x;
-        let local_delta_x = self.weights.quant_shift + self.input_shift;
+        let local_delta_w = Numeric::max(s_g + s_x - self.weights.quant_shift, 0) as u32;
+        let local_delta_b = Numeric::max(s_g - self.weights.quant_shift, 0) as u32;
+
+        let local_delta_x = self.weights.quant_shift;
+        let s_g_prev = s_g + self.weights.quant_shift;
 
         let batch = input.shape[0];
         let input_dim = input.shape[1];
@@ -422,7 +426,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
 
                 // Bias update is an accumulator, so apply gshift
                 grad_bias.data[o] = grad_bias.data[o].add(
-                    g
+                    g.shr(local_delta_b)
                 );
 
                 for i in 0..input_dim {
@@ -446,13 +450,11 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
             }
         }
 
-        let grad_input_shifted = grad_input;// << input_shift;
-        self.weights.accumulate_grads(&grad_weights);// << gshift);
-        self.bias.accumulate_grads(&grad_bias);// << gshift);
-                                               //
-        let s_g_prev = s_g.saturating_sub(local_delta_x);
+        let grad_input_shifted = grad_input;
+        self.weights.accumulate_grads(&grad_weights);
+        self.bias.accumulate_grads(&grad_bias);
 
-        (grad_input_shifted, s_g_prev)
+        (grad_input_shifted, s_g)
     }
 
     fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
@@ -525,7 +527,7 @@ impl<S: Scalar + 'static> Sequential<S> {
 }
 
 impl<S: Scalar + 'static> Module<S> for Sequential<S> {
-    fn forward(&mut self, input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32) {
+    fn forward(&mut self, input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32) {
         let mut output = input.clone();
         let mut shift = s_x;
         for m in self.modules.iter_mut() {
@@ -535,7 +537,7 @@ impl<S: Scalar + 'static> Module<S> for Sequential<S> {
         }
         (output, shift)
     }
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
         let mut output = grad_output.clone();
         let mut shift = s_g;
         for m in self.modules.iter_mut().rev() {
@@ -611,7 +613,7 @@ mod tests {
         fn backward(&mut self, grad: &Tensor<i32>) -> Tensor<i32> {
             grad.clone()
         }
-        fn forward(&mut self, input: &Tensor<i32>, input_shift: u32, _rng: &mut XorShift64) -> Tensor<i32>{
+        fn forward(&mut self, input: &Tensor<i32>, input_shift: i32, _rng: &mut XorShift64) -> Tensor<i32>{
             self.input_shift = Some(input_shift);
             self.output_shift = Some(input_shift);
 

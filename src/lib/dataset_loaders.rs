@@ -277,7 +277,7 @@ fn load_csv<S: Scalar>(
 
     // Quantize per-column
     let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
-    let mut input_shift: u32 = 0;
+    let mut input_shift: i32 = 0;
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
         let (quantized, shift) = match config.quantization {
@@ -439,7 +439,7 @@ fn finalize_dataset<S: Scalar>(
 
     // Quantize per-column
     let mut columns: Vec<Vec<i32>> = Vec::with_capacity(n_features);
-    let mut input_shift: u32 = 0;
+    let mut input_shift: i32 = 0;
     for feat_idx in 0..n_features {
         let col: Vec<f32> = raw_features.iter().map(|r| r[feat_idx]).collect();
         let (quantized, shift) = match config.quantization {
