@@ -242,12 +242,13 @@ impl<S: Scalar> Params<S> {
     }
 }
 
-pub fn compute_shift_for_max(max_magnitude: u32) -> u32 {
+pub fn compute_shift_for_max<S: Scalar>(max_magnitude: u32) -> u32 {
     let mut shift: u32 = 0;
-    while (max_magnitude >> shift) > 127 && shift < 8 {
+    let max_val = S::Acc::MAX.to_u32();
+    while (max_magnitude >> shift) > max_val && shift < 8 {
         shift += 1;
     }
-    shift.max(0).min(8)
+    shift.max(0)
 }
 
 pub trait HasWeights<S: Scalar> {
@@ -278,8 +279,8 @@ pub trait HasWeights<S: Scalar> {
     ///     bias: Params::<i32>::new(vec![1, 1], 0),
     /// };
     ///
-    /// // magnitude is 0, so we fall back to 4
-    /// assert_eq!(module.infer_scale_shift(), 4);
+    /// // magnitude is 0, so we fall back to 0
+    /// assert_eq!(module.infer_scale_shift(), 0);
     /// ```
 
     /// Get all weight parameters (master i32 tensors) in this module.
@@ -291,7 +292,7 @@ pub trait HasWeights<S: Scalar> {
     fn infer_scale_shift(&self) -> u32 {
         let all_weights = self.get_all_weights();
         if all_weights.is_empty() {
-            return 4;
+            return 0;
         }
 
         let max_magnitude = all_weights
@@ -301,10 +302,10 @@ pub trait HasWeights<S: Scalar> {
             .fold(S::Acc::zero(), |acc, x| if x.gt(acc) { x } else { acc });
 
         if max_magnitude == S::Acc::zero() {
-            return 4;
+            return 0;
         }
 
-        compute_shift_for_max(max_magnitude.to_u32())
+        compute_shift_for_max::<S>(max_magnitude.to_u32())
     }
 }
 
@@ -432,14 +433,14 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
                     // dL/dw = grad_output * input_i32
                     let dw = g.mul(x.into_acc());
                     grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i].add(
-                        dw.div(S::Acc::from_i32(1 << local_delta_w))
+                        dw.div(S::Acc::from_i32(1i32 << local_delta_w))
                     );
 
                     // --- Input Gradient ---
                     // dL/d(input) = grad_output * weight_i32
                     let dx = g.mul(w.into_acc());
                     grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i].add(
-                        dx.div(S::Acc::from_i32(1 << local_delta_x))
+                        dx.div(S::Acc::from_i32(1i32 << local_delta_x))
                     );
                 }
             }

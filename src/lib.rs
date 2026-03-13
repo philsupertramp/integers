@@ -16,6 +16,8 @@ use crate::nn::kernels;
 
 
 pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
+    const MAX: Self;
+
     fn add(self, other: Self) -> Self;
     fn sub(self, other: Self) -> Self;
     fn mul(self, other: Self) -> Self;
@@ -33,6 +35,8 @@ pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
 }
 
 impl Numeric for f32 {
+    const MAX: f32 = f32::MAX;
+
     fn add(self, other: Self) -> Self { self + other }
     fn sub(self, other: Self) -> Self { self - other }
     fn mul(self, other: Self) -> Self { self * other }
@@ -49,6 +53,8 @@ impl Numeric for f32 {
 }
 
 impl Numeric for i32 {
+    const MAX: i32 = i32::MAX;
+
     fn add(self, other: Self) -> Self { self.saturating_add(other) }
     fn sub(self, other: Self) -> Self { self.saturating_sub(other) }
     fn mul(self, other: Self) -> Self { self.saturating_mul(other) }

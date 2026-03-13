@@ -119,13 +119,13 @@ pub fn tanh_i8(x: i8) -> i8 {
 pub fn stochastic_downcast(val: i32, shift: u32, rng: &mut XorShift64) -> i32 {
     if shift == 0 { return val; }
 
-    let mask = (1 << shift) - 1;
+    let mask: i32 = (1i32 << shift).saturating_sub(1i32);
     let frac = val & mask;
 
     let thresh = rng.gen_range(1 << shift) as i32;
     let round_bit = if frac.abs() > thresh { 1 } else { 0 };
 
-    let shifted = (val >> shift) + round_bit;
+    let shifted = (val >> shift).saturating_add(round_bit);
 
     shifted
 }
