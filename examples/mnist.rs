@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut optim = SGDConfig::new();
     optim.lr_shift = 6;
-    optim.clip_val = 2 << 13;
+    optim.clip_val = 2 << 11;
 
     // Print architecture
     println!("Architecture:");

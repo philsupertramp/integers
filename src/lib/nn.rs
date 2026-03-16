@@ -305,7 +305,7 @@ pub trait HasWeights<S: Scalar> {
             return 0;
         }
 
-        compute_shift_for_max(max_magnitude.to_u32()) as i32
+        compute_shift_for_max::<S>(max_magnitude.to_u32()) as i32
     }
 }
 

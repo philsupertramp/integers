@@ -66,6 +66,11 @@ impl<S: Scalar> SGDConfig<S> {
         self.momentum_shift = Some(momentum_shift);
         self
     }
+
+    pub fn with_clip(mut self, clip_val: S::Acc) -> Self {
+        self.clip_val = clip_val;
+        self
+    }
 }
 impl SGDUpdater<f32> for SGDConfig<f32> {
     fn do_update(config: &mut SGDConfig<f32>, weights: &mut [f32], grads: &[f32], state: &mut OptimizerState<f32>, batch_size: u32){

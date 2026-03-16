@@ -154,7 +154,7 @@ impl Scalar for i32 {
     fn downcast(acc: i32, shift: i32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
 
     fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> i32 {
-        let range: Self::Acc = Numeric::max(range, <i32 as Numeric>::from_i32(1i32));
+        let range: Self::Acc = Numeric::max(range, 1i32);
         let spread = (2 * range as u32) as u32;
         rng.gen_range(spread) as i32 - range
     }
