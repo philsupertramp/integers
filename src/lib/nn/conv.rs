@@ -5,14 +5,14 @@ use std::any::Any;
 pub struct Flatten {}
 
 impl<S: Scalar + 'static> Module<S> for Flatten {
-    fn forward(&mut self, input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32){
+    fn forward(&mut self, input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32){
         // TODO: Reshape 4D to 2D
         // [batch_size, channels, height, width] to [batch_size, channels * height * width]
         let output = Tensor::<S>::new(input.shape.clone());
         
         (output, s_x)
     }
-    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32){
+    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32){
         // TODO: reshape 2D back to 4D
         let output = Tensor::<S::Acc>::new(grad.shape.clone());
         (output, s_g)
@@ -69,13 +69,13 @@ impl<S: Scalar> Conv2D<S> {
 }
 
 impl<S: Scalar + 'static> Module<S> for Conv2D<S> {
-    fn forward(&mut self, input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32){
+    fn forward(&mut self, input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32){
         // TODO: 
         let output = Tensor::<S>::new(input.shape.clone());
         
         (output, s_x)
     }
-    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32){
+    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32){
         // TODO:
         let output = Tensor::<S::Acc>::new(grad.shape.clone());
         (output, s_g)
@@ -92,5 +92,4 @@ impl<S: Scalar + 'static> Module<S> for Conv2D<S> {
 
     fn as_any(&self) -> &dyn Any { self }
     fn as_any_mut(&mut self) -> &mut dyn Any { self }
-
 }

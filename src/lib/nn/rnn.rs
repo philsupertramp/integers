@@ -14,9 +14,9 @@ pub struct RNNCell<S: Scalar> {
     pub hidden_dim: usize,
 
     // caches
-    s_x_cache: Vec<u32>,
-    s_h_cache: Vec<u32>,
-    d_h_next: Option<(Tensor<S::Acc>, u32)>,
+    s_x_cache: Vec<i32>,
+    s_h_cache: Vec<i32>,
+    d_h_next: Option<(Tensor<S::Acc>, i32)>,
 
 }
 
@@ -59,7 +59,7 @@ impl<S: Scalar + 'static> RNNCell<S> {
 }
 
 impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
-    fn forward(&mut self, input: &Tensor<S>, s_x: u32, rng: &mut XorShift64) -> (Tensor<S>, u32) {
+    fn forward(&mut self, input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32) {
         let batch = input.shape[0];
 
         let h = self
@@ -73,13 +73,13 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
 
         let mut comb = Tensor::<S>::new(vec![batch, self.hidden_dim]);
 
-        let s_comb = s_ih.max(s_hh);
+        let s_comb = Numeric::max(s_ih, s_hh);
         let diff_ih = s_comb - s_ih;
         let diff_hh = s_comb - s_hh;
-        let combine_shift: u32 = if S::unit_shift() > 0 { 1 } else { 0 };
+        let combine_shift: i32 = if S::unit_shift() > 0 { 1 } else { 0 };
         for i in 0..comb.data.len() {
-            let ih_aligned = ih.data[i].into_acc().shl(diff_ih);
-            let hh_aligned = hh.data[i].into_acc().shl(diff_hh);
+            let ih_aligned = ih.data[i].into_acc().shl(diff_ih as u32);
+            let hh_aligned = hh.data[i].into_acc().shl(diff_hh as u32);
             let sum = ih_aligned.add(hh_aligned);
             comb.data[i] = S::downcast(sum, combine_shift, rng);
         }
@@ -95,10 +95,10 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
         (h_next, s_out)
     }
 
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: u32) -> (Tensor<S::Acc>, u32) {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
         let (combined_grad, combined_s_g) = match self.d_h_next.take() {
             Some((carry, carry_s_g)) => {
-                let s_combined = s_g.max(carry_s_g);
+                let s_combined = Numeric::max(s_g, carry_s_g);
                 let diff_g = s_combined - s_g;
                 let diff_carry = s_combined - carry_s_g;
                 let mut combined = Tensor::<S::Acc>::new(grad_output.shape.clone());
@@ -107,7 +107,7 @@ impl<S: Scalar + 'static> Module<S> for RNNCell<S> {
                     .zip(grad_output.data.iter().zip(carry.data.iter())) 
                 {
                     // FIX: Left-shift (shl) gradients to prevent precision loss
-                    *c = (*g).shl(diff_g).add((*k).shl(diff_carry));
+                    *c = (*g).shl(diff_g as u32).add((*k).shl(diff_carry as u32));
                 }
                 (combined, s_combined)
             }

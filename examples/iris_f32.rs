@@ -10,7 +10,7 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
-    let epochs: i32 = 500;
+    let epochs: i32 = 50000;
     let batch_size: usize = 32;
     let mut optim = SGDConfig::new();
     optim.lr_shift = 7;

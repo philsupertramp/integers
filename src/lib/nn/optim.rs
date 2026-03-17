@@ -66,6 +66,11 @@ impl<S: Scalar> SGDConfig<S> {
         self.momentum_shift = Some(momentum_shift);
         self
     }
+
+    pub fn with_clip(mut self, clip_val: S::Acc) -> Self {
+        self.clip_val = clip_val;
+        self
+    }
 }
 impl SGDUpdater<f32> for SGDConfig<f32> {
     fn do_update(config: &mut SGDConfig<f32>, weights: &mut [f32], grads: &[f32], state: &mut OptimizerState<f32>, batch_size: u32){
@@ -96,9 +101,9 @@ impl SGDUpdater<f32> for SGDConfig<f32> {
 impl SGDUpdater<i32> for SGDConfig<i32> {
     fn do_update(config: &mut SGDConfig<i32>, weights: &mut [i32], grads: &[i32], state: &mut OptimizerState<i32>, batch_size: u32){
         let batch_shift = batch_size.ilog2(); 
-        let combined_shift = config.lr_shift + batch_shift;
+        let combined_shift = (config.lr_shift + batch_shift) as i32;
         // TODO: what if we don't clip, like for f32?
-        let clip_val = config.clip_val << batch_shift; // sqrt(i32::MAX);
+        let clip_val = config.clip_val; // sqrt(i32::MAX);
         let clip_min = -clip_val;
 
         match (config.momentum_shift, state) {
@@ -127,8 +132,7 @@ impl SGDUpdater<i32> for SGDConfig<i32> {
             }
             _ => {
                 for (w, g) in weights.iter_mut().zip(grads) {
-                    let g_clipped = g.clamp(&clip_min, &clip_val);
-                    let update = kernels::stochastic_downcast(*g_clipped, combined_shift, &mut config.rng);
+                    let update = kernels::stochastic_downcast_clip(*g, combined_shift, &mut config.rng, clip_min, clip_val);
                     *w = Numeric::sub(*w, update);
                 }
             }
