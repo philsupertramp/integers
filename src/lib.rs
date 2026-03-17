@@ -55,9 +55,34 @@ impl Numeric for f32 {
 impl Numeric for i32 {
     const MAX: i32 = i32::MAX;
 
-    fn add(self, other: Self) -> Self { self.saturating_add(other) }
-    fn sub(self, other: Self) -> Self { self.saturating_sub(other) }
-    fn mul(self, other: Self) -> Self { self.saturating_mul(other) }
+    fn add(self, other: Self) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            if self.checked_add(other).is_none() {
+                println!("Overflow i32::add");
+            }
+        }
+
+        self.saturating_add(other)
+    }
+    fn sub(self, other: Self) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            if self.checked_sub(other).is_none() {
+                println!("Overflow i32::sub");
+            }
+        }
+        self.saturating_sub(other)
+    }
+    fn mul(self, other: Self) -> Self { 
+        #[cfg(debug_assertions)]
+        {
+            if self.checked_mul(other).is_none() {
+                println!("Overflow i32::mul");
+            }
+        }
+        self.saturating_mul(other)
+    }
     fn div(self, other: Self) -> Self { if other == 0 { 0 } else { self / other } }
     fn sqrt(self) -> Self { let v = if self > 0 { self as u64 } else { 0u64 }; kernels::isqrt_64(v) as i32 }
     fn from_i32(val: i32) -> i32 { val }
@@ -65,7 +90,7 @@ impl Numeric for i32 {
     fn gt(self, other: i32) -> bool { self > other }
     fn to_u32(self) -> u32 { if self < 0i32 { 0u32 } else { self as u32 } }
     fn signum(self) -> i32 { if self > 0 { 1 } else if self == 0 { 0 } else { -1 } }
-    fn shr(self, shift: u32) -> i32 { self >> shift }
+    fn shr(self, shift: u32) -> i32 { self.saturating_div(1i32 << shift) }
     fn shl(self, shift: u32) -> i32 { self.saturating_mul(1i32 << shift) }
     fn max(self, other: i32) -> i32 { if self > other { self } else { other }}
 }
@@ -168,7 +193,7 @@ impl Scalar for i32 {
     fn from_i32(val: i32) -> i32 { val as i32 }
     fn from_f64(val: f64) -> i32 { (val * 127.0 * 128.0).round() as i32 }
     fn into_acc(self) -> i32 { self }
-    fn mul(self, other: i32) -> i32 { self * other }
+    fn mul(self, other: i32) -> i32 { Numeric::mul(self.into_acc(), other.into_acc()) }
     fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
     fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
     

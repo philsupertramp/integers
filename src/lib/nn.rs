@@ -380,7 +380,7 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         self.cache.push(input.clone());
         self.s_x_cache.push(s_x);
         let mut out_raw = Tensor::<S>::new(vec![batch, output_dim]);
-        let downcast_shift = 1;//-self.input_shift;//self.weights.quant_shift as i32 + self.input_shift;
+        let downcast_shift = self.input_shift;//self.weights.quant_shift as i32 + self.input_shift;
         let out_shift = s_x + self.weights.quant_shift - downcast_shift;
 
         for b in 0..batch {
@@ -409,14 +409,15 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         (out_raw, out_shift)
     }
 
-    fn backward(&mut self, shifted_grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
+    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
         // not required to shift anymore, we did that in the forward pass already
         let input = self.cache.pop().expect("Linear::backward: Backward called without forward.");
         let s_x = self.s_x_cache.pop().expect("Linear::backward: Backward called without forward.");
         let s_w = self.weights.quant_shift;
-        let grad_input_shift = (2 * s_w + s_x) - s_w;
+        let grad_input_shift = s_w + self.input_shift;
+        let weight_shift = s_g - s_x - self.weights.quant_shift;
 
-        let s_g_prev = s_g + self.weights.quant_shift;
+        let s_g_prev = s_g.saturating_sub(grad_input_shift);
 
         let batch = input.shape[0];
         let input_dim = input.shape[1];
@@ -425,10 +426,10 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
         let mut grad_input = Tensor::<S::Acc>::new(vec![batch, input_dim]);
         let mut grad_weights = Tensor::<S::Acc>::new(vec![output_dim, input_dim]);
         let mut grad_bias = Tensor::<S::Acc>::new(vec![output_dim]);
+
+        // TODO this is wrong here
         let mut rng = XorShift64::new(420);
 
-        let grad_output = shifted_grad_output; //shifted_grad_output >> output_shift;
-                                               //
         for b in 0..batch {
             for o in 0..output_dim {
                 // at shift s_g
@@ -451,30 +452,32 @@ impl<S: Scalar + 'static> Module<S> for Linear<S> {
 
                     // --- Weight Gradient ---
                     // dL/dw = grad_output * input_i32
-                    //
                     // dw at shift (s_g + s_x)
                     let dw = g.mul(x.into_acc());
 
                     // grad_weights at shift self.weights.quant_shift
-                    // scale grad_weights to (s_g + s_x - self.weights.quant_shift)
-                    grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i].add(S::scale(dw, (s_g + s_x - self.weights.quant_shift), &mut rng));
+                    // scale dw to (s_g - s_x - self.weights.quant_shift)
+                    grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i].add(
+                        S::scale(dw, weight_shift, &mut rng)
+                    );
 
                     // --- Input Gradient ---
                     // dL/d(input) = grad_output * weight_i32
                     // dx at shift (self.weights.quant_shift + (s_g))
                     let dx = g.mul(w.into_acc());
 
-                    // scale grad_input to (...?)
-                    grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i].add(S::scale(dx, grad_input_shift, &mut rng ));
+                    // scale dx to (s_w + self.input_shift)
+                    grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i].add(
+                        S::scale(dx, grad_input_shift, &mut rng )
+                    );
                 }
             }
         }
 
-        let grad_input_shifted = grad_input;
         self.weights.accumulate_grads(&grad_weights);
         self.bias.accumulate_grads(&grad_bias);
 
-        (grad_input_shifted, s_g_prev)
+        (grad_input, s_g_prev)
     }
 
     fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {

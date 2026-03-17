@@ -114,19 +114,19 @@ impl SGDUpdater<i32> for SGDConfig<i32> {
                     .zip(grads.iter())
                 {
                     // 1. Clip gradient to prevent explosion in integer space
-                    let g_clipped = g.clamp(&clip_min, &clip_val);
+                    //let g_clipped = g.clamp(&clip_min, &clip_val);
 
                     // 2. Calculate momentum decay and gradient addition
                     // Note: Using standard division for the decay is usually fine, 
                     // but we could stochastic-shift it too for higher accuracy.
                     let m_decay = *m >> m_shift; 
-                    let g_scaled = g_clipped >> m_shift; 
+                    let g_scaled = *g >> m_shift; 
                     
                     *m = Numeric::add(Numeric::sub(*m, m_decay), g_scaled);
 
                     // 3. Apply Stochastic Rounding to the final parameter update
                     // Instead of truncating: w = w - (m >> combined_shift)
-                    let update = kernels::stochastic_downcast(*m, combined_shift, &mut config.rng);
+                    let update = kernels::stochastic_downcast_clip(*m, combined_shift, &mut config.rng, clip_min, clip_val);
                     *w = Numeric::sub(*w, update);
                 }
             }

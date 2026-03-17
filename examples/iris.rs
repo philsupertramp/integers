@@ -10,12 +10,12 @@ use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = XorShift64::new(42);
-    let epochs: i32 = 500;
+    let epochs: i32 = 50;
     let batch_size: usize = 32;
     let mut optim = SGDConfig::new();
-    optim.lr_shift = 10;
-    optim.momentum_shift = None;
-    optim.clip_val = 2 << 31;
+    optim.lr_shift = 8;
+    optim.momentum_shift = Some(0);
+    optim.clip_val = 2 << 16;
 
     let mut l1 = Linear::<i32>::new(4, 8);
     let mut l2 = Linear::<i32>::new(8, 8);
@@ -90,7 +90,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let (preds, shift_out) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
 
-            let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
+            let scale = shift_out - train_ds.input_shift;
+            let scaled_preds = if scale < 0 {
+                preds >> scale.abs() as u32
+            } else {
+                preds << scale.abs() as u32
+            };
+
+            let (loss, grad_out) = MSE.forward(&scaled_preds, &batch_targets);
 
             model.zero_grads();
             // if batch_start == 0 && epoch % 100 == 0 {
