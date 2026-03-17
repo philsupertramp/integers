@@ -77,6 +77,8 @@ pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
     /// stochastic downcasting)
     fn downcast(acc: Self::Acc, shift: i32, rng: &mut XorShift64) -> Self;
 
+    fn scale(acc: Self::Acc, shift: i32, rng: &mut XorShift64) -> Self::Acc { acc }
+
     /// Casts own value to accumulator type
     fn into_acc(self) -> Self::Acc;
 
@@ -152,6 +154,9 @@ impl Scalar for i32 {
     type Acc = i32;
 
     fn downcast(acc: i32, shift: i32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
+    fn scale(acc: Self::Acc, shift: i32, rng: &mut XorShift64) -> Self::Acc { 
+        kernels::stochastic_downcast(acc, shift, rng)
+    }
 
     fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> i32 {
         let range: Self::Acc = Numeric::max(range, 1i32);

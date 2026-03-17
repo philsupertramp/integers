@@ -132,8 +132,7 @@ impl SGDUpdater<i32> for SGDConfig<i32> {
             }
             _ => {
                 for (w, g) in weights.iter_mut().zip(grads) {
-                    let g_clipped = g.clamp(&clip_min, &clip_val);
-                    let update = kernels::stochastic_downcast(*g_clipped, combined_shift, &mut config.rng);
+                    let update = kernels::stochastic_downcast_clip(*g, combined_shift, &mut config.rng, clip_min, clip_val);
                     *w = Numeric::sub(*w, update);
                 }
             }
