@@ -1,205 +1,149 @@
-use integers::*;
-use integers::nn::*;
-use integers::nn::losses::*;
-use integers::nn::activations::{ReLU, Tanh};
-use integers::dataset_loaders::*;
-use integers::data::{shuffled_indices};
-use integers::debug::*;
-use integers::nn::optim::{SGDConfig, AdamConfig};
-use std::time::Instant;
+//! Iris classification with a dyadic integer network.
+//!
+//! Architecture: 4 → 8 → ReLU → 8 → ReLU → 3 → Softmax
+//! Loss:         Cross-entropy  (gradient = softmax_out − one_hot_target)
+//! Optimizer:    SGD with momentum (momentum_shift = 1, lr_shift = 7)
+//!
+//! This matches the architecture reported in the blog post that achieves 95%
+//! accuracy on i32, surpassing the f32 baseline of 90%.
+//!
+//! # Usage
+//! ```sh
+//! cargo run --release --example iris
+//! cargo run --release --example iris -- path/to/iris.csv
+//! ```
+//!
+//! Expects the UCI Iris CSV (no header, label in column 4):
+//! ```text
+//! 5.1,3.5,1.4,0.2,Iris-setosa
+//! 4.9,3.0,1.4,0.2,Iris-setosa
+//! …
+//! ```
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut rng = XorShift64::new(42);
-    let epochs: i32 = 50;
-    let batch_size: usize = 32;
-    let mut optim = SGDConfig::new();
-    optim.lr_shift = 8;
-    optim.momentum_shift = Some(0);
-    optim.clip_val = 2 << 16;
+use integers::data::shuffled_indices;
+use integers::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
+use integers::nn::{Linear, ReLU, Sequential, Softmax};
+use integers::rng::XorShift64;
+use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic, TrainingReporter};
 
-    let mut l1 = Linear::<i32>::new(4, 8);
-    let mut l2 = Linear::<i32>::new(8, 8);
-    let mut l3 = Linear::<i32>::new(8, 3);
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let train_path = args.get(1).map(|s| s.as_str()).unwrap_or("data/iris_train.tsv");
+    let test_path = args.get(1).map(|s| s.as_str()).unwrap_or("data/iris_test.tsv");
 
-    l1.init(&mut rng);
-    l2.init(&mut rng);
-    l3.init(&mut rng);
+    // ── Hyperparameters ───────────────────────────────────────────────────────
+    const SHIFT:     u32 = 7;
+    const LR_SHIFT:  u32 = 7;    // lr = 2^(-7) ≈ 0.0078
+    const MOM_SHIFT: u32 = 1;    // momentum decay = 2^(-1) = 0.5
+    const GRAD_CLIP: i32 = 8192; // 2^13
+    const EPOCHS:    u32 = 500;
+    const LOG_EVERY: u32 = 50;
+    const BITS_OUT: u32 = 31;
 
-    println!("L1 {}: {} -> {}", l1.weights.quant_shift, l1.input_shift, l1.output_shift);
-    println!("L2 {}: {} -> {}", l2.weights.quant_shift, l2.input_shift, l2.output_shift);
-    println!("L3 {}: {} -> {}", l3.weights.quant_shift, l3.input_shift, l3.output_shift);
-    
-    // Build model for Iris: 4 input features → 3 output classes
-    let mut model = Sequential::<i32>::new();
-    model
-        .add(l1)
-        .add(ReLU::<i32>::new())
-        .add(l2)
-        .add(ReLU::<i32>::new())
-        .add(l3);
-
-    // Load datasets (unwrap Results with ?)
-    let train_ds = DatasetBuilder::<i32>::new("data/iris_train.tsv")
+    // ── Load dataset ──────────────────────────────────────────────────────────
+    println!("Loading Iris train dataset from '{train_path}' …");
+    let ds = DatasetBuilder::<i32>::new_csv(train_path)
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
-        .with_quantization(QuantizationMethod::StandardScore)
-        .load()?;  // ← Unwrap Result<Dataset, DataError>
-    
-    let test_ds = DatasetBuilder::<i32>::new("data/iris_test.tsv")
+        .with_quantization(QuantizationMethod::MinMax)
+        .load()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
+            eprintln!("Download: https://archive.ics.uci.edu/ml/datasets/iris");
+            std::process::exit(1);
+        });
+    println!("Loading Iris test dataset from '{test_path}' …");
+    let test = DatasetBuilder::<i32>::new_csv(test_path)
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
-        .with_quantization(QuantizationMethod::StandardScore)
-        .load()?;   // ← Unwrap Result<Dataset, DataError>
+        .with_quantization(QuantizationMethod::MinMax)
+        .load()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
+            eprintln!("Download: https://archive.ics.uci.edu/ml/datasets/iris");
+            std::process::exit(1);
+        });
 
-    println!("Train set: [Shift: {}] {} samples, {} features", train_ds.input_shift, train_ds.len(), train_ds.n_features());
-    println!("Test set: [Shift: {}]  {} samples, {} features", test_ds.input_shift, test_ds.len(), test_ds.n_features());
-    println!("Classes:   {}", train_ds.n_classes);
-    
-    let mse = MSE;
+    let shift = ds.input_shift.max(0) as u32;
+    println!("  {} samples,  {} features,  {} classes  (input_shift={shift})\n",
+        ds.len(), ds.n_features(), ds.n_classes);
 
-    println!("Architecture:");
-    model.print_summary(&model.describe(), 0);
+    // ── Model ─────────────────────────────────────────────────────────────────
+    //  4 → Linear(8) → ReLU → Linear(8) → ReLU → Linear(3) → Softmax
+    let mut model = Sequential::new();
+    model.add(Linear::new(ds.n_features(), 8, SHIFT, SHIFT, BITS_OUT)
+        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(ReLU::new());
+    model.add(Linear::new(8, 8, SHIFT, SHIFT, BITS_OUT)
+        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(ReLU::new());
+    model.add(Linear::new(8, ds.n_classes, SHIFT, SHIFT, BITS_OUT)
+        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(Softmax::new(SHIFT));
+    model.summary();
     println!();
 
-    println!("{:>6} {:>12} {:>12} {:>10} {:>8} {:>4} {:>4}",
-        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps", "FW Shift", "BW Shift");
-    println!("{}", "─".repeat(80));
+    // ── Training loop ─────────────────────────────────────────────────────────
+    let mut rng      = XorShift64::new(42);
+    let mut reporter = TrainingReporter::new(EPOCHS, LOG_EVERY, shift);
+    reporter.print_header();
 
-    for epoch in 0..epochs {
-        let epoch_start = Instant::now();
-        #[cfg(debug_assertions)]
-        reset_overflow_stats();
+    for epoch in 0..EPOCHS {
+        reporter.reset();
 
-        // Shuffle
-        let indices = shuffled_indices(train_ds.len(), &mut rng);
+        // Online SGD (batch_size = 1), shuffled each epoch.
+        for &i in &shuffled_indices(ds.len(), &mut rng) {
+            let x = sample_to_dyadic(&ds.get_input(i).data,  shift);
+            let t = target_to_dyadic(&ds.get_target(i).data, shift);
 
-        let mut epoch_loss: i64 = 0;
-        let mut batches_processed = 0;
-        let mut shift = 0;
-        let mut grad_shift = 0;
+            model.zero_grad();
+            let y = model.forward(&x);
 
-        let last_batch_start = batch_size * ((train_ds.len() / batch_size) - 1);
-        // Minibatches
-        for batch_start in (0..train_ds.len()).step_by(batch_size) {
-            model.sync_weights(&mut rng);
-            let batch_end = (batch_start + batch_size).min(train_ds.len());
-            let batch_indices = &indices[batch_start..batch_end];
-            let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
+            let correct = argmax(&y) == ds.labels[i] as usize;
+            let g = cross_entropy_grad(&y, &t, shift);
+            let sq = g.iter().map(|d| (d.v as i64).pow(2)).sum::<i64>();
 
-            let (preds, shift_out) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
-
-            let scale = shift_out - train_ds.input_shift;
-            let scaled_preds = if scale < 0 {
-                preds >> scale.abs() as u32
-            } else {
-                preds << scale.abs() as u32
-            };
-
-            let (loss, grad_out) = MSE.forward(&scaled_preds, &batch_targets);
-
-            model.zero_grads();
-            // if batch_start == 0 && epoch % 100 == 0 {
-            //     println!("with shift {}", shift);
-            //     println!("Loss: {} for GRAD {:?}", loss, grad_out);
-            //     println!("{:<6} {:>10} {:>10} {:>8}", batch_start, argmax(&batch_targets, Some(1))[0], argmax(&preds, Some(1))[0], loss);
-            //     continue;
-            // }
-            epoch_loss += loss as i64;
-            batches_processed += 1;
-
-            let (_, grad_shift_out) = model.backward(&grad_out, shift_out);
-            model.step(&mut optim);
-            shift = shift_out;
-            grad_shift = grad_shift_out;
+            reporter.record(sq, correct);
+            model.backward(&g);
+            model.update(LR_SHIFT);
         }
-        #[cfg(debug_assertions)]
-        get_overflow_stats();
+        // Evaluate on the test set at the end of each epoch.
+        let test_correct: usize = (0..test.len()).filter(|&i| {
+            let x = sample_to_dyadic(&test.get_input(i).data, shift);
+            argmax(&model.forward(&x)) == test.labels[i] as usize
+        }).count();
+        let test_acc = test_correct as f64 / test.len() as f64 * 100.0;
 
-        // ── Evaluation ────────────────────────────────────────────────────────────
-        model.sync_weights(&mut rng);
-
-        let mut eval_loss: i64 = 0;
-        let mut correct: usize = 0;
-        for t in 0..test_ds.len() {
-            let x_t = test_ds.get_input(t);
-            let target = test_ds.get_target(t);
-            let (pred, s_out) = model.forward(&x_t, test_ds.input_shift, &mut rng);
-            let (loss, grad_out) = mse.forward(&pred, &target);
-            eval_loss += loss as i64;
-            let pred_cls = argmax(&pred, Some(1))[0] as u8;
-            if pred_cls == test_ds.labels[t] {
-                correct += 1;
-            }
-
-        }
-        let accuracy = correct as f32 / test_ds.len() as f32;
-        let elapsed = epoch_start.elapsed().as_micros();
-        #[cfg(debug_assertions)]
-        {
-            let overflow_stats = get_overflow_stats();
-            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}ms {:>8} {:>4} {:>4}",
-                epoch,
-                epoch_loss as f64 / (batches_processed as f64),
-                accuracy * 100.0,
-                elapsed,
-                overflow_stats.downcast_clamps,
-                shift,
-                grad_shift,
-            );
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}ms {:>8} {:>4} {:>4}",
-                epoch,
-                epoch_loss as f64 / (batches_processed as f64),
-                accuracy * 100.0,
-                elapsed,
-                -1,
-                shift,
-                grad_shift,
-            );
-        }
-
-        // Early stopping
-        if epoch > 5 && accuracy >= 0.95 {
-            println!("\n✓ Early stopping at epoch {} (95% accuracy reached)", epoch);
-            break;
-        }
-
+        reporter.maybe_print(epoch, Some(test_acc));
     }
 
+    // ── Final evaluation ──────────────────────────────────────────────────────
+    let correct: usize = (0..ds.len()).filter(|&i| {
+        let x = sample_to_dyadic(&ds.get_input(i).data, shift);
+        argmax(&model.forward(&x)) == ds.labels[i] as usize
+    }).count();
 
-    // Get a batch of test samples
-    let test_indices: Vec<usize> = (0..test_ds.len()).collect();
-    let (test_inputs, _test_targets) = test_ds.minibatch(&test_indices);
-    
-    // Forward pass
-    let (predictions_tensor, shift) = model.forward(&test_inputs, test_ds.input_shift, &mut rng);
-    
-    // Get predicted classes [batch_size]
-    let predicted_classes = argmax(&predictions_tensor, Some(1));
-    
-    // Get ground truth labels [batch_size]
-    let true_labels: Vec<u8> = test_indices
-        .iter()
-        .map(|&i| test_ds.labels[i])
-        .collect();
+    println!();
+    reporter.print_footer();
+    println!();
+    println!("Final pass accuracy: {}/{} = {:.1}%",
+        correct, ds.len(), correct as f64 / ds.len() as f64 * 100.0);
 
-    // Compute accuracy
-    let accuracy = accuracy(&predicted_classes, &true_labels);
-
-    println!("PREDICTED CLASSES: {:?}", predictions_tensor);
-    println!("\nTest batch accuracy: {:.2}%", accuracy * 100.0);
-
-    // Print predictions vs ground truth
-    for (i, &idx) in test_indices.iter().enumerate() {
-        println!("Sample {}: predicted class {}, true class {}",
-            idx, predicted_classes[i], true_labels[i]);
+    // ── Per-class breakdown ───────────────────────────────────────────────────
+    let nc = ds.n_classes;
+    let mut per_class = vec![(0usize, 0usize); nc]; // (correct, total)
+    for i in 0..ds.len() {
+        let x   = sample_to_dyadic(&ds.get_input(i).data, shift);
+        let y   = model.forward(&x);
+        let cls = ds.labels[i] as usize;
+        per_class[cls].1 += 1;
+        if argmax(&y) == cls { per_class[cls].0 += 1; }
     }
-
-
-    Ok(())
+    println!();
+    println!("Per-class accuracy:");
+    for (c, (ok, total)) in per_class.iter().enumerate() {
+        println!("  class {c}: {ok}/{total} = {:.1}%", *ok as f64 / *total as f64 * 100.0);
+    }
 }
-

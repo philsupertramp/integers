@@ -1,1499 +1,766 @@
-#[path = "nn/losses.rs"]
-pub mod losses;
-#[path = "nn/kernels.rs"]
-pub mod kernels;
-#[path = "nn/optim.rs"]
-pub mod optim;
-#[path = "nn/rnn.rs"]
-pub mod rnn;
-#[path = "nn/conv.rs"]
-pub mod conv;
-#[path = "nn/activations.rs"]
-pub mod activations;
+//! Neural network layers built on the [`crate::dyadic`] arithmetic system.
+//!
+//! # Layer catalogue
+//!
+//! | Layer         | Parameters | Use for |
+//! |---------------|-----------|---------|
+//! | [`Linear`]    | weights, biases | fully-connected |
+//! | [`ReLU`]      | — | activation |
+//! | [`Softmax`]   | — | output probabilities |
+//! | [`Conv2D`]    | kernels, biases | spatial feature extraction |
+//! | [`MaxPool2D`] | — | spatial downsampling |
+//! | [`Flatten`]   | — | bridge conv→linear |
+//!
+//! # Implementing a new layer
+//!
+//! Implement the [`Layer`] trait:
+//! - `forward`  — compute output, **cache** everything `backward` needs.
+//! - `backward` — *accumulate* `∂L/∂params`, return `∂L/∂input`.
+//! - `update`   — one optimizer step: `params -= lr * velocity`.
+//! - `zero_grad`— reset accumulated gradients (NOT velocity/momentum).
+//! - `name`     — `&'static str` label.
+//! - `describe` — richer one-line summary (default = `name()`).
+//!
+//! Then `model.add(your_layer)` into a [`Sequential`].
+//!
+//! # Shift convention
+//!
+//! All built-in layers work with a uniform `SHIFT` so that output scale = input scale:
+//! `mul(w, x, SHIFT)` with `w.s = x.s = SHIFT` → `result.s = SHIFT`.
+//!
+//! # Momentum SGD
+//!
+//! Enable on `Linear` and `Conv2D` via `.with_momentum(shift)`.  With `shift = 1`:
+//! ```text
+//! v  ←  SR(v, shift)  +  grad_accum     (decay old velocity, add new)
+//! w  ←  w  −  SR(v,  lr_shift)          (apply damped velocity)
+//! ```
 
-use crate::{Tensor, XorShift64, Scalar, Numeric};
-use crate::nn::optim::{OptimizerConfig, OptimizerState};
-use crate::{checked_add_counting};
+use crate::dyadic::{
+    add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
+};
+use rand::Rng;
 
-use std::any::Any;
+// ─── Layer trait ──────────────────────────────────────────────────────────────
 
-
-// Module trait
-// Every building block needs to implement this.
-// Containers delegate; primitives do work.
-//
-#[derive(PartialEq, Debug)]
-pub struct ModuleInfo {
-    pub name: &'static str,
-    pub params: usize,
-    pub static_bytes: usize,
-    pub children: Vec<ModuleInfo>,
+pub trait Layer {
+    fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic>;
+    fn backward(&mut self, grad_output: &[Dyadic]) -> Vec<Dyadic>;
+    fn update(&mut self, lr_shift: u32);
+    fn zero_grad(&mut self);
+    fn name(&self) -> &'static str;
+    fn describe(&self) -> String { self.name().to_string() }
 }
 
-impl ModuleInfo {
-    pub fn total(&self) -> (usize, usize) {
-        let child_totals = self
-            .children
-            .iter()
-            .map(|c| c.total())
-            .fold((0, 0), |(p, b), (cp, cb)| (p + cp, b + cb));
-        (
-            self.params + child_totals.0,
-            self.static_bytes + child_totals.1,
+// ─── Sequential ───────────────────────────────────────────────────────────────
+
+pub struct Sequential {
+    pub layers: Vec<Box<dyn Layer>>,
+}
+
+impl Sequential {
+    pub fn new() -> Self { Self { layers: Vec::new() } }
+
+    pub fn add<L: Layer + 'static>(&mut self, layer: L) {
+        self.layers.push(Box::new(layer));
+    }
+
+    pub fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
+        let mut x = input.to_vec();
+        for layer in &mut self.layers { x = layer.forward(&x); }
+        x
+    }
+
+    pub fn backward(&mut self, grad: &[Dyadic]) -> Vec<Dyadic> {
+        let mut g = grad.to_vec();
+        for layer in self.layers.iter_mut().rev() { g = layer.backward(&g); }
+        g
+    }
+
+    pub fn update(&mut self, lr_shift: u32) {
+        for layer in &mut self.layers { layer.update(lr_shift); }
+    }
+
+    pub fn zero_grad(&mut self) {
+        for layer in &mut self.layers { layer.zero_grad(); }
+    }
+
+    pub fn summary(&self) {
+        println!("Sequential(");
+        for (i, layer) in self.layers.iter().enumerate() {
+            println!("  ({i}): {}", layer.describe());
+        }
+        println!(")");
+    }
+}
+
+impl Default for Sequential { fn default() -> Self { Self::new() } }
+
+// ─── Shared optimizer helpers ──────────────────────────────────────────────────
+
+/// Vanilla SGD: `w ← w − 2^(−lr_shift) · g`.
+fn sgd_step(w: Dyadic, g: Dyadic, lr_shift: u32) -> Dyadic {
+    let eff = (g.s as i64) + (lr_shift as i64) - (w.s as i64);
+    let delta = if eff >= 0 {
+        stochastic_round(g.v, eff as u32)
+    } else {
+        let k = (-eff).min(30) as u32;
+        ((g.v as i64) << k).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    };
+    Dyadic::new(w.v.saturating_sub(delta), w.s)
+}
+
+/// Momentum SGD: `v ← SR(v, m) + g;  w ← w − SR(v, lr_shift)`.
+fn momentum_step(w: Dyadic, g: Dyadic, v: &mut Dyadic, lr_shift: u32, m: u32) -> Dyadic {
+    let v_decayed = Dyadic::new(stochastic_round(v.v, m), v.s);
+    let (v_s, v_new) = if g.s >= v.s {
+        let g_aligned = Dyadic::new(stochastic_round(g.v, g.s - v.s), v.s);
+        (v.s, Dyadic::new(v_decayed.v.saturating_add(g_aligned.v), v.s))
+    } else {
+        let shift = v.s - g.s;
+        let vd_aligned = Dyadic::new(stochastic_round(v_decayed.v, shift), g.s);
+        (g.s, Dyadic::new(vd_aligned.v.saturating_add(g.v), g.s))
+    };
+    *v = Dyadic::new(v_new.v, v_s);
+    sgd_step(w, *v, lr_shift)
+}
+
+/// Apply one optimizer step to a slice of (param, grad, velocity) triples.
+fn apply_updates(
+    params: &mut [Dyadic],
+    grads:  &[Dyadic],
+    vels:   &mut [Dyadic],
+    lr_shift: u32,
+    momentum: Option<u32>,
+) {
+    match momentum {
+        None    => params.iter_mut().zip(grads).for_each(|(w, &g)| *w = sgd_step(*w, g, lr_shift)),
+        Some(m) => params.iter_mut().zip(grads).zip(vels.iter_mut())
+            .for_each(|((w, &g), v)| *w = momentum_step(*w, g, v, lr_shift, m)),
+    }
+}
+
+// ─── Linear ───────────────────────────────────────────────────────────────────
+
+/// Fully-connected affine layer with optional momentum SGD and gradient clipping.
+pub struct Linear {
+    pub in_features:  usize,
+    pub out_features: usize,
+    pub weights: Vec<Dyadic>,
+    pub biases:  Vec<Dyadic>,
+    pub quant_shift:    u32,
+    pub output_bits:    u32,
+    pub grad_clip:      i32,
+    pub momentum_shift: Option<u32>,
+    input_cache:  Vec<Dyadic>,
+    output_cache: Vec<Dyadic>,
+    grad_w: Vec<Dyadic>,
+    grad_b: Vec<Dyadic>,
+    vel_w:  Vec<Dyadic>,
+    vel_b:  Vec<Dyadic>,
+}
+
+impl Linear {
+    /// Construct with He-style initialisation: `W ~ U(−k, k)`,
+    /// `k = ⌊2^weight_shift / √fan_in⌋` (min 1).
+    pub fn new(in_features: usize, out_features: usize, weight_shift: u32, quant_shift: u32, output_bits: u32) -> Self {
+        let mut rng = rand::thread_rng();
+        let n_w = out_features * in_features;
+        let k   = ((1u32 << weight_shift) as f64 / (in_features as f64).sqrt()).round() as i32;
+        let k   = k.max(1);
+        let mk  = |n: usize| vec![Dyadic::new(0, weight_shift); n];
+
+        Self {
+            in_features, out_features,
+            weights: (0..n_w).map(|_| Dyadic::new(rng.gen_range(-k..=k), weight_shift)).collect(),
+            biases:  mk(out_features),
+            quant_shift, output_bits,
+            grad_clip:      i32::MAX,
+            momentum_shift: None,
+            input_cache:  Vec::new(),
+            output_cache: Vec::new(),
+            grad_w: mk(n_w),
+            grad_b: mk(out_features),
+            vel_w:  mk(n_w),
+            vel_b:  mk(out_features),
+        }
+    }
+
+    pub fn with_grad_clip(mut self, clip: i32) -> Self { self.grad_clip = clip.abs(); self }
+    pub fn with_momentum(mut self, shift: u32) -> Self { self.momentum_shift = Some(shift); self }
+
+    #[inline] fn w   (&self, j: usize, i: usize) -> Dyadic { self.weights[j * self.in_features + i] }
+    #[inline] fn flat(&self, j: usize, i: usize) -> usize  { j * self.in_features + i }
+}
+
+impl Layer for Linear {
+    fn name(&self) -> &'static str { "Linear" }
+    fn describe(&self) -> String {
+        let ws    = self.weights.first().map_or(0, |w| w.s);
+        let clip  = if self.grad_clip == i32::MAX { "off".into() } else { format!("2^{}", (self.grad_clip as f64).log2() as i32) };
+        let mom   = self.momentum_shift.map_or("off".into(), |m| format!("shift={m}"));
+        format!("Linear(in={}, out={}, w_shift={ws}, q_shift={}, bits={}, clip={clip}, mom={mom})",
+            self.in_features, self.out_features, self.quant_shift, self.output_bits)
+    }
+
+    fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
+        assert_eq!(input.len(), self.in_features);
+        self.input_cache = input.to_vec();
+        let (q_min, q_max) = signed_bounds(self.output_bits);
+        let mut out = Vec::with_capacity(self.out_features);
+        for j in 0..self.out_features {
+            let mut acc = self.biases[j];
+            for i in 0..self.in_features { acc = add(acc, mul(self.w(j, i), input[i], self.quant_shift)); }
+            let (y, _) = requantize(acc, acc.s, q_min, q_max);
+            out.push(y);
+        }
+        self.output_cache = out.clone();
+        out
+    }
+
+    fn backward(&mut self, grad_output: &[Dyadic]) -> Vec<Dyadic> {
+        assert_eq!(grad_output.len(), self.out_features);
+        let (q_min, q_max) = signed_bounds(self.output_bits);
+        let g_s = grad_output.first().map_or(0, |g| g.s);
+        let mut grad_input = vec![Dyadic::new(0, g_s); self.in_features];
+        for j in 0..self.out_features {
+            let g_raw = ste_requantize(grad_output[j], self.output_cache[j].v, q_min, q_max);
+            let g_j   = Dyadic::new(g_raw.v.clamp(-self.grad_clip, self.grad_clip), g_raw.s);
+            for i in 0..self.in_features {
+                let idx = self.flat(j, i);
+                self.grad_w[idx] = add(self.grad_w[idx], mul(g_j, self.input_cache[i], self.quant_shift));
+                grad_input[i]    = add(grad_input[i],    mul(g_j, self.w(j, i),        self.quant_shift));
+            }
+            self.grad_b[j] = add(self.grad_b[j], g_j);
+        }
+        grad_input
+    }
+
+    fn update(&mut self, lr_shift: u32) {
+        apply_updates(&mut self.weights, &self.grad_w, &mut self.vel_w, lr_shift, self.momentum_shift);
+        apply_updates(&mut self.biases,  &self.grad_b, &mut self.vel_b, lr_shift, self.momentum_shift);
+    }
+
+    fn zero_grad(&mut self) {
+        self.grad_w.iter_mut().for_each(|g| g.v = 0);
+        self.grad_b.iter_mut().for_each(|g| g.v = 0);
+    }
+}
+
+// ─── ReLU ─────────────────────────────────────────────────────────────────────
+
+pub struct ReLU { mask: Vec<bool> }
+
+impl ReLU { pub fn new() -> Self { Self { mask: Vec::new() } } }
+impl Default for ReLU { fn default() -> Self { Self::new() } }
+
+impl Layer for ReLU {
+    fn name(&self) -> &'static str { "ReLU" }
+
+    fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
+        self.mask = input.iter().map(|x| x.v > 0).collect();
+        input.iter().map(|x| if x.v > 0 { *x } else { Dyadic::new(0, x.s) }).collect()
+    }
+
+    fn backward(&mut self, grad_output: &[Dyadic]) -> Vec<Dyadic> {
+        grad_output.iter().zip(&self.mask)
+            .map(|(&g, &a)| if a { g } else { Dyadic::new(0, g.s) })
+            .collect()
+    }
+
+    fn update(&mut self, _: u32) {}
+    fn zero_grad(&mut self) {}
+}
+
+// ─── Softmax ──────────────────────────────────────────────────────────────────
+
+/// Numerically stable softmax output layer.
+///
+/// Computes softmax in f64 then requantises to `output_shift`.
+/// Backward is a straight-through estimator: when paired with cross-entropy
+/// the combined gradient is simply `p − t`, so no jacobian is needed.
+pub struct Softmax {
+    pub output_shift: u32,
+    pub last_probs:   Vec<f64>,
+}
+
+impl Softmax { pub fn new(output_shift: u32) -> Self { Self { output_shift, last_probs: Vec::new() } } }
+
+impl Layer for Softmax {
+    fn name(&self) -> &'static str { "Softmax" }
+    fn describe(&self) -> String { format!("Softmax(shift={})", self.output_shift) }
+
+    fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
+        let logits: Vec<f64> = input.iter().map(|x| x.to_f64()).collect();
+        let max  = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exps: Vec<f64> = logits.iter().map(|&z| (z - max).exp()).collect();
+        let sum: f64 = exps.iter().sum();
+        self.last_probs = exps.iter().map(|&e| e / sum).collect();
+        let scale = (1u32 << self.output_shift) as f64;
+        let (_, max_v) = signed_bounds(self.output_shift + 1);
+        self.last_probs.iter()
+            .map(|&p| Dyadic::new((p * scale).round().clamp(0.0, max_v as f64) as i32, self.output_shift))
+            .collect()
+    }
+
+    fn backward(&mut self, grad_output: &[Dyadic]) -> Vec<Dyadic> { grad_output.to_vec() }
+    fn update(&mut self, _: u32) {}
+    fn zero_grad(&mut self) {}
+}
+
+// ─── Conv2D ───────────────────────────────────────────────────────────────────
+
+/// 2D convolution layer.  Input layout: `[in_channels, height, width]` (channel-first flat).
+///
+/// # Forward
+/// ```text
+/// for (oc, oh, ow): y[oc,oh,ow] = ℛ(b[oc] ⊕ Σ_{ic,kh,kw} K[oc,ic,kh,kw] ⊗ x[ic, oh+kh, ow+kw])
+/// ```
+///
+/// # Backward (STE through ℛ)
+/// ```text
+/// ∂L/∂K[oc,ic,kh,kw] += Σ_{oh,ow} g̃[oc,oh,ow] ⊗ x[ic, oh+kh, ow+kw]
+/// ∂L/∂x[ic,ih,iw]     = Σ_{oc,kh,kw} g̃[oc,ih−kh, iw−kw] ⊗ K[oc,ic,kh,kw]
+///                                       (where oh = ih−kh, ow = iw−kw are valid)
+/// ```
+///
+/// # Spatial dimensions
+/// Must be provided at construction time so gradient buffers can be allocated
+/// correctly.  `out_h = in_h − kernel_h + 1`,  `out_w = in_w − kernel_w + 1`.
+pub struct Conv2D {
+    // config
+    pub in_channels:    usize,
+    pub out_channels:   usize,
+    pub kernel_h:       usize,
+    pub kernel_w:       usize,
+    pub in_h:           usize,
+    pub in_w:           usize,
+    pub quant_shift:    u32,
+    pub output_bits:    u32,
+    pub grad_clip:      i32,
+    pub momentum_shift: Option<u32>,
+    // derived
+    out_h: usize,
+    out_w: usize,
+    // params: kernels[out_c, in_c, kH, kW], biases[out_c]
+    pub kernels: Vec<Dyadic>,
+    pub biases:  Vec<Dyadic>,
+    // caches
+    input_cache:  Vec<Dyadic>,
+    output_cache: Vec<Dyadic>,
+    // gradients + velocity
+    grad_k: Vec<Dyadic>,
+    grad_b: Vec<Dyadic>,
+    vel_k:  Vec<Dyadic>,
+    vel_b:  Vec<Dyadic>,
+}
+
+impl Conv2D {
+    /// Construct with He-style kernel initialisation.
+    ///
+    /// # Arguments
+    /// * `in_channels`, `out_channels` — channel depths
+    /// * `kernel_h`, `kernel_w` — kernel spatial size
+    /// * `in_h`, `in_w` — input spatial size (fixed at construction time)
+    /// * `weight_shift`, `quant_shift`, `output_bits` — same as [`Linear`]
+    pub fn new(
+        in_channels:  usize,
+        out_channels: usize,
+        kernel_h:     usize,
+        kernel_w:     usize,
+        in_h:         usize,
+        in_w:         usize,
+        weight_shift: u32,
+        quant_shift:  u32,
+        output_bits:  u32,
+    ) -> Self {
+        assert!(in_h >= kernel_h && in_w >= kernel_w, "kernel larger than input");
+
+        let mut rng  = rand::thread_rng();
+        let fan_in   = in_channels * kernel_h * kernel_w;
+        let n_k      = out_channels * fan_in;
+        let k        = ((1u32 << weight_shift) as f64 / (fan_in as f64).sqrt()).round() as i32;
+        let k        = k.max(1);
+        let out_h    = in_h - kernel_h + 1;
+        let out_w    = in_w - kernel_w + 1;
+        let mk       = |n: usize| vec![Dyadic::new(0, weight_shift); n];
+
+        Self {
+            in_channels, out_channels, kernel_h, kernel_w, in_h, in_w,
+            quant_shift, output_bits,
+            grad_clip:      i32::MAX,
+            momentum_shift: None,
+            out_h, out_w,
+            kernels: (0..n_k).map(|_| Dyadic::new(rng.gen_range(-k..=k), weight_shift)).collect(),
+            biases:  mk(out_channels),
+            input_cache:  Vec::new(),
+            output_cache: Vec::new(),
+            grad_k: mk(n_k),
+            grad_b: mk(out_channels),
+            vel_k:  mk(n_k),
+            vel_b:  mk(out_channels),
+        }
+    }
+
+    pub fn with_grad_clip(mut self, clip: i32) -> Self { self.grad_clip = clip.abs(); self }
+    pub fn with_momentum(mut self, shift: u32) -> Self { self.momentum_shift = Some(shift); self }
+
+    /// Output slice length: `out_channels * out_h * out_w`.
+    pub fn output_len(&self) -> usize { self.out_channels * self.out_h * self.out_w }
+
+    // ── Index helpers ─────────────────────────────────────────────────────────
+
+    #[inline] fn in_idx (&self, c: usize, h: usize, w: usize) -> usize { c * self.in_h  * self.in_w  + h * self.in_w  + w }
+    #[inline] fn out_idx(&self, c: usize, h: usize, w: usize) -> usize { c * self.out_h * self.out_w + h * self.out_w + w }
+    #[inline] fn k_idx  (&self, oc: usize, ic: usize, kh: usize, kw: usize) -> usize {
+        oc * (self.in_channels * self.kernel_h * self.kernel_w)
+        + ic * (self.kernel_h * self.kernel_w)
+        + kh * self.kernel_w + kw
+    }
+}
+
+impl Layer for Conv2D {
+    fn name(&self) -> &'static str { "Conv2D" }
+
+    fn describe(&self) -> String {
+        let ws   = self.kernels.first().map_or(0, |k| k.s);
+        let clip = if self.grad_clip == i32::MAX { "off".into() } else { format!("2^{}", (self.grad_clip as f64).log2() as i32) };
+        let mom  = self.momentum_shift.map_or("off".into(), |m| format!("shift={m}"));
+        format!(
+            "Conv2D(in={}, out={}, kernel={}×{}, spatial={}×{}→{}×{}, clip={clip}, mom={mom})",
+            self.in_channels, self.out_channels,
+            self.kernel_h, self.kernel_w,
+            self.in_h, self.in_w, self.out_h, self.out_w,
         )
     }
-}
 
-pub trait Module<S: Scalar>: Any {
-    /// Implements a forward pass for the module.
-    ///
-    /// Must keep track of internal scale shifts
-    /// 1. track `input_shift` for backward pass
-    /// 2. track `output_shift` to reconstruct the actual result values in i32
-    /// 
-    /// # Arguments
-    ///
-    /// * `input`: Input vector scaled to i32 using `input_shift`
-    /// * `input_shift`: The shift scale used to compress the input to i32
-    /// * `rng`: RNG state
-    ///
-    ///
-    /// # Examples
-    /// ```
-    /// use integers::nn::{Module};
-    /// use integers::{Tensor, XorShift64, Scalar, Numeric};
-    ///
-    /// use std::any::Any;
-    ///
-    /// struct XPlusN {
-    ///     n: i32,
-    ///     input_shift: Option<u32>,
-    ///     output_shift: Option<u32>,
-    /// }
-    ///
-    /// impl<S: Scalar + 'static> Module<S> for XPlusN {
-    ///     fn backward(&mut self, grad: &Tensor<i32>, s_g: u32) -> (Tensor<i32>, u32) {
-    ///         (grad.clone(), s_g)
-    ///     }
-    ///     fn forward(&mut self, input: &Tensor<i32>, s_x: u32, _rng: &mut XorShift64) -> (Tensor<i32>, u32) {
-    ///         self.input_shift = Some(s_x);
-    ///         self.output_shift = Some(s_x);
-    ///
-    ///         let mut output = Tensor::new(input.shape.clone());
-    ///
-    ///         for (val, o) in input.data.iter().zip(output.data.iter_mut()) {
-    ///             *o = val + self.n;
-    ///         }
-    ///         (output, s_x)
-    ///     }
-    ///     fn as_any(&self) -> &dyn Any { self }
-    ///     fn as_any_mut(&mut self) -> &mut dyn Any { self }
-    /// }
-    ///
-    /// let mut mymod = XPlusN{n: 1, input_shift: None, output_shift: None};
-    /// let input = Tensor::from_vec(vec![1, 2, 3], vec![3, 1]);
-    /// let mut rng = XorShift64::new(420);
-    ///
-    ///
-    /// let output = mymod.forward(&input, 0, &mut rng);
-    ///
-    /// assert_eq!(output.shape, vec![3, 1]);
-    /// assert_eq!(output.data[0], 2);
-    /// assert_eq!(output.data[1], 3);
-    /// assert_eq!(output.data[2], 4);
-    /// ```
-    fn forward(&mut self, input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32);
-    fn backward(&mut self, grad: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32);
+    fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
+        debug_assert_eq!(input.len(), self.in_channels * self.in_h * self.in_w,
+            "Conv2D forward: input length mismatch");
 
-    /// quantize i32 master weights -> i32 storage. No-op for non-parameterized modules.
-    fn sync_weights(&mut self, _rng: &mut XorShift64) {}
+        self.input_cache = input.to_vec();
+        let (q_min, q_max) = signed_bounds(self.output_bits);
+        let mut output = vec![Dyadic::new(0, 0); self.output_len()];
 
-    fn init(&mut self, _rng: &mut XorShift64) {}
-
-    /// sets all gradients to zero, e.g. at the beginning of a training iteration
-    fn zero_grads(&mut self) {}
-
-    /// Apply one optimizer step using internal grad cache. No-op if no grads cached.
-    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {}
-
-    fn memory_report(&self) -> (usize, usize) {
-        (0, 0)
-    }
-
-    fn describe(&self) -> ModuleInfo {
-        ModuleInfo {
-            name: "unknown",
-            params: 0,
-            static_bytes: 0,
-            children: vec![],
-        }
-    }
-
-    fn print_summary(&self, info: &ModuleInfo, depth: usize) {
-        let indent = "  ".repeat(depth);
-        let (total_params, total_bytes) = info.total();
-        println!(
-            "{}{}  params={} static={}B",
-            indent, info.name, total_params, total_bytes
-        );
-        for child in &info.children {
-            self.print_summary(child, depth + 1);
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-#[derive(Debug)]
-pub struct Params<S: Scalar> {
-    /// Weights used for training
-    pub master: Tensor<S::Acc>,
-
-    /// Actual weights for inference
-    pub storage: Tensor<S>,
-
-    /// Accumulated gradient from backward pass
-    pub grads: Option<Tensor<S::Acc>>,
-
-    /// State of optimizer
-    pub state: Option<OptimizerState<S>>,
-
-    /// Determines the quantization bits used when scaling from master -> storage
-    /// Typical range: 3-7 (shift values 3-7)
-    ///
-    /// Examples:
-    ///     shift = 4 // for single-layer networks
-    ///     shift = 5 // for 2-3 layer networks
-    ///     shift = 6 // for deeper networks
-    pub quant_shift: i32,
-}
-
-impl<S: Scalar> Params<S> {
-    pub fn new(shape: Vec<usize>, shift: i32) -> Self {
-        // shift >= 0 given due to u32
-        //assert!(shift <= 8, "Weight shift must be 0-8, got {}", shift);
-        Self {
-            master: Tensor::<S::Acc>::new(shape.clone()),
-            storage: Tensor::<S>::new(shape),
-            grads: None,
-            state: None,
-            quant_shift: shift,
-        }
-    }
-
-    pub fn with_shift(mut self, shift: i32) -> Self {
-        self.quant_shift = shift;
-        self
-    }
-
-    pub fn init_uniform(&mut self, rng: &mut XorShift64, range: S::Acc) {
-        for w in self.master.data.iter_mut() {
-            *w = S::random_uniform(rng, range);
-        }
-    }
-
-    pub fn init_xavier_uniform(&mut self, rng: &mut XorShift64, fan_in: usize, fan_out: usize) {
-        let limit = (6.0 / (fan_in + fan_out) as f64).sqrt();
-        let range = S::from_f64(limit);
-        self.init_uniform(rng, range);
-    }
-
-    pub fn sync(&mut self, rng: &mut XorShift64) {
-        for (m, s) in self.master.data.iter().zip(self.storage.data.iter_mut()) {
-            *s = S::downcast(*m, self.quant_shift, rng);
-        }
-    }
-
-    pub fn accumulate_grads(&mut self, new_grads: &Tensor<S::Acc>) {
-        match self.grads.as_mut() {
-            Some(existing) => {
-                // Saturating add to avoid wrapping on large accumulated signals
-                for (e, n) in existing.data.iter_mut().zip(new_grads.data.iter()) {
-                    *e = e.add(*n);
+        for oc in 0..self.out_channels {
+            for oh in 0..self.out_h {
+                for ow in 0..self.out_w {
+                    let mut acc = self.biases[oc];
+                    for ic in 0..self.in_channels {
+                        for kh in 0..self.kernel_h {
+                            for kw in 0..self.kernel_w {
+                                let inp = input[self.in_idx(ic, oh + kh, ow + kw)];
+                                let ker = self.kernels[self.k_idx(oc, ic, kh, kw)];
+                                acc = add(acc, mul(ker, inp, self.quant_shift));
+                            }
+                        }
+                    }
+                    let (y, _) = requantize(acc, acc.s, q_min, q_max);
+                    output[self.out_idx(oc, oh, ow)] = y;
                 }
             }
-            None => {
-                let mut grads = Tensor::<S::Acc>::new(new_grads.shape.clone());
-                for (i, &n) in new_grads.data.iter().enumerate() {
-                    grads.data[i] = n;
-                }
-                self.grads = Some(grads);
-            }
-        }
-    }
-
-    pub fn zero_grads(&mut self) {
-        self.grads = None;
-        //self.state = None;
-    }
-
-    pub fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
-        if let Some(grads) = self.grads.take() {
-            let state = self
-                .state
-                .get_or_insert_with(|| optim.init_state(self.master.len()));
-            optim.update(&mut self.master.data, &grads.data, state, (&grads).shape[0] as u32);
-        }
-    }
-
-    pub fn memory_bytes(&self) -> usize {
-        self.master.memory_bytes() + self.storage.memory_bytes()
-    }
-}
-
-pub fn compute_shift_for_max<S: Scalar>(max_magnitude: u32) -> u32 {
-    let mut shift: u32 = 0;
-    let max_val = S::Acc::MAX.to_u32();
-    while (max_magnitude >> shift) > max_val && shift < 8 {
-        shift += 1;
-    }
-    shift.max(0)
-}
-
-pub trait HasWeights<S: Scalar> {
-    /// Implements trait to dynamically infer current shift of weights
-    ///
-    /// Must implement
-    ///  * get_all_weights: returns all weight values
-    ///
-    ///
-    /// Examples:
-    /// ```
-    /// use integers::{Tensor};
-    /// use integers::nn::{HasWeights, Params};
-    ///
-    /// struct MyModule {
-    ///     weights: Params<i32>,
-    ///     bias: Params<i32>,
-    /// }
-    ///
-    /// impl HasWeights<i32> for MyModule {
-    ///     fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
-    ///         vec![&self.weights.master, &self.bias.master]
-    ///     }
-    /// }
-    ///
-    /// let module = MyModule {
-    ///     weights: Params::<i32>::new(vec![2, 1], 0),
-    ///     bias: Params::<i32>::new(vec![1, 1], 0),
-    /// };
-    ///
-    /// // magnitude is 0, so we fall back to 0
-    /// assert_eq!(module.infer_scale_shift(), 0);
-    /// ```
-
-    /// Get all weight parameters (master i32 tensors) in this module.
-    /// Useful for analysis, initialization, and automatic shift detection.
-    fn get_all_weights(&self) -> Vec<&Tensor<S::Acc>>;
-    
-    /// Infer an appropriate scale_shift based on weight magnitudes.
-    /// Returns a shift value in the range [0, 8].
-    fn infer_scale_shift(&self) -> i32 {
-        let all_weights = self.get_all_weights();
-        if all_weights.is_empty() {
-            return 0;
         }
 
-        let max_magnitude = all_weights
-            .iter()
-            .flat_map(|t| &t.data)
-            .map(|&w| w.abs())
-            .fold(S::Acc::zero(), |acc, x| if x.gt(acc) { x } else { acc });
-
-        if max_magnitude == S::Acc::zero() {
-            return 0;
-        }
-
-        compute_shift_for_max::<S>(max_magnitude.to_u32()) as i32
-    }
-}
-
-#[derive(Debug)]
-pub struct Linear<S: Scalar> {
-    /// all weights are of Transposed Form [out, in] for memory reasons
-    pub weights: Params<S>,
-    pub bias: Params<S>,
-    pub cache: Vec<Tensor<S>>,
-    pub s_x_cache: Vec<i32>,
-
-
-    /// Used to track what shift was applied to inputs
-    pub input_shift: i32,
-    /// Used to track what shift was applied to outputs before returning them
-    pub output_shift: i32,
-}
-
-impl<S: Scalar> Linear<S> {
-    pub fn new(input_dim: usize, output_dim: usize) -> Self {
-        let acc_shift = S::acc_shift(input_dim); // ceil(log2)
-        let back_acc_shift = S::acc_shift(output_dim);
-        Self {
-            weights: Params::new(vec![output_dim, input_dim], 0),
-            bias: Params::new(vec![output_dim], 0),
-            cache: Vec::new(),
-            s_x_cache: Vec::new(),
-            input_shift: acc_shift as i32,
-            output_shift: back_acc_shift as i32,
-        }
+        self.output_cache = output.clone();
+        output
     }
 
-    pub fn init_xavier(&mut self, rng: &mut XorShift64) {
-        let fan_in = self.weights.master.shape[1];
-        let fan_out = self.weights.master.shape[0];
-        self.weights.init_xavier_uniform(rng, fan_in, fan_out);
-        for b in self.bias.master.data.iter_mut() {
-            *b = S::Acc::zero();
-        }
-    }
+    fn backward(&mut self, grad_output: &[Dyadic]) -> Vec<Dyadic> {
+        debug_assert_eq!(grad_output.len(), self.output_len());
 
-    pub fn with_shift(mut self, shift: i32) -> Self {
-        self.weights.quant_shift = shift;
-        self.bias.quant_shift = shift;
-        self
-    }
-}
+        let (q_min, q_max) = signed_bounds(self.output_bits);
+        let g_s = grad_output.first().map_or(0, |g| g.s);
+        let mut grad_input = vec![Dyadic::new(0, g_s); self.in_channels * self.in_h * self.in_w];
 
-impl<S: Scalar + 'static> Module<S> for Linear<S> {
-    fn zero_grads(&mut self){
-        self.weights.zero_grads();
-        self.bias.zero_grads();
-    }
-
-    fn sync_weights(&mut self, rng: &mut XorShift64) {
-        self.weights.sync(rng);
-        self.bias.sync(rng);
-    }
-
-    fn forward(&mut self, raw_input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32) {
-        assert_eq!(
-            raw_input.shape[1], self.weights.storage.shape[1],
-            "Linear::forward: Input in wrong dimension for weights! {} vs {}",
-            raw_input.shape[1], self.weights.storage.shape[1]
-        );
-        let batch = raw_input.shape[0];
-        let input_dim = raw_input.shape[1];
-        let output_dim = self.weights.storage.shape[0];
-
-        let input = raw_input.clone();
-
-        self.cache.push(input.clone());
-        self.s_x_cache.push(s_x);
-        let mut out_raw = Tensor::<S>::new(vec![batch, output_dim]);
-        let downcast_shift = self.input_shift;//self.weights.quant_shift as i32 + self.input_shift;
-        let out_shift = s_x + self.weights.quant_shift - downcast_shift;
-
-        for b in 0..batch {
-            let in_row = &input.data[b * input_dim..(b + 1) * input_dim];
-            for o in 0..output_dim {
-                /// y = add(dot(w, x), b)
-                /// w is at shift self.weights.quant_shift
-                /// x is at shift s_x
-                /// b is at shift self.weights.quant_shift
-                /// dot(w, x) is at shift self.weights.quant_shift + s_x
-                let w_row = &self.weights.storage.data[o * input_dim..(o + 1) * input_dim];
-                // at shift self.weights.quant_shift + s_x
-                let mut raw_val = kernels::dot_product_scalar::<S>(in_row, w_row);
-
-                // scale b and raw_val to self.weights.quant_shift + s_x
-                let new_b = S::scale(self.bias.storage.data[o].into_acc(), s_x, rng);
-
-                // apply addition
-                raw_val = raw_val.add(new_b);
-
-                // potentially scale back into good range?
-                out_raw.data[b * output_dim + o] = S::downcast(raw_val, downcast_shift, rng);
-            }
-        }
-
-        (out_raw, out_shift)
-    }
-
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
-        // not required to shift anymore, we did that in the forward pass already
-        let input = self.cache.pop().expect("Linear::backward: Backward called without forward.");
-        let s_x = self.s_x_cache.pop().expect("Linear::backward: Backward called without forward.");
-        let s_w = self.weights.quant_shift;
-        let grad_input_shift = s_w + self.input_shift;
-        let weight_shift = s_g - s_x - self.weights.quant_shift;
-
-        let s_g_prev = s_g.saturating_sub(grad_input_shift);
-
-        let batch = input.shape[0];
-        let input_dim = input.shape[1];
-        let output_dim = self.weights.storage.shape[0];
-
-        let mut grad_input = Tensor::<S::Acc>::new(vec![batch, input_dim]);
-        let mut grad_weights = Tensor::<S::Acc>::new(vec![output_dim, input_dim]);
-        let mut grad_bias = Tensor::<S::Acc>::new(vec![output_dim]);
-
-        // TODO this is wrong here
-        let mut rng = XorShift64::new(420);
-
-        for b in 0..batch {
-            for o in 0..output_dim {
-                // at shift s_g
-                let g = grad_output.data[b * output_dim + o];
-                if g == S::Acc::zero() {
-                    continue;
-                }
-
-                // Bias update is an accumulator, so apply gshift
-                // grad_bias at shift self.weights.quant_shift
-                grad_bias.data[o] = grad_bias.data[o].add(
-                    S::scale(g, s_g - self.weights.quant_shift, &mut rng)
-                );
-
-                for i in 0..input_dim {
-                    // at shift s_x
-                    let x = input.data[b * input_dim + i];
-                    // at shift self.weights.quant_shift
-                    let w = self.weights.storage.data[o * input_dim + i];
-
-                    // --- Weight Gradient ---
-                    // dL/dw = grad_output * input_i32
-                    // dw at shift (s_g + s_x)
-                    let dw = g.mul(x.into_acc());
-
-                    // grad_weights at shift self.weights.quant_shift
-                    // scale dw to (s_g - s_x - self.weights.quant_shift)
-                    grad_weights.data[o * input_dim + i] = grad_weights.data[o * input_dim + i].add(
-                        S::scale(dw, weight_shift, &mut rng)
+        for oc in 0..self.out_channels {
+            for oh in 0..self.out_h {
+                for ow in 0..self.out_w {
+                    // STE gate through ℛ.
+                    let g_raw = ste_requantize(
+                        grad_output[self.out_idx(oc, oh, ow)],
+                        self.output_cache[self.out_idx(oc, oh, ow)].v,
+                        q_min, q_max,
                     );
+                    let g = Dyadic::new(g_raw.v.clamp(-self.grad_clip, self.grad_clip), g_raw.s);
 
-                    // --- Input Gradient ---
-                    // dL/d(input) = grad_output * weight_i32
-                    // dx at shift (self.weights.quant_shift + (s_g))
-                    let dx = g.mul(w.into_acc());
+                    for ic in 0..self.in_channels {
+                        for kh in 0..self.kernel_h {
+                            for kw in 0..self.kernel_w {
+                                let in_pos  = self.in_idx(ic, oh + kh, ow + kw);
+                                let k_pos   = self.k_idx(oc, ic, kh, kw);
 
-                    // scale dx to (s_w + self.input_shift)
-                    grad_input.data[b * input_dim + i] = grad_input.data[b * input_dim + i].add(
-                        S::scale(dx, grad_input_shift, &mut rng )
-                    );
+                                // ∂L/∂K[oc,ic,kh,kw] += g ⊗ x[ic, oh+kh, ow+kw]
+                                self.grad_k[k_pos] = add(
+                                    self.grad_k[k_pos],
+                                    mul(g, self.input_cache[in_pos], self.quant_shift),
+                                );
+
+                                // ∂L/∂x[ic, oh+kh, ow+kw] += g ⊗ K[oc,ic,kh,kw]
+                                grad_input[in_pos] = add(
+                                    grad_input[in_pos],
+                                    mul(g, self.kernels[k_pos], self.quant_shift),
+                                );
+                            }
+                        }
+                    }
+                    // ∂L/∂b[oc] += g
+                    self.grad_b[oc] = add(self.grad_b[oc], g);
                 }
             }
         }
 
-        self.weights.accumulate_grads(&grad_weights);
-        self.bias.accumulate_grads(&grad_bias);
-
-        (grad_input, s_g_prev)
+        grad_input
     }
 
-    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
-        self.weights.step(optim);
-        self.bias.step(optim);
+    fn update(&mut self, lr_shift: u32) {
+        apply_updates(&mut self.kernels, &self.grad_k, &mut self.vel_k, lr_shift, self.momentum_shift);
+        apply_updates(&mut self.biases,  &self.grad_b, &mut self.vel_b, lr_shift, self.momentum_shift);
     }
 
-    fn memory_report(&self) -> (usize, usize) {
-        let stat = self.weights.memory_bytes() + self.bias.memory_bytes();
-        let dyn_ = self.cache.iter().map(|t| t.memory_bytes()).sum();
-        (stat, dyn_)
+    fn zero_grad(&mut self) {
+        self.grad_k.iter_mut().for_each(|g| g.v = 0);
+        self.grad_b.iter_mut().for_each(|g| g.v = 0);
+    }
+}
+
+// ─── MaxPool2D ────────────────────────────────────────────────────────────────
+
+/// 2D max-pooling with configurable kernel and stride.
+///
+/// Input layout: `[channels, height, width]` (channel-first flat).
+///
+/// **Forward:** for each pooling window, take the element with the largest mantissa.  
+/// **Backward:** route gradient to the max-position only (standard max-pool STE).
+///
+/// No learnable parameters; `update` and `zero_grad` are no-ops.
+pub struct MaxPool2D {
+    pub channels: usize,
+    pub in_h:     usize,
+    pub in_w:     usize,
+    pub kernel:   usize,
+    pub stride:   usize,
+    out_h:    usize,
+    out_w:    usize,
+    max_mask: Vec<usize>,   // flat input index of the max element per output position
+}
+
+impl MaxPool2D {
+    /// `kernel × kernel` pooling window with the given stride.
+    /// `in_h` and `in_w` are the spatial dimensions of the input.
+    ///
+    /// Typical usage: `MaxPool2D::new(channels, in_h, in_w, 2, 2)` — 2×2 halving.
+    pub fn new(channels: usize, in_h: usize, in_w: usize, kernel: usize, stride: usize) -> Self {
+        assert!(kernel > 0 && stride > 0);
+        let out_h = (in_h - kernel) / stride + 1;
+        let out_w = (in_w - kernel) / stride + 1;
+        Self { channels, in_h, in_w, kernel, stride, out_h, out_w, max_mask: Vec::new() }
     }
 
-    fn describe(&self) -> ModuleInfo {
-        let in_dim = self.weights.storage.shape[1];
-        let out_dim = self.weights.storage.shape[0];
-        ModuleInfo {
-            name: "Linear",
-            params: (in_dim * out_dim) + out_dim, // weights + bias
-            static_bytes: self.weights.memory_bytes() + self.bias.memory_bytes(),
-            children: vec![],
+    /// Output slice length: `channels * out_h * out_w`.
+    pub fn output_len(&self) -> usize { self.channels * self.out_h * self.out_w }
+
+    #[inline] fn in_idx (&self, c: usize, h: usize, w: usize) -> usize { c * self.in_h  * self.in_w  + h * self.in_w  + w }
+    #[inline] fn out_idx(&self, c: usize, h: usize, w: usize) -> usize { c * self.out_h * self.out_w + h * self.out_w + w }
+}
+
+impl Layer for MaxPool2D {
+    fn name(&self) -> &'static str { "MaxPool2D" }
+
+    fn describe(&self) -> String {
+        format!("MaxPool2D(channels={}, {}×{}→{}×{}, kernel={}, stride={})",
+            self.channels, self.in_h, self.in_w, self.out_h, self.out_w, self.kernel, self.stride)
+    }
+
+    fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
+        debug_assert_eq!(input.len(), self.channels * self.in_h * self.in_w);
+        let mut output   = vec![Dyadic::new(0, 0); self.output_len()];
+        self.max_mask = vec![0usize; self.output_len()];
+
+        for c in 0..self.channels {
+            for oh in 0..self.out_h {
+                for ow in 0..self.out_w {
+                    let ih0 = oh * self.stride;
+                    let iw0 = ow * self.stride;
+                    let mut max_v   = i32::MIN;
+                    let mut max_idx = self.in_idx(c, ih0, iw0);
+
+                    for kh in 0..self.kernel {
+                        for kw in 0..self.kernel {
+                            let idx = self.in_idx(c, ih0 + kh, iw0 + kw);
+                            if input[idx].v > max_v {
+                                max_v   = input[idx].v;
+                                max_idx = idx;
+                            }
+                        }
+                    }
+
+                    let out_pos = self.out_idx(c, oh, ow);
+                    output[out_pos]        = input[max_idx];
+                    self.max_mask[out_pos] = max_idx;
+                }
+            }
         }
+        output
     }
 
-    fn init(&mut self, rng: &mut XorShift64) {
-        self.init_xavier(rng);
+    fn backward(&mut self, grad_output: &[Dyadic]) -> Vec<Dyadic> {
+        let g_s = grad_output.first().map_or(0, |g| g.s);
+        let mut grad_input = vec![Dyadic::new(0, g_s); self.channels * self.in_h * self.in_w];
 
-        // After initialization, infer the appropriate shift
-        let shift = if S::unit_shift() == 0 { 0 } else { self.infer_scale_shift() };
-        self.weights.quant_shift = shift;
-        self.bias.quant_shift = shift;
-    }
-
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
-}
-
-impl<S: Scalar> HasWeights<S> for Linear<S> {
-    fn get_all_weights(&self) -> Vec<&Tensor<S::Acc>> {
-        vec![&self.weights.master, &self.bias.master]
-    }
-}
-
-
-pub struct Sequential<S: Scalar> {
-    pub modules: Vec<Box<dyn Module<S>>>,
-}
-
-impl<S: Scalar + 'static> Default for Sequential<S> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S: Scalar + 'static> Sequential<S> {
-    pub fn new() -> Self {
-        Self { modules: vec![] }
-    }
-
-    pub fn add(&mut self, m: impl Module<S> + 'static) -> &mut Self {
-        self.modules.push(Box::new(m));
-        self
-    }
-
-    pub fn init_all(&mut self, rng: &mut XorShift64) {
-        for module in &mut self.modules {
-            module.init(rng);
+        // Accumulate gradient at max positions (STE: zero elsewhere).
+        for (out_pos, &max_idx) in self.max_mask.iter().enumerate() {
+            grad_input[max_idx] = add(grad_input[max_idx], grad_output[out_pos]);
         }
+        grad_input
     }
+
+    fn update(&mut self, _: u32) {}
+    fn zero_grad(&mut self) {}
 }
 
-impl<S: Scalar + 'static> Module<S> for Sequential<S> {
-    fn forward(&mut self, input: &Tensor<S>, s_x: i32, rng: &mut XorShift64) -> (Tensor<S>, i32) {
-        let mut output = input.clone();
-        let mut shift = s_x;
-        for m in self.modules.iter_mut() {
-            let (out, s_o) = m.forward(&output, shift, rng);
-            output = out;
-            shift = s_o;
-        }
-        (output, shift)
-    }
-    fn backward(&mut self, grad_output: &Tensor<S::Acc>, s_g: i32) -> (Tensor<S::Acc>, i32) {
-        let mut output = grad_output.clone();
-        let mut shift = s_g;
-        for m in self.modules.iter_mut().rev() {
-            let (out, s_g_prev) = m.backward(&output, shift);
-            output = out;
-            shift = s_g_prev;
-        }
-        (output, shift)
-    }
-    fn sync_weights(&mut self, rng: &mut XorShift64) {
-        for m in self.modules.iter_mut() { m.sync_weights(rng); }
-    }
-    fn step(&mut self, optim: &mut dyn OptimizerConfig<S>) {
-        for m in self.modules.iter_mut() { m.step(optim); }
-    }
+// ─── Flatten ──────────────────────────────────────────────────────────────────
 
-    fn memory_report(&self) -> (usize, usize) {
-        self.modules
-            .iter()
-            .map(|m| m.memory_report())
-            .fold((0, 0), |(s, d), (ms, md)| (s + ms, d + md))
-    }
+/// Shape-only layer that bridges conv → linear.
+///
+/// Passes data through unchanged — the `[channels, H, W]` flat layout that
+/// conv layers produce is already the format that `Linear` expects.
+/// This layer exists for documentation and `summary()` clarity.
+pub struct Flatten;
 
-    fn describe(&self) -> ModuleInfo {
-        ModuleInfo {
-            name: "Sequential",
-            params: 0,
-            static_bytes: 0,
-            children: self.modules.iter().map(|m| m.describe()).collect(),
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+impl Layer for Flatten {
+    fn name(&self) -> &'static str { "Flatten" }
+    fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> { input.to_vec() }
+    fn backward(&mut self, grad: &[Dyadic]) -> Vec<Dyadic> { grad.to_vec() }
+    fn update(&mut self, _: u32) {}
+    fn zero_grad(&mut self) {}
 }
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nn::optim::*;
+    const S: u32 = 7;
+    fn d(x: f64) -> Dyadic { Dyadic::new((x * 128.0).round() as i32, S) }
 
-    // Module info tests
-    #[test]
-    fn test_module_info_total(){
-        let info = ModuleInfo {
-            name: "MyModule",
-            params: 10,
-            static_bytes: 0,
-            children: vec![
-                ModuleInfo{
-                    name: "MyChild",
-                    params: 5,
-                    static_bytes: 12,
-                    children: vec![]
-                }
-            ]
-        };
-        let (params, static_bytes) = info.total();
-
-        assert_eq!(params, 15);
-        assert_eq!(static_bytes, 12);
+    // ── Linear ────────────────────────────────────────────────────────────────
+    #[test] fn linear_shapes() {
+        let mut l = Linear::new(3, 5, S, S, 32);
+        let out = l.forward(&[d(1.0), d(-0.5), d(0.25)]);
+        assert_eq!(out.len(), 5);
+        let g = l.backward(&vec![d(0.1); 5]);
+        assert_eq!(g.len(), 3);
     }
 
-    // Module trait tests
-    // Testing Helper class implementation
-    struct TestXPlusN {
-        n: i32,
-        input_shift: Option<u32>,
-        output_shift: Option<u32>,
-    }
-   
-    impl Module for TestXPlusN {
-        fn backward(&mut self, grad: &Tensor<i32>) -> Tensor<i32> {
-            grad.clone()
-        }
-        fn forward(&mut self, input: &Tensor<i32>, input_shift: i32, _rng: &mut XorShift64) -> Tensor<i32>{
-            self.input_shift = Some(input_shift);
-            self.output_shift = Some(input_shift);
-
-            let mut output = Tensor::new(input.shape.clone());
-
-            for (val, o) in input.data.iter().zip(output.data.iter_mut()) {
-                *o = val + self.n;
-            }
-            output
-        }
-
-        fn as_any(&self) -> &dyn Any { self }
-        fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    #[test] fn linear_momentum_runs() {
+        let mut l = Linear::new(2, 2, S, S, 32).with_momentum(1);
+        l.forward(&[d(1.0), d(-1.0)]);
+        l.backward(&[d(0.5), d(-0.5)]);
+        l.update(7);
+        assert!(l.vel_w.iter().any(|v| v.v != 0));
     }
 
-    #[test]
-    fn test_testxplusn_contract() {
-        let mut module = TestXPlusN {
-            n: 1,
-            input_shift: None,
-            output_shift: None,
-        };
-
-        let input = Tensor::from_vec(vec![1, 2, 3], vec![3, 1]);
-        let mut rng = XorShift64::new(42);
-
-        let out = module.forward(&input, 0, &mut rng);
-
-        // Contract: shape must match
-        assert_eq!(out.shape, input.shape);
-
-        // Contract: output shift must be set consistently
+    // ── ReLU ──────────────────────────────────────────────────────────────────
+    #[test] fn relu_gates() {
+        let mut relu = ReLU::new();
+        let out = relu.forward(&[d(1.0), d(-0.5), d(0.0)]);
+        assert!(out[0].v > 0); assert_eq!(out[1].v, 0); assert_eq!(out[2].v, 0);
+        let g = relu.backward(&[d(1.0); 3]);
+        assert!(g[0].v != 0); assert_eq!(g[1].v, 0); assert_eq!(g[2].v, 0);
     }
 
-    #[test]
-    fn test_module_default_behaviour(){
-        let mut module = TestXPlusN {
-            n: 1,
-            input_shift: None,
-            output_shift: None,
-        };
-        let mut rng = XorShift64::new(420);
-
-        let t = Tensor::from_vec(vec![1, 2], vec![2, 1]);
-
-        assert_eq!(t.data, vec![2, 4]);
-
-        module.sync_weights(&mut rng);
-        assert_eq!(rng.state, 420);
-
-        module.init(&mut rng);
-        assert_eq!(rng.state, 420);
-
-        let mut optim = SGDConfig::new();
-        module.step(&mut optim);
-        assert_eq!(rng.state, 420);
-
-        assert_eq!(module.memory_report(), (0, 0));
-        assert_eq!(module.describe(), ModuleInfo{name: "unknown", params: 0, static_bytes: 0, children: vec![]});
+    // ── Softmax ───────────────────────────────────────────────────────────────
+    #[test] fn softmax_sums_to_one() {
+        let mut sm = Softmax::new(S);
+        sm.forward(&[d(1.0), d(0.5), d(-0.5)]);
+        assert!((sm.last_probs.iter().sum::<f64>() - 1.0).abs() < 1e-6);
     }
 
-    // Params tests
-    #[test]
-    fn test_params_new(){
-        let shape = vec![1, 1];
-        let params = Params::new(shape.clone(), 0);
-
-        assert_eq!(params.master.len(), 1);
-        assert_eq!(params.master.shape, shape);
-        assert_eq!(params.storage.len(), 1);
-        assert_eq!(params.storage.shape, shape);
-        assert_eq!(params.grads, None);
-        assert_eq!(params.state, None);
-        assert_eq!(params.quant_shift, 0);
+    // ── Conv2D ────────────────────────────────────────────────────────────────
+    #[test] fn conv2d_output_shape() {
+        // 1×5×5 input, 2 output channels, 3×3 kernel → 2×3×3 = 18 outputs
+        let mut conv = Conv2D::new(1, 2, 3, 3, 5, 5, S, S, 32);
+        let input = vec![d(0.5); 1 * 5 * 5];
+        let out = conv.forward(&input);
+        assert_eq!(out.len(), 2 * 3 * 3);
     }
 
-    #[test]
-    #[should_panic(
-        expected="Weight shift must be 0-8, got 9"
-    )]
-    fn test_params_wrong_shift() {
-        Params::new(vec![1, 1], 9);
+    #[test] fn conv2d_backward_grad_input_shape() {
+        let mut conv = Conv2D::new(1, 2, 3, 3, 5, 5, S, S, 32);
+        let input = vec![d(0.5); 25];
+        conv.forward(&input);
+        let g = conv.backward(&vec![d(0.1); 2 * 3 * 3]);
+        assert_eq!(g.len(), 25);
     }
 
-    #[test]
-    fn test_params_with_shift() {
-        let mut params = Params::new(vec![1, 1], 1);
-
-        assert_eq!(params.quant_shift, 1);
-
-        params = params.with_shift(2);
-
-        assert_eq!(params.quant_shift, 2);
+    #[test] fn conv2d_grad_accumulates() {
+        let mut conv = Conv2D::new(1, 1, 3, 3, 5, 5, S, S, 32);
+        let input = vec![d(1.0); 25];
+        conv.forward(&input);
+        conv.backward(&vec![d(0.5); 9]);
+        assert!(conv.grad_k.iter().any(|g| g.v != 0) || conv.grad_b.iter().any(|g| g.v != 0));
     }
 
-    #[test]
-    fn test_params_init_uniform() {
-        let mut params = Params::new(vec![100000, 1], 0);
-        let mut rng = XorShift64::new(420);
-
-        params.init_uniform(&mut rng, 10);
-
-        for w in params.master.data.iter() {
-            assert!(*w <= 10);
-        }
+    #[test] fn conv2d_with_momentum_updates() {
+        let mut conv = Conv2D::new(1, 1, 3, 3, 5, 5, S, S, 32).with_momentum(1);
+        let input = vec![d(0.5); 25];
+        conv.forward(&input);
+        conv.backward(&vec![d(0.1); 9]);
+        conv.update(7);
+        assert!(conv.vel_k.iter().any(|v| v.v != 0));
     }
 
-    #[test]
-    fn test_params_init_xavier_uniform() {
-        let mut params = Params::new(vec![100000, 1], 0);
-        let mut rng = XorShift64::new(420);
-
-        // creates data in range 127 * sqrt(6 / 10) \approx 98
-        params.init_xavier_uniform(&mut rng, 0, 10);
-
-        for w in params.master.data.iter() {
-            assert!(*w <= 98);
-        }
+    // ── MaxPool2D ─────────────────────────────────────────────────────────────
+    #[test] fn maxpool_output_shape() {
+        // 1×4×4 → MaxPool(2,2) → 1×2×2
+        let mut pool = MaxPool2D::new(1, 4, 4, 2, 2);
+        let input = vec![d(0.5); 16];
+        let out = pool.forward(&input);
+        assert_eq!(out.len(), 4);
     }
 
-    #[test]
-    fn test_params_sync(){
-        let mut params = Params::new(vec![1, 1], 0);
-        let mut rng = XorShift64::new(420);
-        params.master.data[0] = 127;
-
-        assert_eq!(params.storage.data[0], 0);
-
-        params.sync(&mut rng);
-
-        assert_eq!(params.storage.data[0], 127);
-
-        params = params.with_shift(1);
-        params.sync(&mut rng);
-
-        assert_eq!(params.storage.data[0], 64);
+    #[test] fn maxpool_selects_max() {
+        let mut pool = MaxPool2D::new(1, 2, 2, 2, 2);
+        // 2×2 input, one pool window. Largest value at position 2.
+        let input = vec![d(0.1), d(0.2), d(0.9), d(0.3)];
+        let out = pool.forward(&input);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].v, input[2].v); // max is at index 2
     }
 
-    #[test]
-    fn test_params_accumulate_grads() {
-        let mut params = Params::new(vec![1, 1], 0);
-
-        let grad = Tensor::from_vec(vec![10; 1], vec![1, 1]);
-
-        params.accumulate_grads(&grad);
-
-        let stored_grads = params.grads.as_ref().unwrap();
-        assert_eq!(stored_grads.data[0], 10);
-
-        params.accumulate_grads(&grad);
-
-        let accumulated_grads = params.grads.as_ref().unwrap();
-        assert_eq!(accumulated_grads.data[0], 20);
-
-        // but we never exceed i32::MAX
-        let max_grad = Tensor::from_vec(vec![i32::MAX; 1], vec![1, 1]);
-        params.accumulate_grads(&max_grad);
-
-        let final_accumulate_grads = params.grads.as_ref().unwrap();
-        assert_eq!(final_accumulate_grads.data[0], i32::MAX);
+    #[test] fn maxpool_backward_routes_to_max() {
+        let mut pool = MaxPool2D::new(1, 2, 2, 2, 2);
+        let input = vec![d(0.1), d(0.2), d(0.9), d(0.3)];
+        pool.forward(&input);
+        let grad_out = vec![d(1.0)];
+        let grad_in  = pool.backward(&grad_out);
+        assert_eq!(grad_in.len(), 4);
+        assert_eq!(grad_in[2].v, grad_out[0].v); // gradient routed to max position
+        assert_eq!(grad_in[0].v, 0);
+        assert_eq!(grad_in[1].v, 0);
+        assert_eq!(grad_in[3].v, 0);
     }
 
-    #[test]
-    fn test_params_zero_grads(){
-        let mut params = Params::new(vec![1, 1], 0);
-
-        let grad = Tensor::from_vec(vec![10; 1], vec![1, 1]);
-
-        params.accumulate_grads(&grad);
-
-        let stored_grads = params.grads.as_ref().unwrap();
-        assert_eq!(stored_grads.data[0], 10);
-
-        params.zero_grads();
-
-        assert!(params.grads.as_ref().is_none());
-    }
-
-    #[test]
-    fn test_params_step_without_grad_is_okay(){
-        let mut params = Params::new(vec![1, 1], 0);
-        let optim = SGDConfig::new();
-
-        params.step(&optim);
-
-        assert!(matches!(
-            params.state,
-            None
-        ))
-    }
-
-    #[test]
-    fn test_params_step_initializes_state(){
-        let mut params = Params::new(vec![1, 1], 0);
-        let optim = SGDConfig::new();
-
-        let grad = Tensor::from_vec(vec![10; 1], vec![1, 1]);
-
-        params.grads = Some(grad);
-        params.step(&optim);
-
-        assert!(matches!(
-            params.state.as_ref().unwrap(),
-            OptimizerState<S>::None,
-        ))
-    }
-
-    #[test]
-    fn test_params_memory_bytes() {
-        let params = Params::new(vec![1, 1], 0);
-
-        assert_eq!(params.memory_bytes(), 8);
-
-        // twice the size, twice the memory required
-        let other_params = Params::new(vec![2, 1], 0);
-
-        assert_eq!(other_params.memory_bytes(), 16);
-    }
-
-    #[test]
-    fn test_compute_shift_for_max() {
-        let vals = [
-            0, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
-        ];
-        let shifts = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 8 // we don't exceed 8
-        ];
-
-        for (val, shift) in vals.iter().zip(shifts.iter()) {
-            assert_eq!(compute_shift_for_max(*val), *shift);
-        }
-    }
-
-    // HasWeights tests
-    struct TestHasWeightsStruct {
-        w: Params,
-        b: Params,
-    }
-
-    impl HasWeights for TestHasWeightsStruct {
-        fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
-            vec![&self.w.master, &self.b.master]
-        }
-    }
-
-    struct TestHasWeightsEmptyStruct {
-
-    }
-    impl HasWeights for TestHasWeightsEmptyStruct {
-        fn get_all_weights(&self) -> Vec<&Tensor<i32>> {
-            vec![]
-        }
-    }
-
-    #[test]
-    fn test_has_weights_infer_scale(){
-        let mut module = TestHasWeightsStruct{
-            w: Params::new(vec![2, 1], 0),
-            b: Params::new(vec![1, 1], 0),
-        };
-
-        // uninitialized, fallback shift 4 [middle ground]
-        assert_eq!(module.infer_scale_shift(), 4);
-
-        module.w.master.data[0] = 127;
-        module.w.master.data[1] = -127;
-        module.b.master.data[0] = 0;
-
-        assert_eq!(module.infer_scale_shift(), 0);
-
-        module.w.master.data[0] = 127;
-        module.w.master.data[1] = -128;
-        module.b.master.data[0] = 0;
-
-        assert_eq!(module.infer_scale_shift(), 1);
-
-        module.w.master.data = vec![];
-        module.b.master.data = vec![];
-
-        assert_eq!(module.infer_scale_shift(), 4);
-    }
-
-    #[test]
-    fn test_has_weights_infer_scale_no_weights() {
-        let module = TestHasWeightsEmptyStruct{};
-
-        assert_eq!(module.infer_scale_shift(), 4);
-    }
-
-    // Linear tests
-    #[test]
-    fn test_linear_new() {
-        let lin = Linear::new(4, 8);
-
-        assert_eq!(lin.weights.master.len(), 4 * 8);
-        assert_eq!(lin.weights.storage.len(), 4 * 8);
-        assert_eq!(lin.bias.master.len(), 8);
-        assert_eq!(lin.weights.quant_shift, 0);
-        assert_eq!(lin.cache, Vec::new());
-        assert_eq!(lin.weights.grads, None);
-        assert_eq!(lin.bias.grads, None);
-    }
-
-    #[test]
-    fn test_linear_init_xavier(){
-        let mut lin = Linear::new(2, 2);
-        let mut rng = XorShift64::new(420);
-
-        lin.init_xavier(&mut rng);
-
-        for w in lin.weights.master.data.iter() {
-            assert!(*w <= 155);
-        }
-        for b in lin.bias.master.data.iter() {
-            assert_eq!(*b, 0);
-        }
-    }
-
-    #[test]
-    fn test_linear_sync_weights() {
-        let mut lin = Linear::new(2, 2);
-        lin.weights.master.data[0] = 10;
-        lin.weights.master.data[3] = 10;
-        let mut rng = XorShift64 { state: 420 };
-        lin.sync_weights(&mut rng);
-
-        assert_eq!(lin.weights.storage.data[0], 10);
-        assert_eq!(lin.weights.storage.data[1], 0);
-        assert_eq!(lin.weights.storage.data[2], 0);
-        assert_eq!(lin.weights.storage.data[3], 10);
-
-        lin.weights.quant_shift = 1;
-        lin.sync_weights(&mut rng);
-
-        assert_eq!(lin.weights.storage.data[0], 5);
-        assert_eq!(lin.weights.storage.data[1], 0);
-        assert_eq!(lin.weights.storage.data[2], 0);
-        assert_eq!(lin.weights.storage.data[3], 5);
-
-        lin.weights.quant_shift = 2;
-        lin.sync_weights(&mut rng);
-
-        assert_eq!(lin.weights.storage.data[0], 2);
-        assert_eq!(lin.weights.storage.data[1], 0);
-        assert_eq!(lin.weights.storage.data[2], 0);
-        assert_eq!(lin.weights.storage.data[3], 2);
-
-        lin.weights.quant_shift = 3;
-        lin.sync_weights(&mut rng);
-
-        assert_eq!(lin.weights.storage.data[0], 2);
-        assert_eq!(lin.weights.storage.data[1], 0);
-        assert_eq!(lin.weights.storage.data[2], 0);
-        assert_eq!(lin.weights.storage.data[3], 1);
-    }
-
-    #[test]
-    fn test_auto_scale_shift_detection() {
-        let mut rng = XorShift64::new(42);
-        let mut layer = Linear::new(10, 5); // start with shift=0
-        
-        // Initialize with Xavier distribution
-        layer.init_xavier(&mut rng);
-        
-        // Auto-detect appropriate shift
-        let detected_shift = layer.infer_scale_shift();
-        println!("Detected shift: {}", detected_shift);
-        
-        layer.weights.quant_shift = detected_shift;
-        layer.bias.quant_shift = detected_shift;
-        
-        // Now safely quantize
-        layer.sync_weights(&mut rng);
-        
-        // Verify all weights fit in i32 range
-        for &w in &layer.weights.storage.data {
-            assert!(w >= -128);  // w <= 127 given by data type
-        }
-    }
-    #[test]
-    fn test_linear_forward() {
-        let mut lin = Linear::new(2, 2);
-        lin.weights.master.data[0] = 1;
-        lin.weights.master.data[3] = 1;
-        let mut rng = XorShift64 { state: 420 };
-        lin.sync_weights(&mut rng);
-
-        let mut input = Tensor::new(vec![1, 2]);
-        input.data[0] = 10;
-        input.data[1] = 20;
-        let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.output_shift.expect("Does not exist.");
-
-        assert_eq!(out.data[0] << output_shift, 10);
-        assert_eq!(out.data[1] << output_shift, 20);
-    }
-
-    #[test]
-    fn test_linear_forward_saturation() {
-        let mut lin = Linear::new(2, 2);
-        lin.weights.master.data[0] = 33292288;
-        lin.weights.master.data[3] = 33292288;
-        let mut rng = XorShift64 { state: 420 };
-        lin.sync_weights(&mut rng);
-
-        let mut input = Tensor::new([1, 2].to_vec());
-        input.data[0] = 33292288;
-        input.data[1] = 33292288;
-        let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.output_shift.expect("Does not exist.");
-
-        // clamping around 127
-        assert_eq!(output_shift, 8);
-        assert_eq!(out.data[0] << output_shift, -256);
-        assert_eq!(out.data[1] << output_shift, -256);
-        assert_eq!(out.data[0], 2147483647);
-        assert_eq!(out.data[1], 2147483647);
-    }
-
-    #[test]
-    fn test_linear_forward_shape() {
-        let mut lin = Linear::new(2, 3);
-        let mut rng = XorShift64 { state: 420 };
-        lin.sync_weights(&mut rng);
-
-        let input = Tensor::new([10, 2].to_vec());
-        let out = lin.forward(&input, 0, &mut rng);
-
-        assert_eq!(out.shape[0], 10);
-        assert_eq!(out.shape[1], 3);
-    }
-
-    #[test]
-    fn test_linear_forward_identity() {
-        // Linear 2->2, Scale 0 (Identity mapping potential)
-        let mut lin = Linear::new(2, 2);
-
-        // Identity Matrix in Master Weights [1, 0] / [0, 1]
-        lin.weights.master.data[0] = 1;
-        lin.weights.master.data[3] = 1;
-
-        let mut rng = XorShift64::new(420);
-        lin.sync_weights(&mut rng);
-
-        let input = Tensor::from_vec(vec![10, 20], vec![1, 2]);
-
-        let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.output_shift.expect("Does not exist.");
-
-        assert_eq!(out.data[0] << output_shift, 10);
-        assert_eq!(out.data[1] << output_shift, 20);
-        assert_eq!(out.data[0], 10);
-        assert_eq!(out.data[1], 20);
-    }
-
-    #[test]
-    fn test_linear_forward_identity_with_shift() {
-        // Linear 2->2, Scale 0 (Identity mapping potential)
-        let mut lin = Linear::new(2, 2);
-
-        // Identity Matrix in Master Weights [2, 0] / [0, 2]
-        lin.weights.master.data[0] = 2;
-        lin.weights.master.data[3] = 2;
-
-        let mut rng = XorShift64::new(420);
-        lin.sync_weights(&mut rng);
-
-        let mut input = Tensor::from_vec(vec![127, -128], vec![1, 2]);
-
-        let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.output_shift.expect("Does not exist.");
-
-        assert_eq!(out.data[0] << output_shift, 1016);
-        assert_eq!(out.data[1] << output_shift, -1024);
-        assert_eq!(out.data[0], 254);
-        assert_eq!(out.data[1], -256);
-
-        input = Tensor::from_vec(vec![127, 64], vec![1, 2]);
-
-        let out = lin.forward(&input, 0, &mut rng);
-        let output_shift = lin.output_shift.expect("Does not exist.");
-
-        assert_eq!(out.data[0] << output_shift, 508);
-        assert_eq!(out.data[1] << output_shift, 256);
-        assert_eq!(out.data[0], 254);
-        assert_eq!(out.data[1], 128);
-    }
-
-    #[test]
-    fn test_linear_forward_shape_batch() {
-        let mut lin = Linear::new(2, 3);
-        let mut rng = XorShift64::new(420);
-        lin.sync_weights(&mut rng);
-
-        let input = Tensor::new(vec![10, 2]);
-        let out = lin.forward(&input, 0, &mut rng);
-
-        assert_eq!(out.shape[0], 10);
-        assert_eq!(out.shape[1], 3);
-        assert_eq!(out.data.len(), 30);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "assertion `left == right` failed: Linear::forward: Input in wrong dimension for weights! 1 vs 2\n  left: 1\n right: 2"
-    )]
-    fn test_linear_forward_wrong_dimensional_input() {
-        let mut lin = Linear::new(2, 3);
-        let mut rng = XorShift64::new(420);
-        lin.sync_weights(&mut rng);
-
-        let input = Tensor::from_vec(vec![2; 10], vec![10, 1]);
-        lin.forward(&input, 0, &mut rng);
-    }
-
-    #[test]
-    fn test_linear_backward_shapes() {
-        // Batch 2, Input 4 -> Output 3
-        let mut lin = Linear::new(4, 3);
-        let mut rng = XorShift64::new(420);
-
-        let input = Tensor::new(vec![2, 4]); // [Batch, In]
-        let grad_out = Tensor::new(vec![2, 3]); // [Batch, Out]
-
-        lin.forward(&input, 0, &mut rng);
-        lin.cache = vec![input.clone()];
-
-        let d_x = lin.backward(&grad_out);
-        let d_w = lin.weights.grads.unwrap().clone();
-
-        // Check shapes
-        assert_eq!(d_x.shape, vec![2, 4]); // [Batch, In]
-        assert_eq!(d_w.shape, vec![3, 4]); // [Out, In]
-    }
-
-    #[test]
-    fn test_linear_backward() {
-        let mut lin = Linear::new(2, 3);
-        let mut rng = XorShift64::new(420);
-
-        for w in lin.weights.master.data.iter_mut() {
-            *w = 120;
-        }
-
-        let input = Tensor::from_vec(vec![10; 4], vec![2, 2]); // [Batch, In]
-        let grad_out = Tensor::from_vec(vec![22; 6], vec![2, 3]); // [Batch, Out]
-
-        lin.forward(&input, 0, &mut rng);
-        lin.cache = vec![input.clone()];
-
-        let d_x = lin.backward(&grad_out);
-        let d_w = lin.weights.grads.unwrap().clone();
-        let d_b = lin.bias.grads.unwrap().clone();
-
-        // Check shapes
-        assert_eq!(d_x.shape, vec![2, 2]); // [Batch, In]
-        assert_eq!(d_w.shape, vec![3, 2]); // [Out, In]
-        assert_eq!(d_b.shape, vec![3]);
-
-        assert_eq!(d_x.data[0], 0);
-        assert_eq!(d_x.data[1], 0);
-        assert_eq!(d_x.data[2], 0);
-        assert_eq!(d_x.data[3], 0);
-
-        assert_eq!(d_w.data[0], 440);
-        assert_eq!(d_w.data[1], 440);
-        assert_eq!(d_w.data[2], 440);
-        assert_eq!(d_w.data[3], 440);
-        assert_eq!(d_w.data[4], 440);
-        assert_eq!(d_w.data[5], 440);
-        
-        assert_eq!(d_b.data[0], 44);
-        assert_eq!(d_b.data[1], 44);
-        assert_eq!(d_b.data[2], 44);
-    }
-
-    #[test]
-    fn test_linear_memory_report() {
-        let mut rng = XorShift64::new(777);
-        let mut l1 = Linear::new(2, 1)
-            .with_shift(2);
-        let x = Tensor::from_vec(vec![0, 0], vec![1, 2]);
-        l1.forward(&x, 2, &mut rng);
-
-        let (a, b) = l1.memory_report();
-        assert_eq!(a, 24);
-        assert_eq!(b, 8);
-
-        let mut l2 = Linear::new(2, 10)
-            .with_shift(2);
-        l2.forward(&x, 2, &mut rng);
-
-        let (a2, b2) = l2.memory_report();
-        assert_eq!(a2, 240);
-        assert_eq!(b2, 8);
-    }
-
-    #[test]
-    fn test_linear_step() {
-        let mut rng = XorShift64::new(777);
-        let mut l1 = Linear::new(2, 1)
-            .with_shift(1);
-        let mut optim = SGDConfig::new().with_learn_rate(1.0);
-        l1.weights.master.data[0] = 111;
-        l1.weights.master.data[1] = 222;
-        l1.sync_weights(&mut rng);
-
-        assert_eq!(l1.weights.master.data[0], 111);
-        assert_eq!(l1.weights.master.data[1], 222);
-        assert_eq!(l1.weights.storage.data[0], 55);
-        assert_eq!(l1.weights.storage.data[1], 111);
-
-        // no gradient -> no change
-        l1.step(&mut optim);
-        assert_eq!(l1.weights.master.data[0], 111);
-        assert_eq!(l1.weights.master.data[1], 222);
-        assert_eq!(l1.weights.storage.data[0], 55);
-        assert_eq!(l1.weights.storage.data[1], 111);
-
-        let x = Tensor::from_vec(vec![1, 1], vec![1, 2]);
-
-        l1.forward(&x, 1, &mut rng);
-        l1.step(&mut optim);
-
-        assert_eq!(l1.weights.master.data[0], 111);
-        assert_eq!(l1.weights.master.data[1], 222);
-        assert_eq!(l1.weights.storage.data[0], 55);
-        assert_eq!(l1.weights.storage.data[1], 111);
-
-        let x2 = Tensor::from_vec(vec![2, 2], vec![1, 2]);
-
-        l1.sync_weights(&mut rng);
-        let _preds = l1.forward(&x2, 1, &mut rng);
-
-        // 3. Backpropagate "a" gradient 
-        let grad_out = Tensor::<i32>::from_vec(vec![126, 2], vec![2, 1]);
-        l1.weights.grads = Some(grad_out);
-
-        // with a gradient we have change
-        l1.step(&mut optim);
-
-        assert_eq!(l1.weights.master.data[0], -15);
-        assert_eq!(l1.weights.master.data[1], 220);
-        assert_eq!(l1.weights.storage.data[0], 55);
-        assert_eq!(l1.weights.storage.data[1], 111);
-    }
-
-    #[test]
-    fn test_linear_describe(){
-        let l1 = Linear::new(2, 1);
-
-        assert_eq!(l1.describe(), ModuleInfo{
-            name: "Linear",
-            params: 3,
-            static_bytes: 24,
-            children: vec![]
-        });
-    }
-
-    #[test]
-    fn test_linear_init_sets_weights_and_shifts(){
-        let mut l1 = Linear::new(1, 1)
-            .with_shift(2);
-        let mut rng = XorShift64::new(420);
-
-        l1.init(&mut rng);
-
-        assert_ne!(l1.weights.master.data[0], 0);
-        assert_eq!(l1.weights.quant_shift, 0);
-        assert_eq!(l1.bias.quant_shift, 0);
-    }
-
-    #[test]
-    fn test_linear_get_all_weights(){
-        let l1 = Linear::new(1, 1);
-
-        assert_eq!(l1.get_all_weights(), vec![&l1.weights.master, &l1.bias.master]);
-
-    }
-
-    // Sequential
-    #[test]
-    fn test_sequential_default(){
-        let model = Sequential::default();
-        let model2 = Sequential::new();
-
-        assert!(model.modules.is_empty());
-        assert!(model2.modules.is_empty());
-    }
-
-    #[test]
-    fn test_sequential_add(){
+    // ── Sequential with conv ──────────────────────────────────────────────────
+    #[test] fn full_conv_pipeline() {
+        // Simulate a tiny "image": 1×6×6
         let mut model = Sequential::new();
-        let l1 = Linear::new(1, 1);
+        model.add(Conv2D::new(1, 2, 3, 3, 6, 6, S, S, 32).with_momentum(1));
+        model.add(ReLU::new());
+        model.add(MaxPool2D::new(2, 4, 4, 2, 2));  // 2×4×4 → 2×2×2 = 8
+        model.add(Flatten);
+        model.add(Linear::new(8, 3, S, S, 32).with_momentum(1));
+        model.add(Softmax::new(S));
+        model.summary();
 
-        model.add(l1);
+        let input = vec![d(0.5); 36];
+        let out   = model.forward(&input);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|x| x.v >= 0));
 
-        assert_eq!(model.modules.len(), 1);
+        let t   = vec![Dyadic::new(127, S), Dyadic::new(0, S), Dyadic::new(0, S)];
+        let g: Vec<_> = out.iter().zip(&t).map(|(&y, &ti)| Dyadic::new(y.v - ti.v, S)).collect();
+        model.backward(&g);
+        model.update(7);
     }
-    #[test]
-    fn test_sequential_init_all(){
-        let mut model = Sequential::new();
-        let l1 = Linear::new(1, 1);
-        let mut rng = XorShift64::new(420);
-
-        model.add(l1);
-
-        model.init_all(&mut rng);
-
-        let l1_ref = model.modules[0]
-            .as_any()
-            .downcast_ref::<Linear>()
-            .expect("Expected linear layer");
-
-        assert_ne!(l1_ref.weights.master.data[0], 0);
-    }
-
-    #[test]
-    fn test_sequential_forward(){
-        let mut rng = XorShift64::new(420);
-        let mut rng2 = XorShift64::new(420);
-        let mut l1 = Linear::new(2, 2);
-        let mut model = Sequential {
-            modules: vec![
-                Box::new(Linear::new(2, 2)),
-            ],
-        };
-
-        let input = Tensor::from_vec(vec![10, 5], vec![1, 2]);
-
-        let f1_out = l1.forward(&input, 0, &mut rng);
-        let model_out = model.forward(&input, 0, &mut rng2);
-
-        assert_eq!(f1_out, model_out);
-    }
-
-    #[test]
-    fn test_sequential_backward(){
-        let mut rng = XorShift64::new(420);
-        let mut rng2 = XorShift64::new(420);
-        let mut l1 = Linear::new(2, 2);
-        let mut model = Sequential {
-            modules: vec![
-                Box::new(Linear::new(2, 2)),
-            ],
-        };
-
-        let input = Tensor::from_vec(vec![10, 5], vec![1, 2]);
-
-        let _ = l1.forward(&input, 0, &mut rng);
-        let _ = model.forward(&input, 0, &mut rng2);
-
-        let grad = Tensor::from_vec(vec![-1, -2], vec![1, 2]);
-
-        let f1_grad_out = l1.backward(&grad);
-        let grad_out = model.backward(&grad);
-
-        assert_eq!(f1_grad_out, grad_out);
-    }
-
-    #[test]
-    fn test_sequential_sync_weights(){
-        let mut rng = XorShift64::new(420);
-        let mut model = Sequential {
-            modules: vec![
-                Box::new(Linear::new(2, 2)),
-            ],
-        };
-
-        model.init_all(&mut rng);
-
-        model.sync_weights(&mut rng);
-
-        let l1_ref = model.modules[0]
-            .as_any()
-            .downcast_ref::<Linear>()
-            .expect("Expected linear layer");
-
-        assert_eq!(l1_ref.weights.master.data, vec![139, -30, -53, 98]);
-        assert_eq!(l1_ref.weights.storage.data, vec![70, -15, -26, 49]);
-
-    }
-
-    #[test]
-    fn test_sequential_step(){
-        // basically the same as just a linear layer
-        let mut rng = XorShift64::new(777);
-        let mut l1 = Linear::new(2, 1)
-            .with_shift(1);
-        let mut model = Sequential::new();
-
-        let mut optim = SGDConfig::new().with_learn_rate(1.0);
-        l1.weights.master.data[0] = 111;
-        l1.weights.master.data[1] = 222;
-
-        model.add(l1);
-
-        model.sync_weights(&mut rng);
-        
-        let l1_ref = model.modules[0]
-            .as_any()
-            .downcast_ref::<Linear>()
-            .expect("Expected linear layer");
-
-        assert_eq!(l1_ref.weights.master.data[0], 111);
-        assert_eq!(l1_ref.weights.master.data[1], 222);
-
-        // Backpropagate "a" gradient 
-        let grad_out = Tensor::<i32>::from_vec(vec![126, 2], vec![2, 1]);
-        let mut_ref = model.modules[0]
-            .as_any_mut()
-            .downcast_mut::<Linear>()
-            .expect("Expected linear layer");
-        mut_ref.weights.grads = Some(grad_out);
-
-        // with a gradient we have change
-        model.step(&mut optim);
-
-        let new_l1_ref = model.modules[0]
-            .as_any()
-            .downcast_ref::<Linear>()
-            .expect("Expected linear layer");
-
-        assert_eq!(new_l1_ref.weights.master.data[0], -15);
-        assert_eq!(new_l1_ref.weights.master.data[1], 220);
-
-    }
-
-    #[test]
-    fn test_sequential_memory_report(){
-        let model = Sequential {
-            modules: vec![
-                Box::new(Linear::new(2, 8)),
-                Box::new(activations::ReLU::new()),
-                Box::new(Linear::new(8, 1)),
-            ],
-        };
-
-        let (s, d) = model.memory_report();
-
-        assert_eq!(s, 264);
-        assert_eq!(d, 0);
-    }
-
-    #[test]
-    fn test_summary() {
-        let model = Sequential {
-            modules: vec![
-                Box::new(Linear::new(2, 8)),
-                Box::new(activations::ReLU::new()),
-                Box::new(Linear::new(8, 1)),
-            ],
-        };
-
-        model.print_summary(&model.describe(), 1);
-    }
-
 }
-
-

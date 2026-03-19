@@ -1,213 +1,205 @@
-use integers::*;
-use integers::nn::*;
-use integers::nn::losses::*;
-use integers::nn::activations::{ReLU};
-use integers::data::{shuffled_indices};
-#[cfg(debug_assertions)]
-use integers::debug::{reset_overflow_stats, get_overflow_stats};
-use integers::nn::optim::{AdamConfig, SGDConfig};
-use integers::dataset_loaders::{QuantizationMethod, DatasetBuilder, FileFormat};
+//! MNIST digit classification with a dyadic convolutional network.
+//!
+//! # Architecture
+//!
+//! ```text
+//! Input: 1×28×28 (784 flat)
+//!   Conv2D(1→4, 3×3)  →  4×26×26 = 2704   ReLU   MaxPool(2) → 4×13×13 = 676
+//!   Conv2D(4→8, 3×3)  →  8×11×11 = 968    ReLU   MaxPool(2) → 8×5×5   = 200
+//!   Flatten
+//!   Linear(200→64)  ReLU
+//!   Linear(64→10)   Softmax
+//! ```
+//!
+//! # Training regime
+//!
+//! - 256 randomly sampled training images per epoch, in 8 batches of 32
+//! - 20 randomly sampled test images evaluated each epoch
+//! - Early stopping: halt once 100% eval accuracy is sustained for
+//!   `STOP_PATIENCE` consecutive epochs
+//! - Hard cap at 500 epochs
+//!
+//! # Usage
+//! ```sh
+//! cargo run --release --example mnist
+//! cargo run --release --example mnist -- data/mnist
+//! cargo run --release --example mnist --features parquet-support
+//! ```
 
-use std::time::Instant;
+use std::path::PathBuf;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("╔═══════════════════════════════════════════════════════════╗");
-    println!("║               MNIST INTEGER NEURAL NETWORK                ║");
-    println!("╚═══════════════════════════════════════════════════════════╝\n");
+use integers::data::shuffled_indices;
+use integers::mnist_loader::load_mnist_auto;
+use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
+use integers::rng::XorShift64;
+use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic};
 
-    // ─── Load Data ─────────────────────────────────────────────────────────
-    println!("Loading datasets...");
-    let train_start = Instant::now();
-    let train_ds = DatasetBuilder::<i32>::new("data/mnist_train.parquet")
-        .format(FileFormat::Parquet)
-        .with_features((0..784).collect())
-        .with_label_column(784)
-        .with_num_classes(10)
-        .with_quantization(QuantizationMethod::StandardScore)
-        .load()?;
-    let test_ds = DatasetBuilder::<i32>::new("data/mnist_test.parquet")
-        .format(FileFormat::Parquet)
-        .with_features((0..784).collect())
-        .with_label_column(784)
-        .with_num_classes(10)
-        .with_quantization(QuantizationMethod::StandardScore)
-        .load()?;
-    println!("✓ Loaded in {:.2}s", train_start.elapsed().as_secs_f32());
-    println!("  Train[shift={}]: {} samples, {} features", train_ds.input_shift, train_ds.len(), train_ds.n_features());
-    println!("  Test[shift={}]:  {} samples, {} features\n", test_ds.input_shift, test_ds.len(), test_ds.n_features());
+fn main() {
+    // ── CLI ───────────────────────────────────────────────────────────────────
+    let args: Vec<String> = std::env::args().collect();
+    let data_dir: PathBuf = args.get(1).map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("data/mnist"));
 
-    let batch_size: usize = 32;    // ← REDUCED from 32
-    let epochs = 150i32;         // ← INCREASED from 50
+    // ── Hyperparameters ───────────────────────────────────────────────────────
+    const SHIFT:         u32   = 7;
+    const LR_SHIFT:      u32   = 7;    // lr = 2^(-7) ≈ 0.0078
+    const MOM_SHIFT:     u32   = 1;    // momentum decay = 0.5
+    const BATCH_SIZE:    usize = 32;
+    const GRAD_CLIP:     i32   = 8192; // 2^13
+    const N_TRAIN:       usize = 256;  // training samples drawn per epoch
+    const N_EVAL:        usize = 20;   // test samples evaluated per epoch
+    const MAX_EPOCHS:    u32   = 500;
+    const STOP_PATIENCE: u32   = 5;    // consecutive 100% eval epochs before stopping
 
-    println!("Model Configuration (RECOMMENDED):");
-    println!("  batch_size = {}", batch_size);
-    println!("  epochs = {}\n", epochs);
-    let mut rng = XorShift64::new(42);
+    // ── Load data ─────────────────────────────────────────────────────────────
+    println!("Loading MNIST from '{}' …", data_dir.display());
+    let (train, test) = load_mnist_auto(&data_dir, true)
+        .unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1); });
 
-    let mut l1 = Linear::<i32>::new(784, 128);
-    let mut l2 = Linear::<i32>::new(128, 128);  // ← second hidden layer
-    let mut l3 = Linear::<i32>::new(128, 10);   // ← output layer
-    let mut model = Sequential::<i32>::new();
+    let shift = train.input_shift.max(0) as u32;
+    println!("  train pool: {} samples", train.len());
+    println!("  test  pool: {} samples\n", test.len());
 
-    l1.init(&mut rng);
-    l2.init(&mut rng);
-    l3.init(&mut rng);
+    // ── Model ─────────────────────────────────────────────────────────────────
+    let mut model = Sequential::new();
+    model.add(Conv2D::new(1, 4, 3, 3, 28, 28, SHIFT, SHIFT, 32)
+        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(ReLU::new());
+    model.add(MaxPool2D::new(4, 26, 26, 2, 2));
 
-    println!("L1 {}: {} -> {}", l1.weights.quant_shift, l1.input_shift, l1.output_shift);
-    println!("L2 {}: {} -> {}", l2.weights.quant_shift, l2.input_shift, l2.output_shift);
-    println!("L3 {}: {} -> {}", l3.weights.quant_shift, l3.input_shift, l3.output_shift);
+    model.add(Conv2D::new(4, 8, 3, 3, 13, 13, SHIFT, SHIFT, 32)
+        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(ReLU::new());
+    model.add(MaxPool2D::new(8, 11, 11, 2, 2));
 
+    model.add(Flatten);
+    model.add(Linear::new(200, 64, SHIFT, SHIFT, 32)
+        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(ReLU::new());
+    model.add(Linear::new(64, 10, SHIFT, SHIFT, 32)
+        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(Softmax::new(SHIFT));
 
-    model
-        .add(l1)
-        .add(ReLU::<i32>::new())
-        .add(l2)
-        .add(ReLU::<i32>::new())
-        .add(l3);
-    model.init_all(&mut rng);
-
-    let mut optim = SGDConfig::new();
-    optim.lr_shift = 8;
-    optim.clip_val = 2 << 8;
-
-    // Print architecture
-    println!("Architecture:");
-    model.print_summary(&model.describe(), 0);
+    model.summary();
+    println!();
+    println!("  max_epochs={MAX_EPOCHS},  n_train={N_TRAIN},  batch={BATCH_SIZE}");
+    println!("  n_eval={N_EVAL},  stop_patience={STOP_PATIENCE} consecutive 100%");
+    println!("  lr=2^(-{LR_SHIFT}),  momentum_shift={MOM_SHIFT},  \
+              grad_clip=2^{}", (GRAD_CLIP as f64).log2() as i32);
     println!();
 
-    // ─── Training Loop ────────────────────────────────────────────────────
-    println!("{:>6} {:>12} {:>12} {:>10} {:>8} {:>6} {:>6}",
-        "Epoch", "Loss", "Accuracy", "Time(s)", "Clamps", "FW Shift", "BW Shift");
-    println!("{}", "─".repeat(80));
+    // ── Fix the eval subset once so progress is comparable across epochs ───────
+    // Using a separate RNG seeded independently so the eval set doesn't depend
+    // on how many training shuffles have been performed.
+    let mut eval_rng  = XorShift64::new(0xdeadbeef);
+    let eval_indices: Vec<usize> = shuffled_indices(test.len(), &mut eval_rng)
+        .into_iter().take(N_EVAL).collect();
 
-    let training_start = Instant::now();
+    // ── Training loop ─────────────────────────────────────────────────────────
+    let mut train_rng     = XorShift64::new(1337);
+    let mut perfect_streak = 0u32;
 
-    for epoch in 0..epochs {
-        let epoch_start = Instant::now();
-        #[cfg(debug_assertions)]
-        reset_overflow_stats();
+    println!("{:>6}  {:>10}  {:>10}  {:>14}",
+        "Epoch", "Train Acc", "Eval Acc", "Streak (100%)");
+    println!("{}", "─".repeat(48));
 
-        // Shuffle
-        let indices = shuffled_indices(train_ds.len(), &mut rng);
+    let mut stopped_at = None;
 
-        let mut epoch_loss: i64 = 0;
-        let mut batches_processed = 0;
-        let mut shift = 0;
-        let mut grad_shift = 0;
+    'training: for epoch in 0..MAX_EPOCHS {
 
-        // Minibatches
-        for batch_start in (0..train_ds.len()).step_by(batch_size) {
-            model.sync_weights(&mut rng);
-            let batch_end = (batch_start + batch_size).min(train_ds.len());
-            let batch_indices = &indices[batch_start..batch_end];
-            let (batch_inputs, batch_targets) = train_ds.minibatch(batch_indices);
+        // ── Sample N_TRAIN indices from the training pool ──────────────────────
+        let train_indices: Vec<usize> = shuffled_indices(train.len(), &mut train_rng)
+            .into_iter().take(N_TRAIN).collect();
 
-            let (preds, shift_out) = model.forward(&batch_inputs, train_ds.input_shift, &mut rng);
-            let (loss, grad_out) = MSE.forward(&preds, &batch_targets);
+        // ── Mini-batch SGD ─────────────────────────────────────────────────────
+        let mut train_correct = 0usize;
 
-            epoch_loss += loss as i64;
-            batches_processed += 1;
+        for batch in train_indices.chunks(BATCH_SIZE) {
+            model.zero_grad();
 
-            model.zero_grads();
-            let (_, grad_shift_out) = model.backward(&grad_out, shift_out);
-            model.step(&mut optim);
-            shift = shift_out;
-            grad_shift = grad_shift_out;
-        }
+            for &i in batch {
+                let x = sample_to_dyadic(&train.get_input(i).data,  shift);
+                let t = target_to_dyadic(&train.get_target(i).data, shift);
 
-        // ─── Evaluation ────────────────────────────────────────────────────
-        model.sync_weights(&mut rng);
-        let mut correct: usize = 0;
-        for t in 0..test_ds.len().min(1000) {
-            let x = test_ds.get_input(t);
-            let target_cls = test_ds.labels[t];
-            let (pred, _) = model.forward(&x, test_ds.input_shift, &mut rng);
-            let pred_cls = argmax(&pred, Some(1))[0] as u8;
-            if pred_cls == target_cls {
-                correct += 1;
+                let y = model.forward(&x);
+                if argmax(&y) == train.labels[i] as usize { train_correct += 1; }
+
+                let g = cross_entropy_grad(&y, &t, shift);
+                model.backward(&g);
             }
-        }
-        let accuracy = correct as f32 / 1000.0;
-
-        #[cfg(debug_assertions)]
-        {
-            let overflow_stats = get_overflow_stats();
-            let elapsed = epoch_start.elapsed().as_secs_f32();
-
-            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}s {:>8} {:>6} {:>6}",
-                epoch,
-                epoch_loss as f64 / (batches_processed as f64),
-                accuracy * 100.0,
-                elapsed,
-                overflow_stats.downcast_clamps,
-                shift,
-                grad_shift,
-            );
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            let elapsed = epoch_start.elapsed().as_secs_f32();
-
-            println!("{:>6} {:>12.4} {:>11.1}% {:>10.2}s {:>8} {:>6} {:>6}",
-                epoch,
-                epoch_loss as f64 / (batches_processed as f64),
-                accuracy * 100.0,
-                elapsed,
-                -1,
-                shift,
-                grad_shift,
-            );
+            model.update(LR_SHIFT);
         }
 
-        // Early stopping
-        if epoch > 5 && accuracy > 0.95 {
-            println!("\n✓ Early stopping at epoch {} (95% accuracy reached)", epoch);
-            break;
-        }
-    }
+        let train_acc = train_correct as f64 / N_TRAIN as f64 * 100.0;
 
-    println!("{}", "─".repeat(60));
-    let total_time = training_start.elapsed().as_secs_f32();
-    println!("✓ Training completed in {:.2}s\n", total_time);
+        // ── Evaluate on the fixed eval subset ──────────────────────────────────
+        let eval_correct: usize = eval_indices.iter().filter(|&&i| {
+            let x = sample_to_dyadic(&test.get_input(i).data, shift);
+            argmax(&model.forward(&x)) == test.labels[i] as usize
+        }).count();
 
-    // ─── Final Test Evaluation ────────────────────────────────────────────
-    println!("Final Test Set Evaluation:");
-    println!("{}", "─".repeat(60));
+        let eval_acc = eval_correct as f64 / N_EVAL as f64 * 100.0;
 
-    let mut correct: usize = 0;
-    let mut confusion = vec![vec![0usize; 10]; 10];  // [true][pred]
-
-    for t in 0..test_ds.len() {
-        let x = test_ds.get_input(t);
-        let target_cls = test_ds.labels[t] as usize;
-        model.sync_weights(&mut rng);
-        let (pred, shift) = model.forward(&x, test_ds.input_shift, &mut rng);
-        let pred_cls = argmax(&pred, Some(1))[0] as usize;
-
-        if pred_cls == target_cls {
-            correct += 1;
-        }
-        confusion[target_cls][pred_cls] += 1;
-    }
-
-    let final_accuracy = correct as f32 / test_ds.len() as f32;
-    println!("Accuracy: {:.2}% ({}/{})", 
-        final_accuracy * 100.0, correct, test_ds.len());
-    println!();
-
-    // Print per-class accuracy
-    println!("Per-class accuracy:");
-    for digit in 0..10 {
-        let total = confusion[digit].iter().sum::<usize>();
-        let correct = confusion[digit][digit];
-        let acc = if total > 0 {
-            correct as f32 / total as f32 * 100.0
+        // ── Early stopping logic ───────────────────────────────────────────────
+        if eval_correct == N_EVAL {
+            perfect_streak += 1;
         } else {
-            0.0
+            perfect_streak = 0;
+        }
+
+        let streak_str = if perfect_streak > 0 {
+            format!("{perfect_streak}")
+        } else {
+            "—".to_string()
         };
-        println!("  {}: {:.1}% ({}/{})", digit, acc, correct, total);
+
+        println!("{:>6}  {:>9.1}%  {:>9.1}%  {:>14}",
+            epoch, train_acc, eval_acc, streak_str);
+
+        if perfect_streak >= STOP_PATIENCE {
+            stopped_at = Some(epoch);
+            break 'training;
+        }
     }
 
-    println!("\n✓ Done!");
-    Ok(())
+    // ── Final report ──────────────────────────────────────────────────────────
+    println!("{}", "─".repeat(48));
+    match stopped_at {
+        Some(e) => println!(
+            "\nEarly stop at epoch {e}: {STOP_PATIENCE} consecutive epochs \
+             with 100% on the {N_EVAL}-sample eval set."
+        ),
+        None => println!(
+            "\nReached {MAX_EPOCHS} epochs without sustaining {STOP_PATIENCE}× \
+             100% on eval."
+        ),
+    }
+
+    // ── Final full-test evaluation ─────────────────────────────────────────────
+    println!("\nRunning final evaluation on the full test set ({} samples) …", test.len());
+    let mut conf = [[0usize; 10]; 10];
+    for i in 0..test.len() {
+        let x    = sample_to_dyadic(&test.get_input(i).data, shift);
+        let pred = argmax(&model.forward(&x));
+        conf[test.labels[i] as usize][pred] += 1;
+    }
+    let total_correct: usize = (0..10).map(|c| conf[c][c]).sum();
+    println!("Full test accuracy: {}/{} = {:.2}%\n",
+        total_correct, test.len(),
+        total_correct as f64 / test.len() as f64 * 100.0);
+
+    println!("Confusion matrix (rows = true label, cols = predicted):");
+    print!("     ");
+    for c in 0..10 { print!("{c:>5}"); }
+    println!("   ← predicted");
+    println!("     {}", "─".repeat(50));
+    for r in 0..10 {
+        print!("{r:>3}  |");
+        for c in 0..10 {
+            if r == c { print!("\x1b[1m{:>5}\x1b[0m", conf[r][c]); }
+            else      { print!("{:>5}", conf[r][c]); }
+        }
+        let row_total: usize = conf[r].iter().sum();
+        println!("  {:.1}%", conf[r][r] as f64 / row_total as f64 * 100.0);
+    }
 }

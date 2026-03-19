@@ -1,677 +1,303 @@
-#[path = "lib/debug.rs"]
-pub mod debug;
+//! `dyadic_nn` — Integer neural network training on dyadic rational arithmetic.
+//!
+//! # Module map
+//!
+//! | Module               | Contents |
+//! |----------------------|----------|
+//! | [`dyadic`]           | `Dyadic` type and all four arithmetic operations |
+//! | [`nn`]               | `Layer` trait, `Sequential`, `Linear`, `ReLU`, `Softmax` |
+//! | [`tensor`]           | Generic `Tensor<S>` and the `Scalar` trait |
+//! | [`quant`]            | Per-column quantisation strategies |
+//! | [`rng`]              | `XorShift64` — deterministic integer PRNG for shuffling |
+//! | [`data`]             | `Dataset<S>` struct and `shuffled_indices` |
+//! | [`dataset_loaders`]  | Fluent `DatasetBuilder` for CSV / TSV / Parquet |
+//! | [`mnist_loader`]     | IDX binary format loader for MNIST |
+//!
+//! # Quick-start
+//!
+//! ```no_run
+//! use dyadic_nn::nn::{Sequential, Linear, ReLU, Softmax};
+//! use dyadic_nn::dataset_loaders::{DatasetBuilder, QuantizationMethod};
+//! use dyadic_nn::{sample_to_dyadic, target_to_dyadic, cross_entropy_grad, argmax};
+//! use dyadic_nn::data::shuffled_indices;
+//! use dyadic_nn::rng::XorShift64;
+//!
+//! const S: u32 = 7;
+//!
+//! let ds = DatasetBuilder::<i32>::new_csv("iris.csv")
+//!     .with_features(vec![0,1,2,3]).with_label_column(4)
+//!     .with_quantization(QuantizationMethod::MinMax)
+//!     .load().unwrap();
+//!
+//! let shift = ds.input_shift.max(0) as u32;
+//!
+//! let mut model = Sequential::new();
+//! model.add(Linear::new(4, 8, S, S, 32).with_grad_clip(8192).with_momentum(1));
+//! model.add(ReLU::new());
+//! model.add(Linear::new(8, 3, S, S, 32).with_grad_clip(8192).with_momentum(1));
+//! model.add(Softmax::new(S));
+//!
+//! let mut rng = XorShift64::new(42);
+//! for _epoch in 0..200 {
+//!     for &i in &shuffled_indices(ds.len(), &mut rng) {
+//!         let x = sample_to_dyadic(&ds.get_input(i).data,  shift);
+//!         let t = target_to_dyadic(&ds.get_target(i).data, shift);
+//!         model.zero_grad();
+//!         let y = model.forward(&x);
+//!         let g = cross_entropy_grad(&y, &t, shift);
+//!         model.backward(&g);
+//!         model.update(7);
+//!     }
+//! }
+//! ```
 #[path = "lib/nn.rs"]
 pub mod nn;
-#[path = "lib/data.rs"]
-pub mod data;
-#[path = "lib/dataset_loaders.rs"]
-pub mod dataset_loaders;
-#[path = "lib/quant.rs"]
+
+pub mod dyadic;
+pub mod tensor;
 pub mod quant;
+pub mod rng;
+pub mod data;
+pub mod dataset_loaders;
+pub mod mnist_loader;
+pub mod cifar_loader;
 
-use std::fmt;
-use std::ops::{Shr, Shl};
+// ─── Re-exports ───────────────────────────────────────────────────────────────
 
-use crate::nn::kernels;
+pub use dyadic::Dyadic;
+pub use tensor::{Tensor, Scalar};
+pub use rng::XorShift64;
 
+// ─── Dataset → network bridge ─────────────────────────────────────────────────
 
-pub trait Numeric: Copy + Clone + Default + fmt::Debug + PartialEq {
-    const MAX: Self;
-
-    fn add(self, other: Self) -> Self;
-    fn sub(self, other: Self) -> Self;
-    fn mul(self, other: Self) -> Self;
-    fn div(self, other: Self) -> Self;
-    fn sqrt(self) -> Self;
-    fn zero() -> Self { Self::default() }
-    fn abs(self) -> Self;
-    fn from_i32(val: i32) -> Self;
-    fn gt(self, other: Self) -> bool;
-    fn to_u32(self) -> u32;
-    fn signum(self) -> i32;
-    fn shr(self, shift: u32) -> Self;
-    fn shl(self, shift: u32) -> Self;
-    fn max(self, other: Self) -> Self;
+/// Convert a flat `&[i32]` row from a `Dataset<i32>` into `Vec<Dyadic>`.
+///
+/// `shift = dataset.input_shift.max(0) as u32`
+pub fn sample_to_dyadic(values: &[i32], shift: u32) -> Vec<Dyadic> {
+    values.iter().map(|&v| Dyadic::new(v, shift)).collect()
 }
 
-impl Numeric for f32 {
-    const MAX: f32 = f32::MAX;
-
-    fn add(self, other: Self) -> Self { self + other }
-    fn sub(self, other: Self) -> Self { self - other }
-    fn mul(self, other: Self) -> Self { self * other }
-    fn div(self, other: Self) -> Self { self / other }
-    fn sqrt(self) -> Self { f32::sqrt(self) }
-    fn from_i32(val: i32) -> f32 { val as f32 }
-    fn abs(self) -> f32 { self.abs() }
-    fn gt(self, other: f32) -> bool { self > other }
-    fn to_u32(self) -> u32 { self as u32 }
-    fn signum(self) -> i32 { if self > 0.0 { 1 } else if self == 0.0 { 0 } else { -1 } }
-    fn shr(self, shift: u32) -> f32 { self / (1u32 << shift) as f32 }
-    fn shl(self, shift: u32) -> f32 { self * (1u32 << shift) as f32 }
-    fn max(self, other: f32) -> f32 { if self > other { self } else { other }}
+/// Same as [`sample_to_dyadic`] but for one-hot target rows.
+pub fn target_to_dyadic(values: &[i32], shift: u32) -> Vec<Dyadic> {
+    values.iter().map(|&v| Dyadic::new(v, shift)).collect()
 }
 
-impl Numeric for i32 {
-    const MAX: i32 = i32::MAX;
+// ─── Loss gradients ───────────────────────────────────────────────────────────
 
-    fn add(self, other: Self) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            if self.checked_add(other).is_none() {
-                println!("Overflow i32::add");
-            }
-        }
-
-        self.saturating_add(other)
-    }
-    fn sub(self, other: Self) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            if self.checked_sub(other).is_none() {
-                println!("Overflow i32::sub");
-            }
-        }
-        self.saturating_sub(other)
-    }
-    fn mul(self, other: Self) -> Self { 
-        #[cfg(debug_assertions)]
-        {
-            if self.checked_mul(other).is_none() {
-                println!("Overflow i32::mul");
-            }
-        }
-        self.saturating_mul(other)
-    }
-    fn div(self, other: Self) -> Self { if other == 0 { 0 } else { self / other } }
-    fn sqrt(self) -> Self { let v = if self > 0 { self as u64 } else { 0u64 }; kernels::isqrt_64(v) as i32 }
-    fn from_i32(val: i32) -> i32 { val }
-    fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
-    fn gt(self, other: i32) -> bool { self > other }
-    fn to_u32(self) -> u32 { if self < 0i32 { 0u32 } else { self as u32 } }
-    fn signum(self) -> i32 { if self > 0 { 1 } else if self == 0 { 0 } else { -1 } }
-    fn shr(self, shift: u32) -> i32 { self.saturating_div(1i32 << shift) }
-    fn shl(self, shift: u32) -> i32 { self.saturating_mul(1i32 << shift) }
-    fn max(self, other: i32) -> i32 { if self > other { self } else { other }}
+/// MSE gradient: `∂L/∂yᵢ = yᵢ − tᵢ`.
+///
+/// Both slices must share the same dyadic scale.  The result is passed
+/// directly to [`nn::Sequential::backward`].
+pub fn mse_grad(output: &[Dyadic], target: &[Dyadic]) -> Vec<Dyadic> {
+    output.iter().zip(target.iter())
+        .map(|(&y, &t)| {
+            debug_assert_eq!(y.s, t.s, "output and target must share scale for MSE grad");
+            Dyadic::new(y.v.saturating_sub(t.v), y.s)
+        })
+        .collect()
 }
 
-pub trait Scalar: Copy + Clone + Default + fmt::Debug + PartialOrd {
-    type Acc: Numeric;
-
-    /// Casts `acc` (accumulated value) to desired quantization using `shift` (and `rng` for
-    /// stochastic downcasting)
-    fn downcast(acc: Self::Acc, shift: i32, rng: &mut XorShift64) -> Self;
-
-    fn scale(acc: Self::Acc, shift: i32, rng: &mut XorShift64) -> Self::Acc { acc }
-
-    /// Casts own value to accumulator type
-    fn into_acc(self) -> Self::Acc;
-
-    fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> Self::Acc;
-
-    fn from_i32(val: i32) -> Self::Acc;
-    fn from_f64(val: f64) -> Self::Acc;
-    fn from_quantized(val: i32) -> Self;
-    fn dataset_input_shift(quantizer_shift: i32) -> i32;
-
-    fn to_u32(self) -> u32;
-
-    /// Multiplies two scalars and produces Acc
-    /// for instance two i8 values produce a i32 value
-    fn mul(self, other: Self) -> Self::Acc;
-    
-    fn sub(self, other: Self) -> Self::Acc;
-
-    /// Absolute value of scalar
-    fn abs(self) -> Self;
-
-    fn relu(value: Self) -> Self;
-
-    fn tanh(value: Self) -> Self;
-    fn dtanh(value: Self) -> Self::Acc;
-
-    fn is_positive(value: Self) -> bool;
-
-    /// default shift when converting into base representation,
-    /// only required for integer types, otherwise 0
-    fn unit_shift() -> u32;
-
-    fn acc_shift(fan_in: usize) -> u32;
+/// Cross-entropy gradient for use after a [`nn::Softmax`] output layer.
+///
+/// When the network ends with Softmax + CE loss, the combined gradient of
+/// `CE(softmax(z), t)` with respect to the pre-softmax logits `z` simplifies
+/// to `p − t` (softmax probabilities minus one-hot targets).
+///
+/// Since [`nn::Softmax::backward`] is a straight-through estimator (identity),
+/// you can pass this gradient directly into [`nn::Sequential::backward`] and
+/// it will correctly flow back through Softmax without needing the full
+/// softmax jacobian.
+///
+/// `output` — the Softmax layer output (quantised probabilities).  
+/// `target` — one-hot target at the same shift.  
+/// `shift`  — the dyadic scale of both tensors.
+///
+/// # Example
+/// ```no_run
+/// # use dyadic_nn::{Dyadic, cross_entropy_grad};
+/// # let y: Vec<Dyadic> = vec![];
+/// # let t: Vec<Dyadic> = vec![];
+/// let g = cross_entropy_grad(&y, &t, 7);
+/// ```
+pub fn cross_entropy_grad(output: &[Dyadic], target: &[Dyadic], shift: u32) -> Vec<Dyadic> {
+    // p − t: both at `shift`, result at `shift`.
+    output.iter().zip(target.iter())
+        .map(|(&p, &t)| {
+            Dyadic::new(p.v.saturating_sub(t.v), shift)
+        })
+        .collect()
 }
 
-impl Scalar for f32 {
-    type Acc = f32;
-
-    fn downcast(acc: f32, shift: i32, rng: &mut XorShift64) -> Self { acc / (1 << shift) as f32 }
-
-    fn random_uniform(rng: &mut XorShift64, range: f32) -> f32 {
-        // generate float in [-range, range] properly
-        let u = rng.next() as f32 / u64::MAX as f32; // [0, 1)
-        u * 2.0 * range - range
-    }
-
-    fn to_u32(self) -> u32 { self as u32 }
-    fn from_i32(val: i32) -> f32 { val as f32 }
-    fn from_f64(val: f64) -> f32 { val as f32 }
-    fn into_acc(self) -> f32 { self }
-    fn mul(self, other: f32) -> f32 { self * other }
-    fn sub(self, other: Self) -> f32 { self - other }
-    fn abs(self) -> f32 { if self > 0.0 { self } else { -1.0 * self }}
-    fn unit_shift() -> u32 { 0u32 }
-    fn acc_shift(fan_in: usize) -> u32 { 0u32 }
-    
-    fn from_quantized(val: i32) -> f32 { val as f32 / 127.0 }
-    fn dataset_input_shift(_: i32) -> i32 { 0 }
-
-    fn is_positive(value: f32) -> bool { value > 0.0 }
-    fn relu(value: f32) -> f32 {
-        if value > 0.0 {
-            value
-        } else {
-            0.0
-        }
-    }
-    fn tanh(value: f32) -> f32 { value.tanh() }
-    fn dtanh(value: f32) -> f32 { 1.0 - value * value }
+/// Argmax over a `&[Dyadic]` — returns the index of the largest mantissa.
+///
+/// Since all elements share the same scale `s`, comparing mantissas is
+/// equivalent to comparing decoded values.
+pub fn argmax(output: &[Dyadic]) -> usize {
+    output.iter()
+        .enumerate()
+        .max_by_key(|(_, d)| d.v)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
 }
 
-impl Scalar for i32 {
-    type Acc = i32;
+// ─── Training reporter ────────────────────────────────────────────────────────
 
-    fn downcast(acc: i32, shift: i32, rng: &mut XorShift64) -> Self { kernels::stochastic_downcast(acc, shift, rng) }
-    fn scale(acc: Self::Acc, shift: i32, rng: &mut XorShift64) -> Self::Acc { 
-        kernels::stochastic_downcast(acc, shift, rng)
-    }
+/// A lightweight per-epoch training reporter.
+///
+/// Accumulates loss and accuracy statistics during a training epoch, then
+/// formats them into a consistent table row.
+///
+/// # Usage
+/// ```no_run
+/// # use dyadic_nn::{TrainingReporter};
+/// let mut reporter = TrainingReporter::new(500, 50);   // 500 epochs, log every 50
+/// reporter.print_header();
+///
+/// for epoch in 0..500 {
+///     reporter.reset();
+///     // ... training loop ...
+///     // reporter.record(sq_err_sum, n_correct, n_samples, test_acc_opt);
+///     reporter.maybe_print(epoch, Some(test_accuracy));
+/// }
+/// reporter.print_footer(final_train_acc, final_test_acc);
+/// ```
+pub struct TrainingReporter {
+    pub total_epochs:  u32,
+    pub log_every:     u32,
+    pub shift:         u32,   // for decoding squared-error to real MSE
 
-    fn random_uniform(rng: &mut XorShift64, range: Self::Acc) -> i32 {
-        let range: Self::Acc = Numeric::max(range, 1i32);
-        let spread = (2 * range as u32) as u32;
-        rng.gen_range(spread) as i32 - range
-    }
+    // per-epoch accumulators
+    sq_err_sum: i64,
+    n_correct:  usize,
+    n_samples:  usize,
 
-    fn to_u32(self) -> u32 { if self < 0i32 { 0u32 } else { self as u32 } }
-    fn from_i32(val: i32) -> i32 { val as i32 }
-    fn from_f64(val: f64) -> i32 { (val * 127.0 * 128.0).round() as i32 }
-    fn into_acc(self) -> i32 { self }
-    fn mul(self, other: i32) -> i32 { Numeric::mul(self.into_acc(), other.into_acc()) }
-    fn sub(self, other: i32) -> i32 { self.saturating_sub(other) }
-    fn abs(self) -> i32 { if self > 0 { self } else { -1 * self }}
-    
-    fn from_quantized(val: i32) -> i32 { val }
-    fn dataset_input_shift(quantizer_shift: i32) -> i32 { quantizer_shift }
-
-    fn unit_shift() -> u32 { 15u32 }
-    fn acc_shift(fan_in: usize) -> u32 { (usize::BITS - fan_in.leading_zeros()) as u32 }
-    fn is_positive(value: i32) -> bool { value > 0 }
-    fn relu(value: i32) -> i32 {
-        if value > 0 {
-            value
-        } else {
-            0
-        }
-    }
-    fn tanh(value: i32) -> i32 { kernels::tanh_i8(value as i8) as i32 }
-    fn dtanh(value: i32) -> i32 { (127 * 127) - (value * value) }
+    pub best_train_acc: f64,
+    pub best_test_acc:  f64,
 }
 
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default,
-{
-    /// Flattened data storage (Row-Major contiguous layout)
-    pub data: Vec<T>,
-    /// Dimension of the tensor, e.g. [batch, input_dim]
-    pub shape: Vec<usize>,
-}
-
-impl<T> Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default,
-{
-    pub fn new(shape: Vec<usize>) -> Self {
-        let mut total_elements: usize = 0;
-
-        if !shape.is_empty() {
-            total_elements = shape.iter().product();
-        }
+impl TrainingReporter {
+    /// `shift` should match `dataset.input_shift` (used to decode squared
+    /// integer error back to floating-point MSE).
+    pub fn new(total_epochs: u32, log_every: u32, shift: u32) -> Self {
         Self {
-            data: vec![T::default(); total_elements],
-            shape,
+            total_epochs, log_every, shift,
+            sq_err_sum: 0, n_correct: 0, n_samples: 0,
+            best_train_acc: 0.0, best_test_acc: 0.0,
         }
     }
 
-    pub fn from_vec(data: Vec<T>, shape: Vec<usize>) -> Self {
-        let mut expected = 0;
-        if !shape.is_empty() {
-            expected = shape.iter().product();
+    /// Print the column header.  Call once before the epoch loop.
+    pub fn print_header(&self) {
+        println!("{:>7}  {:>14}  {:>10}  {:>12}",
+            "Epoch", "Train Loss", "Train Acc", "Test Acc");
+        println!("{}", "─".repeat(50));
+    }
+
+    /// Reset accumulators at the start of each epoch.
+    pub fn reset(&mut self) {
+        self.sq_err_sum = 0;
+        self.n_correct  = 0;
+        self.n_samples  = 0;
+    }
+
+    /// Record a single sample's contribution to epoch statistics.
+    ///
+    /// `sq_err` — sum of squared gradient mantissas (`g.v^2`) for this sample.  
+    /// `correct` — whether the predicted class matched the true label.
+    pub fn record(&mut self, sq_err: i64, correct: bool) {
+        self.sq_err_sum += sq_err;
+        if correct { self.n_correct += 1; }
+        self.n_samples  += 1;
+    }
+
+    /// Compute the current epoch's training accuracy (0.0–100.0).
+    pub fn train_accuracy(&self) -> f64 {
+        if self.n_samples == 0 { return 0.0; }
+        self.n_correct as f64 / self.n_samples as f64 * 100.0
+    }
+
+    /// Compute the current epoch's mean squared error (decoded to f64).
+    pub fn train_mse(&self) -> f64 {
+        if self.n_samples == 0 { return 0.0; }
+        (self.sq_err_sum as f64 / self.n_samples as f64)
+            * 2f64.powi(-2 * self.shift as i32)
+    }
+
+    /// Print a log row if this epoch should be logged.
+    ///
+    /// `test_acc` — optional test-set accuracy (0.0–100.0).  Pass `None` if
+    ///              evaluation is skipped this epoch.
+    pub fn maybe_print(&mut self, epoch: u32, test_acc: Option<f64>) {
+        let train_acc = self.train_accuracy();
+        if train_acc > self.best_train_acc { self.best_train_acc = train_acc; }
+        if let Some(ta) = test_acc {
+            if ta > self.best_test_acc { self.best_test_acc = ta; }
         }
-        assert_eq!(
-            data.len(),
-            expected,
-            "Tensor::from_vec: Shape {:?} does not match data len {}",
-            shape,
-            data.len()
-        );
-        Self { data, shape }
-    }
 
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    pub fn memory_bytes(&self) -> usize {
-        self.data.len() * std::mem::size_of::<T>()
-    }
-}
-
-///
-/// Right shift operator for Tensors
-///
-/// Example:
-/// ```
-/// use integers::Tensor;
-/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-/// let o = t >> 1u32;
-/// assert_eq!(o.len(), 1);
-/// assert_eq!(o.data[0], 2);
-/// ```
-impl<S: Scalar + Numeric> Shr<u32> for Tensor<S>
-{
-    type Output = Tensor<S>;
-
-    fn shr(self, shift: u32) -> Tensor<S> {
-        let shifted_data = self
-            .data
-            .into_iter()
-            .map(|val| val.shr(shift))
-            .collect();
-
-        Tensor {
-            data: shifted_data,
-            shape: self.shape,
-        }
-    }
-}
-
-///
-/// Right shift operator for Tensors [by reference]
-///
-/// Example:
-/// ```
-/// use integers::Tensor;
-/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-/// let o = &t >> 1u32;
-/// assert_eq!(o.len(), 1);
-/// assert_eq!(o.data[0], 2);
-/// assert_eq!(t.data[0], 4);
-/// ```
-impl<S: Scalar + Numeric> Shr<u32> for &Tensor<S>
-{
-    type Output = Tensor<S>;
-
-    fn shr(self, shift: u32) -> Tensor<S> {
-        let shifted_data = self
-            .data
-            .iter()
-            .map(|&val| val.shr(shift))
-            .collect();
-
-        Tensor {
-            data: shifted_data,
-            shape: self.shape.clone(),
+        let is_last = epoch + 1 == self.total_epochs;
+        if epoch % self.log_every == 0 || is_last {
+            let test_str = test_acc
+                .map(|a| format!("{:>11.2}%", a))
+                .unwrap_or_else(|| "          —".to_string());
+            println!("{:>7}  {:>14.6}  {:>9.2}%  {}",
+                epoch, self.train_mse(), train_acc, test_str);
         }
     }
-}
 
-///
-/// Left shift operator for Tensors
-///
-/// Example:
-/// ```
-/// use integers::Tensor;
-/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-/// let o = t << 1u32;
-/// assert_eq!(o.len(), 1);
-/// assert_eq!(o.data[0], 8);
-/// ```
-impl<T> Shl<u32> for Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default + Shl<u32, Output = T>,
-{
-    type Output = Tensor<T>;
-
-    fn shl(self, shift: u32) -> Tensor<T> {
-        let shifted_data = self
-            .data
-            .into_iter()
-            .map(|val| val << shift)
-            .collect();
-
-        Tensor {
-            data: shifted_data,
-            shape: self.shape,
-        }
+    /// Print a summary footer after training.
+    pub fn print_footer(&self) {
+        println!("{}", "─".repeat(50));
+        println!("Best train accuracy : {:.2}%", self.best_train_acc);
+        println!("Best test  accuracy : {:.2}%", self.best_test_acc);
     }
 }
 
-///
-/// Left shift operator for Tensors [by reference]
-///
-/// Example:
-/// ```
-/// use integers::Tensor;
-/// let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-/// let o = &t << 1u32;
-/// assert_eq!(o.len(), 1);
-/// assert_eq!(o.data[0], 8);
-/// assert_eq!(t.data[0], 4);
-/// ```
-impl<T> Shl<u32> for &Tensor<T>
-where
-    T: Clone + Copy + fmt::Debug + Default + Shl<u32, Output = T>,
-{
-    type Output = Tensor<T>;
-
-    fn shl(self, shift: u32) -> Tensor<T> {
-        let shifted_data = self
-            .data
-            .iter()
-            .map(|&val| val << shift)
-            .collect();
-
-        Tensor {
-            data: shifted_data,
-            shape: self.shape.clone(),
-        }
-    }
-}
-
-
-pub fn argmax<S: Scalar>(tensor: &Tensor<S>, axis: Option<usize>) -> Vec<usize> {
-    let axis = axis.unwrap_or(1);
-    
-    // Only supports 2D tensors
-    if tensor.shape.len() != 2 {
-        panic!("argmax requires a 2D tensor, got shape: {:?}", tensor.shape);
-    }
-    
-    let (rows, cols) = (tensor.shape[0], tensor.shape[1]);
-    let mut result = Vec::new();
-    
-    if axis == 1 {
-        // Find argmax along columns (per row)
-        // For each row, find the column index with max value
-        for row_idx in 0..rows {
-            let start = row_idx * cols;
-            let row = &tensor.data[start..start + cols];
-            
-            // Find index of maximum value in this row
-            let (max_idx, _) = row
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or((0, &S::default()));
-            
-            result.push(max_idx);
-        }
-    } else if axis == 0 {
-        // Find argmax along rows (per column)
-        // For each column, find the row index with max value
-        for col_idx in 0..cols {
-            let (max_idx, _) = (0..rows)
-                .map(|r| (r, tensor.data[r * cols + col_idx]))
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or((0, S::default()));
-            
-            result.push(max_idx);
-        }
-    } else {
-        panic!("Invalid axis {}. Expected 0 or 1.", axis);
-    }
-    
-    result
-}
-
-pub fn accuracy(predictions: &[usize], ground_truth: &[u8]) -> f32 {
-    let correct = predictions
-        .iter()
-        .zip(ground_truth)
-        .filter(|(pred, truth)| **pred == **truth as usize)
-        .count();
-    
-    correct as f32 / predictions.len() as f32
-}
-
-
-/// RNG State
-#[derive(Debug, PartialEq)]
-pub struct XorShift64 {
-    pub state: u64,
-}
-
-impl XorShift64 {
-    pub fn new(seed: u64) -> Self {
-        // edge case handleing for state = 0
-        let state = if seed == 0 { 0xC0FFEE } else { seed };
-        Self { state }
-    }
-
-    pub fn next(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
-
-    /// Random value generator for value in range [0, range)
-    #[inline(always)]
-    pub fn gen_range(&mut self, range: u32) -> u32 {
-        (self.next() as u32) % range
-    }
-}
-
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Tensor<T> test suite
-    #[test]
-    fn test_tensor_new() {
-        let t: Tensor<i32> = Tensor::new(vec![2, 4]);
 
-        assert_eq!(t.shape[0], 2);
-        assert_eq!(t.shape[1], 4);
-        assert_eq!(t.data.len(), 8);
+    #[test]
+    fn mse_grad_is_difference() {
+        let y = vec![Dyadic::new(100, 7), Dyadic::new(-50, 7)];
+        let t = vec![Dyadic::new(127, 7), Dyadic::new(  0, 7)];
+        let g = mse_grad(&y, &t);
+        assert_eq!(g[0].v, 100 - 127);
+        assert_eq!(g[1].v, -50 -   0);
     }
 
     #[test]
-    fn test_tensor_new_empty_vec() {
-        let t: Tensor<i32> = Tensor::new(vec![]);
-
-        assert_eq!(t.shape.len(), 0);
-        assert_eq!(t.data.len(), 0);
+    fn cross_entropy_grad_is_prob_minus_target() {
+        // Predicted prob for class 0 ≈ 0.9 at shift 7 → mantissa ≈ 115
+        let y = vec![Dyadic::new(115, 7), Dyadic::new(10, 7), Dyadic::new(3, 7)];
+        let t = vec![Dyadic::new(127, 7), Dyadic::new( 0, 7), Dyadic::new(0, 7)];
+        let g = cross_entropy_grad(&y, &t, 7);
+        // Gradient for correct class should be negative (prob < target hot bit)
+        assert!(g[0].v < 0);
+        // Gradient for incorrect classes should be positive
+        assert!(g[1].v > 0);
+        assert!(g[2].v > 0);
     }
 
     #[test]
-    fn test_tensor_from_vec() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![2, 1], vec![2, 1]);
-        assert_eq!(t.data.len(), t.shape[0] * t.shape[1]);
-    }
-
-    #[test]
-    fn test_tensor_from_vec_empty_vec() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![], vec![]);
-        assert_eq!(t.shape.len(), 0);
-        assert_eq!(t.data.len(), 0);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "assertion `left == right` failed: Tensor::from_vec: Shape [2, 1] does not match data len 3\n  left: 3\n right: 2"
-    )]
-    fn test_tensor_from_vec_wrong_shape_for_data() {
-        let _t: Tensor<i32> = Tensor::from_vec(vec![2, 1, 3], vec![2, 1]);
-    }
-
-    #[test]
-    fn test_tensor_len() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![2, 1], vec![2, 1]);
-
-        assert_eq!(t.len(), 2);
-    }
-    #[test]
-    fn test_tensor_len_empty() {
-        let t: Tensor<i32> = Tensor::new(vec![]);
-
-        assert_eq!(t.len(), 0, "{:?}", t);
-    }
-
-    #[test]
-    fn test_tensor_memory_bytes() {
-        let t: Tensor<i32> = Tensor::from_vec(vec![2], vec![1, 1]);
-
-        assert_eq!(t.len(), 1);
-        assert_eq!(t.memory_bytes(), 4);
-    }
-
-    #[test]
-    fn test_tensor_shl_borrow(){
-        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-
-        let o = t << 1u32;
-        assert_eq!(o.len(), 1);
-        assert_eq!(o.data[0], 8);
-        // not allowed
-        // assert_eq!(t.data[0], 4);
-    }
-
-    #[test]
-    fn test_tensor_shl_reference(){
-        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-
-        let o = &t << 1u32;
-        assert_eq!(o.len(), 1);
-        assert_eq!(o.data[0], 8);
-        assert_eq!(t.data[0], 4);
-    }
-
-    #[test]
-    fn test_tensor_shr_borrow(){
-        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-
-        let o = t >> 1u32;
-        assert_eq!(o.len(), 1);
-        assert_eq!(o.data[0], 2);
-        // not allowed
-        // assert_eq!(t.data[0], 4);
-    }
-
-    #[test]
-    fn test_tensor_shr_reference(){
-        let t: Tensor<i32> = Tensor::from_vec(vec![4], vec![1, 1]);
-
-        let o = &t >> 1u32;
-        assert_eq!(o.len(), 1);
-        assert_eq!(o.data[0], 2);
-        assert_eq!(t.data[0], 4);
-    }
-
-    #[test]
-    fn test_argmax_batch() {
-        // Batch of 3 samples, 4 classes each
-        let data = vec![
-            10i32, 5, 3, 2,      // Sample 0: max at index 0
-            2, 15, 8, 1,        // Sample 1: max at index 1
-            1, 2, 20, 5,        // Sample 2: max at index 2
+    fn argmax_returns_max_index() {
+        let v = vec![
+            Dyadic::new(-10, 7),
+            Dyadic::new( 50, 7),
+            Dyadic::new( 20, 7),
         ];
-        let tensor = Tensor::from_vec(data, vec![3, 4]);
-        
-        let result = argmax(&tensor, Some(1));
-        assert_eq!(result, vec![0, 1, 2]);
+        assert_eq!(argmax(&v), 1);
     }
 
     #[test]
-    fn test_argmax_axis_0() {
-        // 3 rows, 2 columns
-        let data = vec![
-            10i32, 2,
-            5, 15,
-            3, 1,
-        ];
-        let tensor = Tensor::from_vec(data, vec![3, 2]);
-        
-        let result = argmax(&tensor, Some(0));
-        // Column 0: max is 10 at row 0
-        // Column 1: max is 15 at row 1
-        assert_eq!(result, vec![0, 1]);
+    fn reporter_accumulates_correctly() {
+        let mut r = TrainingReporter::new(10, 2, 7);
+        r.reset();
+        r.record(1000, true);
+        r.record(2000, false);
+        assert_eq!(r.n_correct, 1);
+        assert_eq!(r.n_samples, 2);
+        assert!((r.train_accuracy() - 50.0).abs() < 1e-6);
     }
-
-    #[test]
-    fn test_argmax_single_sample() {
-        // Single sample [1, 5]
-        let data = vec![2i32, 8, 5, 3, 1];
-        let tensor = Tensor::from_vec(data, vec![1, 5]);
-        
-        let result = argmax(&tensor, Some(1));
-        assert_eq!(result, vec![1]);  // Max is 8 at index 1
-    }
-
-    // accuracy tests
-    // TODO
-    #[test]
-    fn test_accuracy(){
-        let preds: &[usize] = &[0, 1, 0, 1];
-        let ground_truth: &[u8] = &[0, 1, 0, 1];
-
-        assert_eq!(accuracy(preds, ground_truth), 1.0);
-    }
-
-
-    // XorShift64 tests
-    #[test]
-    fn test_xorshift_new() {
-        let rng1 = XorShift64::new(12345);
-        assert_eq!(rng1.state, 12345);
-        let rng2 = XorShift64::new(0);
-        assert_eq!(rng2.state, 0xCAFEBABE);
-    }
-
-    #[test]
-    fn test_xorshift_next() {
-        let mut rng = XorShift64::new(1);
-
-        assert_eq!(rng.next(), 1082269761);
-        assert_eq!(rng.state, 1082269761);
-    }
-
-    #[test]
-    fn test_xorshift_determinism() {
-        let mut rng1 = XorShift64::new(12345);
-        let mut rng2 = XorShift64::new(12345);
-
-        assert_eq!(rng1.next(), rng2.next());
-        assert_eq!(rng1.next(), rng2.next());
-        assert_eq!(rng1.next(), rng2.next());
-    }
-
-    #[test]
-    fn test_xorshift_gen_range() {
-        let mut rng = XorShift64::new(1);
-
-        for _i in 0..1000 {
-            let val = rng.gen_range(12) + 1;
-            assert!(val <= 12);
-            assert!(val > 0);
-        }
-    }
-
-    #[test]
-    fn test_scalar_tensor(){
-        let tensor = Tensor::<f32>::new(vec![1, 1]);
-    }
-
 }
