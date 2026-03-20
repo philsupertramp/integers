@@ -28,8 +28,8 @@ use std::time::Instant;
 use parquet::column::reader::ColumnReader;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
-use crate::data::{DataError, DataResult, Dataset};
-use crate::tensor::Tensor;
+use integers::data::{DataError, DataResult, Dataset};
+use integers::tensor::Tensor;
 
 // ─── Schema detection ─────────────────────────────────────────────────────────
 

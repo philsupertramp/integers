@@ -5,11 +5,11 @@ edition = "2024"
 
 [[example]]
 name = "mnist"
-path = "examples/mnist.rs"
+path = "examples/mnist/main.rs"
 
 [[example]]
 name = "iris"
-path = "examples/iris.rs"
+path = "examples/iris/main.rs"
 
 [[example]]
 name              = "cifar"

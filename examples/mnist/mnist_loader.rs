@@ -8,8 +8,8 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::data::{DataError, DataResult, Dataset};
-use crate::tensor::Tensor;
+use integers::data::{DataError, DataResult, Dataset};
+use integers::tensor::Tensor;
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 

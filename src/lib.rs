@@ -57,10 +57,14 @@ pub mod dyadic;
 pub mod tensor;
 pub mod quant;
 pub mod rng;
+
+#[path = "data/data.rs"]
 pub mod data;
+
+#[path = "data/dataset_loaders.rs"]
 pub mod dataset_loaders;
-pub mod mnist_loader;
-pub mod cifar_loader;
+//pub mod mnist_loader;
+//pub mod cifar_loader;
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 

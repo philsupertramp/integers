@@ -32,9 +32,11 @@
 //!
 //! **Compile with `--release`** — CIFAR-10 images are 4× larger than MNIST.
 
+mod cifar_loader;
+
 use std::path::PathBuf;
 
-use integers::cifar_loader::load_cifar10_parquet;
+use crate::cifar_loader::load_cifar10_parquet;
 use integers::data::shuffled_indices;
 use integers::nn::{BatchNorm1D, BatchNorm2D, Conv2D, Dropout, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
 use integers::rng::XorShift64;
