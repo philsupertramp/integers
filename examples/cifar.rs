@@ -13,7 +13,7 @@
 //!
 //! # Usage
 //! ```sh
-//! cargo run --release --example cifar10 --features "parquet-support image-decode" \
+//! cargo run --release --example cifar --features "parquet-support image-decode" \
 //!     -- data/cifar10/train.parquet data/cifar10/test.parquet
 //! ```
 //!
@@ -36,8 +36,9 @@ use std::path::PathBuf;
 
 use integers::cifar_loader::load_cifar10_parquet;
 use integers::data::shuffled_indices;
-use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
+use integers::nn::{BatchNorm1D, BatchNorm2D, Conv2D, Dropout, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
 use integers::rng::XorShift64;
+use integers::dyadic::Dyadic;
 use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic};
 
 const CIFAR_CLASSES: [&str; 10] = [
@@ -91,18 +92,22 @@ fn main() {
     let mut model = Sequential::new();
     model.add(Conv2D::new(3, 16, 3, 3, 32, 32, SHIFT, SHIFT, 32)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(BatchNorm2D::new(16, 30, 30, SHIFT));
     model.add(ReLU::new());
     model.add(MaxPool2D::new(16, 30, 30, 2, 2));  // → 16×15×15
 
     model.add(Conv2D::new(16, 32, 3, 3, 15, 15, SHIFT, SHIFT, 32)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(BatchNorm2D::new(32, 13, 13, SHIFT));
     model.add(ReLU::new());
     model.add(MaxPool2D::new(32, 13, 13, 2, 2));  // → 32×6×6
 
     model.add(Flatten);
     model.add(Linear::new(1152, 128, SHIFT, SHIFT, 32)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(BatchNorm1D::new(128, SHIFT));
     model.add(ReLU::new());
+    model.add(Dropout::new(0.5));
     model.add(Linear::new(128, 10, SHIFT, SHIFT, 32)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
     model.add(Softmax::new(SHIFT));
@@ -114,7 +119,7 @@ fn main() {
     println!("  lr=2^(-{LR_SHIFT}),  momentum={MOM_SHIFT},  clip=2^{}",
         (GRAD_CLIP as f64).log2() as i32);
     println!();
-    println!("  Note: expect 50–65% final test accuracy without BatchNorm.");
+    println!("  Note: target ~55–65% test accuracy with BatchNorm + Dropout.");
     println!("  The early-stop fires at model accuracy ~80%+ (20 eval samples");
     println!("  is a weak signal — watch train accuracy for convergence).\n");
 
@@ -139,23 +144,35 @@ fn main() {
 
         let mut train_correct = 0usize;
 
+        model.set_training(true);
         for batch in train_indices.chunks(BATCH_SIZE) {
             model.zero_grad();
-            for &i in batch {
-                let x = sample_to_dyadic(&train.get_input(i).data,  shift);
-                let t = target_to_dyadic(&train.get_target(i).data, shift);
 
-                let y = model.forward(&x);
-                if argmax(&y) == train.labels[i] as usize { train_correct += 1; }
+            let batch_x: Vec<Vec<Dyadic>> = batch.iter()
+                .map(|&i| sample_to_dyadic(&train.get_input(i).data,  shift))
+                .collect();
+            let batch_t: Vec<Vec<Dyadic>> = batch.iter()
+                .map(|&i| target_to_dyadic(&train.get_target(i).data, shift))
+                .collect();
 
-                let g = cross_entropy_grad(&y, &t, shift);
-                model.backward(&g);
+            let batch_y = model.forward_batch(&batch_x);
+
+            for (&idx, y) in batch.iter().zip(batch_y.iter()) {
+                if argmax(y) == train.labels[idx] as usize { train_correct += 1; }
             }
+
+            let batch_g: Vec<Vec<Dyadic>> = batch_y.iter().zip(batch_t.iter())
+                .map(|(y, t)| cross_entropy_grad(y, t, shift))
+                .collect();
+
+            model.backward_batch(&batch_g);
             model.update(LR_SHIFT);
         }
 
         let train_acc = train_correct as f64 / N_TRAIN as f64 * 100.0;
 
+        // ── Evaluate on the fixed eval subset ──────────────────────────────────
+        model.set_training(false);
         let eval_correct: usize = eval_indices.iter().filter(|&&i| {
             let x = sample_to_dyadic(&test.get_input(i).data, shift);
             argmax(&model.forward(&x)) == test.labels[i] as usize
@@ -181,6 +198,7 @@ fn main() {
 
     // ── Full test evaluation ───────────────────────────────────────────────────
     println!("\nFull test evaluation ({} samples) …", test.len());
+    model.set_training(false);
     let mut conf = [[0usize; 10]; 10];
     for i in 0..test.len() {
         let x    = sample_to_dyadic(&test.get_input(i).data, shift);

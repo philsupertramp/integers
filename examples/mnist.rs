@@ -32,6 +32,7 @@ use integers::data::shuffled_indices;
 use integers::mnist_loader::load_mnist_auto;
 use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
 use integers::rng::XorShift64;
+use integers::dyadic::Dyadic;
 use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic};
 
 fn main() {
@@ -114,25 +115,39 @@ fn main() {
         // ── Mini-batch SGD ─────────────────────────────────────────────────────
         let mut train_correct = 0usize;
 
+        model.set_training(true);
         for batch in train_indices.chunks(BATCH_SIZE) {
             model.zero_grad();
 
-            for &i in batch {
-                let x = sample_to_dyadic(&train.get_input(i).data,  shift);
-                let t = target_to_dyadic(&train.get_target(i).data, shift);
+            // Assemble batch tensors.
+            let batch_x: Vec<Vec<Dyadic>> = batch.iter()
+                .map(|&i| sample_to_dyadic(&train.get_input(i).data,  shift))
+                .collect();
+            let batch_t: Vec<Vec<Dyadic>> = batch.iter()
+                .map(|&i| target_to_dyadic(&train.get_target(i).data, shift))
+                .collect();
 
-                let y = model.forward(&x);
-                if argmax(&y) == train.labels[i] as usize { train_correct += 1; }
+            // Forward (BatchNorm sees all N samples at once).
+            let batch_y = model.forward_batch(&batch_x);
 
-                let g = cross_entropy_grad(&y, &t, shift);
-                model.backward(&g);
+            for (n, (&idx, y)) in batch.iter().zip(batch_y.iter()).enumerate() {
+                if argmax(y) == train.labels[idx] as usize { train_correct += 1; }
+                let _ = n;
             }
+
+            // Compute loss gradients and backward.
+            let batch_g: Vec<Vec<Dyadic>> = batch_y.iter().zip(batch_t.iter())
+                .map(|(y, t)| cross_entropy_grad(y, t, shift))
+                .collect();
+
+            model.backward_batch(&batch_g);
             model.update(LR_SHIFT);
         }
 
         let train_acc = train_correct as f64 / N_TRAIN as f64 * 100.0;
 
         // ── Evaluate on the fixed eval subset ──────────────────────────────────
+        model.set_training(false);
         let eval_correct: usize = eval_indices.iter().filter(|&&i| {
             let x = sample_to_dyadic(&test.get_input(i).data, shift);
             argmax(&model.forward(&x)) == test.labels[i] as usize
@@ -177,6 +192,7 @@ fn main() {
 
     // ── Final full-test evaluation ─────────────────────────────────────────────
     println!("\nRunning final evaluation on the full test set ({} samples) …", test.len());
+    model.set_training(false);
     let mut conf = [[0usize; 10]; 10];
     for i in 0..test.len() {
         let x    = sample_to_dyadic(&test.get_input(i).data, shift);
