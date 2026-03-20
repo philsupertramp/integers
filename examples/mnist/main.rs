@@ -25,11 +25,12 @@
 //! cargo run --release --example mnist -- data/mnist
 //! cargo run --release --example mnist --features parquet-support
 //! ```
+mod mnist_loader;
+use crate::mnist_loader::load_mnist_auto;
 
 use std::path::PathBuf;
 
 use integers::data::shuffled_indices;
-use integers::mnist_loader::load_mnist_auto;
 use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
 use integers::rng::XorShift64;
 use integers::dyadic::Dyadic;

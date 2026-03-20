@@ -6,6 +6,7 @@
 //!
 //! To feed a sample into the neural network, use the bridge helpers in
 //! [`crate`] (`sample_to_dyadic` / `target_to_dyadic`).
+pub mod dataset_loaders;
 
 use std::io;
 
@@ -182,3 +183,4 @@ mod tests {
         assert_eq!(Dataset::argmax(&t), 1);
     }
 }
+

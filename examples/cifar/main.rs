@@ -24,11 +24,12 @@
 //! - 3 colour channels, more texture variation, viewpoint/lighting changes
 //! - Float networks with BatchNorm reach ~75–80%; we don't have BatchNorm
 //!
-//! With this engine, expect **50–65%** on the full test set with this shallow
-//! architecture and integer-only arithmetic. The early-stop criterion of
-//! "5× 100% on 20 eval samples" fires at ~80%+ model accuracy — 20 samples
-//! is a weak signal so the bar is lower than it sounds. Watch the train
-//! accuracy trend to understand convergence.
+//! With this engine (in the current state), expect **50–65%** on the full
+//! test set with this shallow architecture and integer-only arithmetic.
+//! The early-stop criterion of "5× 100% on 20 eval samples" fires at
+//! ~80%+ model accuracy — 20 samples is a weak signal so the bar is
+//! lower than it sounds. Watch the train accuracy trend to understand
+//! convergence.
 //!
 //! **Compile with `--release`** — CIFAR-10 images are 4× larger than MNIST.
 

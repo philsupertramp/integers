@@ -50,21 +50,17 @@
 //!     }
 //! }
 //! ```
-#[path = "lib/nn.rs"]
 pub mod nn;
-
-pub mod dyadic;
-pub mod tensor;
-pub mod quant;
-pub mod rng;
-
-#[path = "data/data.rs"]
 pub mod data;
 
-#[path = "data/dataset_loaders.rs"]
-pub mod dataset_loaders;
-//pub mod mnist_loader;
-//pub mod cifar_loader;
+#[path = "lib/dyadic.rs"]
+pub mod dyadic;
+#[path = "lib/tensor.rs"]
+pub mod tensor;
+#[path = "lib/quant.rs"]
+pub mod quant;
+#[path = "lib/rng.rs"]
+pub mod rng;
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 
