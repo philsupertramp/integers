@@ -21,9 +21,8 @@
 //! ```
 
 use integers::data::shuffled_indices;
-use integers::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
+use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
 use integers::nn::{Linear, ReLU, Sequential, Softmax};
-use integers::rng::XorShift64;
 use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic, TrainingReporter};
 
 fn main() {
@@ -81,12 +80,11 @@ fn main() {
     model.add(ReLU::new());
     model.add(Linear::new(8, ds.n_classes, SHIFT, SHIFT, BITS_OUT)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
-    model.add(Softmax::new(SHIFT));
+    //model.add(Softmax::new(SHIFT));
     model.summary();
     println!();
 
     // ── Training loop ─────────────────────────────────────────────────────────
-    let mut rng      = XorShift64::new(42);
     let mut reporter = TrainingReporter::new(EPOCHS, LOG_EVERY, shift);
     reporter.print_header();
 
@@ -94,7 +92,7 @@ fn main() {
         reporter.reset();
 
         // Online SGD (batch_size = 1), shuffled each epoch.
-        for &i in &shuffled_indices(ds.len(), &mut rng) {
+        for &i in &shuffled_indices(ds.len()) {
             let x = sample_to_dyadic(&ds.get_input(i).data,  shift);
             let t = target_to_dyadic(&ds.get_target(i).data, shift);
 

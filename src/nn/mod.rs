@@ -477,7 +477,7 @@ impl Dropout {
 
     fn sample_mask(len: usize, keep_prob_bits: u32) -> Vec<bool> {
         (0..len).map(|_| {
-            (crate::dyadic::rng_next() >> 32) as u32 >= keep_prob_bits
+            (crate::rng::rng_next() >> 32) as u32 >= keep_prob_bits
         }).collect()
     }
 

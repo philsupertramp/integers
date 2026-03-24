@@ -11,6 +11,7 @@ pub mod dataset_loaders;
 use std::io;
 
 use crate::{Scalar, Tensor};
+use crate::rng::{rng_range};
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
@@ -18,7 +19,7 @@ use crate::{Scalar, Tensor};
 pub enum DataError {
     Io(io::Error),
     InvalidMagic { expected: u32, found: u32 },
-    DimensionMismatch { images: usize, labels: usize },
+    DimensionMismatch { samples: usize, labels: usize },
     ParseError(String),
     EmptyDataset,
 }
@@ -32,8 +33,8 @@ impl std::fmt::Display for DataError {
                 write!(f, "IO error: {e}"),
             DataError::InvalidMagic { expected, found } =>
                 write!(f, "Invalid magic number: expected {expected:#010x}, found {found:#010x}"),
-            DataError::DimensionMismatch { images, labels } =>
-                write!(f, "Image count ({images}) does not match label count ({labels})"),
+            DataError::DimensionMismatch { samples, labels } =>
+                write!(f, "Samples count ({samples}) does not match label count ({labels})"),
             DataError::ParseError(s) =>
                 write!(f, "Parse error: {s}"),
             DataError::EmptyDataset =>
@@ -143,10 +144,10 @@ impl<S: Scalar> Dataset<S> {
 /// let idx = dyadic_nn::data::shuffled_indices(1000, &mut rng);
 /// for batch in idx.chunks(32) { /* train on batch */ }
 /// ```
-pub fn shuffled_indices(n: usize, rng: &mut crate::XorShift64) -> Vec<usize> {
+pub fn shuffled_indices(n: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..n).collect();
     for i in (1..n).rev() {
-        let j = rng.gen_range((i + 1) as u32) as usize;
+        let j = rng_range((i + 1) as u32) as usize;
         idx.swap(i, j);
     }
     idx

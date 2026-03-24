@@ -1,4 +1,4 @@
-//! `dyadic_nn` — Integer neural network training on dyadic rational arithmetic.
+//! `integers` — Integer neural network training on dyadic rational arithmetic.
 //!
 //! # Module map
 //!
@@ -16,11 +16,11 @@
 //! # Quick-start
 //!
 //! ```no_run
-//! use dyadic_nn::nn::{Sequential, Linear, ReLU, Softmax};
-//! use dyadic_nn::dataset_loaders::{DatasetBuilder, QuantizationMethod};
-//! use dyadic_nn::{sample_to_dyadic, target_to_dyadic, cross_entropy_grad, argmax};
-//! use dyadic_nn::data::shuffled_indices;
-//! use dyadic_nn::rng::XorShift64;
+//! use integers::nn::{Sequential, Linear, ReLU, Softmax};
+//! use integers::dataset_loaders::{DatasetBuilder, QuantizationMethod};
+//! use integers::{sample_to_dyadic, target_to_dyadic, cross_entropy_grad, argmax};
+//! use integers::data::shuffled_indices;
+//! use integers::rng::XorShift64;
 //!
 //! const S: u32 = 7;
 //!
@@ -114,7 +114,7 @@ pub fn mse_grad(output: &[Dyadic], target: &[Dyadic]) -> Vec<Dyadic> {
 ///
 /// # Example
 /// ```no_run
-/// # use dyadic_nn::{Dyadic, cross_entropy_grad};
+/// # use integers::{Dyadic, cross_entropy_grad};
 /// # let y: Vec<Dyadic> = vec![];
 /// # let t: Vec<Dyadic> = vec![];
 /// let g = cross_entropy_grad(&y, &t, 7);
@@ -149,7 +149,7 @@ pub fn argmax(output: &[Dyadic]) -> usize {
 ///
 /// # Usage
 /// ```no_run
-/// # use dyadic_nn::{TrainingReporter};
+/// # use integers::{TrainingReporter};
 /// let mut reporter = TrainingReporter::new(500, 50);   // 500 epochs, log every 50
 /// reporter.print_header();
 ///

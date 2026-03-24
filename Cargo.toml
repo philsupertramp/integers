@@ -9,11 +9,13 @@ path = "examples/mnist/main.rs"
 
 [[example]]
 name = "iris"
-path = "examples/iris/main.rs"
+path = "examples/iris.rs"
 
 [[example]]
 name              = "cifar"
+path              = "examples/cifar/main.rs"
 required-features = ["parquet-support", "image-decode"]
+
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
 rand = "0.8"
@@ -24,7 +26,7 @@ rand = "0.8"
 version  = "58"
 optional = true
 default-features = false
-features = ["snap"]
+features = ["snap", "arrow"]
  
 [dependencies.arrow]
 version  = "58"

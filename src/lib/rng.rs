@@ -6,8 +6,11 @@
 
 /// A 64-bit XorShift PRNG.
 ///
-/// Period: 2⁶⁴ − 1 (all non-zero 64-bit states are visited).
+/// Period: 2^{64} − 1 (all non-zero 64-bit states are visited).
 /// Seed must be non-zero.
+use std::cell::Cell;
+
+#[derive(Clone, Copy)]
 pub struct XorShift64 {
     state: u64,
 }
@@ -41,6 +44,44 @@ impl XorShift64 {
     pub fn gen_range(&mut self, n: u32) -> u32 {
         (self.next_u64() % n as u64) as u32
     }
+}
+
+
+// ─── Thread-local XorShift64 RNG ─────────────────────────────────────────────
+
+// Seeded with a Weyl-sequence constant — guaranteed non-zero.
+thread_local! {
+    static RNG: Cell<XorShift64> = Cell::new(XorShift64::new(1337));
+}
+
+/// Advance the thread-local XorShift64 state and return the next `u64`.
+#[inline(always)]
+pub(crate) fn rng_next() -> u64 {
+    RNG.with(|c| {
+        let mut x = c.get();
+        let val = x.next_u64();
+        c.set(x);
+        val
+    })
+}
+
+#[inline(always)]
+pub(crate) fn rng_range(n: u32) -> u32 {
+    RNG.with(|c| {
+        c.get().gen_range(n)
+    })
+}
+
+/// Seed the thread-local RNG.  Call this at the start of each thread if you
+/// need reproducible stochastic rounding (e.g. in tests).
+pub fn seed_rng(s: u64) {
+    assert!(s != 0, "XorShift64 requires a non-zero seed");
+    RNG.with(|c| {
+        let mut rng = c.get();
+        rng.state = s;
+        c.set(rng);
+        rng
+    });
 }
 
 #[cfg(test)]

@@ -239,6 +239,7 @@ pub fn probe_format(dir: &Path) -> Option<MnistFormat> {
     #[cfg(feature = "parquet-support")]
     {
         for (train_name, test_name) in &[
+            ("mnist_train.parquet", "mnist_test.parquet"),
             ("train.parquet", "test.parquet"),
             ("train-00000-of-00001.parquet", "test-00000-of-00001.parquet"),
         ] {
