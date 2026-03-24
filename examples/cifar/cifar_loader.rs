@@ -28,8 +28,8 @@ use std::time::Instant;
 use parquet::column::reader::ColumnReader;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
+use integers::{Dyadic, Tensor};
 use integers::data::{DataError, DataResult, Dataset};
-use integers::tensor::Tensor;
 
 // ─── Schema detection ─────────────────────────────────────────────────────────
 
@@ -112,12 +112,12 @@ pub fn detect_schema(path: &Path) -> DataResult<CifarSchema> {
 
 /// Load a CIFAR-10 split from a parquet file, auto-detecting the schema.
 ///
-/// Returns a `Dataset<i32>` with:
+/// Returns a `Dataset` with:
 /// - `inputs`  `[n, 3072]` — channel-first (R plane, G plane, B plane)
 /// - `labels`  class indices `0..10`
 /// - `targets` one-hot, hot bit = 127
 /// - `input_shift = 7`
-pub fn load_cifar10_parquet(path: &Path) -> DataResult<Dataset<i32>> {
+pub fn load_cifar10_parquet(path: &Path) -> DataResult<Dataset> {
     let schema = detect_schema(path)?;
     match schema {
         CifarSchema::ByteArrayImage { image_leaf, label_leaf } =>
@@ -129,13 +129,13 @@ pub fn load_cifar10_parquet(path: &Path) -> DataResult<Dataset<i32>> {
 
 // ─── ByteArray (HuggingFace PNG) path ─────────────────────────────────────────
 
-fn load_byte_array(path: &Path, img_leaf: usize, lbl_leaf: usize) -> DataResult<Dataset<i32>> {
+fn load_byte_array(path: &Path, img_leaf: usize, lbl_leaf: usize) -> DataResult<Dataset> {
     let t0     = Instant::now();
     let reader = open_reader(path)?;
     let meta   = reader.metadata();
     let n_rows = meta.file_metadata().num_rows() as usize;
 
-    let mut inp_data   = Vec::<i32>::with_capacity(n_rows * 3072);
+    let mut inp_data   = Vec::<Dyadic>::with_capacity(n_rows * 3072);
     let mut label_data = Vec::<u8>::with_capacity(n_rows);
 
     for rg_idx in 0..meta.num_row_groups() {
@@ -175,7 +175,7 @@ fn load_flat(
     first_leaf: usize,
     n_pixels:   usize,
     lbl_leaf:   usize,
-) -> DataResult<Dataset<i32>> {
+) -> DataResult<Dataset> {
     let t0     = Instant::now();
     let reader = open_reader(path)?;
     let meta   = reader.metadata();
@@ -225,10 +225,10 @@ fn load_flat(
     }
 
     let n = label_data.len();
-    let mut inp_data = vec![0i32; n * n_pixels];
+    let mut inp_data = vec![Dyadic::new(0, 7); n * n_pixels];
     for (ci, col) in channels.iter().enumerate() {
         for (ri, &v) in col.iter().enumerate() {
-            inp_data[ri * n_pixels + ci] = v;
+            inp_data[ri * n_pixels + ci].v = v;
         }
     }
 
@@ -290,7 +290,7 @@ fn norm(p: u8) -> i32 {
 }
 
 /// Decode PNG bytes → channel-first `[R…, G…, B…]` normalised i32 (3072 values).
-fn decode_png(bytes: &[u8]) -> DataResult<Vec<i32>> {
+fn decode_png(bytes: &[u8]) -> DataResult<Vec<Dyadic>> {
     #[cfg(feature = "image-decode")]
     {
         use image::ImageReader;
@@ -309,11 +309,11 @@ fn decode_png(bytes: &[u8]) -> DataResult<Vec<i32>> {
         // PNG is HWC [R,G,B, R,G,B, …] → convert to CHW.
         let raw  = img.as_raw();
         let npix = 1024usize;
-        let mut out = vec![0i32; 3072];
+        let mut out = vec![Dyadic::new(0, 7); 3072];
         for i in 0..npix {
-            out[i]              = norm(raw[i * 3]);
-            out[npix + i]       = norm(raw[i * 3 + 1]);
-            out[2 * npix + i]   = norm(raw[i * 3 + 2]);
+            out[i].v              = norm(raw[i * 3]);
+            out[npix + i].v       = norm(raw[i * 3 + 1]);
+            out[2 * npix + i].v   = norm(raw[i * 3 + 2]);
         }
         Ok(out)
     }
@@ -336,30 +336,31 @@ fn open_reader(path: &Path) -> DataResult<SerializedFileReader<File>> {
 }
 
 fn finish(
-    inp_data:   Vec<i32>,
+    inp_data:   Vec<Dyadic>,
     label_data: Vec<u8>,
     t0:         Instant,
     kind:       &str,
-) -> DataResult<Dataset<i32>> {
+) -> DataResult<Dataset> {
     if label_data.is_empty() { return Err(DataError::EmptyDataset); }
 
     let n         = label_data.len();
     let n_pixels  = inp_data.len() / n;
     let n_classes = 10;
+    let input_shift = 7;
 
-    let mut tgt = vec![0i32; n * n_classes];
+    let mut tgt = vec![Dyadic::new(0, 7); n * n_classes];
     for (i, &lbl) in label_data.iter().enumerate() {
-        tgt[i * n_classes + lbl as usize] = 127;
+        tgt[i * n_classes + lbl as usize].v = 127;
     }
 
     eprintln!("  [CIFAR-10 {kind}] loaded {n} samples in {}ms",
         t0.elapsed().as_millis());
 
-    Ok(Dataset::<i32> {
+    Ok(Dataset {
         inputs:      Tensor::from_vec(inp_data, vec![n, n_pixels]),
         labels:      label_data,
         targets:     Tensor::from_vec(tgt, vec![n, n_classes]),
         n_classes,
-        input_shift: 7,
+        input_shift: input_shift,
     })
 }

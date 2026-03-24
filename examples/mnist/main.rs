@@ -94,7 +94,7 @@ fn main() {
     // Using a separate RNG seeded independently so the eval set doesn't depend
     // on how many training shuffles have been performed.
     let mut eval_rng  = XorShift64::new(0xdeadbeef);
-    let eval_indices: Vec<usize> = shuffled_indices(test.len(), &mut eval_rng)
+    let eval_indices: Vec<usize> = shuffled_indices(test.len())
         .into_iter().take(N_EVAL).collect();
 
     // ── Training loop ─────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ fn main() {
     'training: for epoch in 0..MAX_EPOCHS {
 
         // ── Sample N_TRAIN indices from the training pool ──────────────────────
-        let train_indices: Vec<usize> = shuffled_indices(train.len(), &mut train_rng)
+        let train_indices: Vec<usize> = shuffled_indices(train.len())
             .into_iter().take(N_TRAIN).collect();
 
         // ── Mini-batch SGD ─────────────────────────────────────────────────────
@@ -122,10 +122,10 @@ fn main() {
 
             // Assemble batch tensors.
             let batch_x: Vec<Vec<Dyadic>> = batch.iter()
-                .map(|&i| sample_to_dyadic(&train.get_input(i).data,  shift))
+                .map(|&i| train.get_input(i).data)
                 .collect();
             let batch_t: Vec<Vec<Dyadic>> = batch.iter()
-                .map(|&i| target_to_dyadic(&train.get_target(i).data, shift))
+                .map(|&i| train.get_target(i).data)
                 .collect();
 
             // Forward (BatchNorm sees all N samples at once).
@@ -150,7 +150,7 @@ fn main() {
         // ── Evaluate on the fixed eval subset ──────────────────────────────────
         model.set_training(false);
         let eval_correct: usize = eval_indices.iter().filter(|&&i| {
-            let x = sample_to_dyadic(&test.get_input(i).data, shift);
+            let x = test.get_input(i).data;
             argmax(&model.forward(&x)) == test.labels[i] as usize
         }).count();
 
@@ -196,7 +196,7 @@ fn main() {
     model.set_training(false);
     let mut conf = [[0usize; 10]; 10];
     for i in 0..test.len() {
-        let x    = sample_to_dyadic(&test.get_input(i).data, shift);
+        let x    = test.get_input(i).data;
         let pred = argmax(&model.forward(&x));
         conf[test.labels[i] as usize][pred] += 1;
     }

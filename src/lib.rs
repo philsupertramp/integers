@@ -4,9 +4,8 @@
 //!
 //! | Module               | Contents |
 //! |----------------------|----------|
-//! | [`dyadic`]           | `Dyadic` type and all four arithmetic operations |
+//! | [`dyadic`]           | `Dyadic` and `Tensor` type and all four arithmetic operations |
 //! | [`nn`]               | `Layer` trait, `Sequential`, `Linear`, `ReLU`, `Softmax` |
-//! | [`tensor`]           | Generic `Tensor<S>` and the `Scalar` trait |
 //! | [`quant`]            | Per-column quantisation strategies |
 //! | [`rng`]              | `XorShift64` — deterministic integer PRNG for shuffling |
 //! | [`data`]             | `Dataset<S>` struct and `shuffled_indices` |
@@ -55,8 +54,6 @@ pub mod data;
 
 #[path = "lib/dyadic.rs"]
 pub mod dyadic;
-#[path = "lib/tensor.rs"]
-pub mod tensor;
 #[path = "lib/quant.rs"]
 pub mod quant;
 #[path = "lib/rng.rs"]
@@ -64,8 +61,7 @@ pub mod rng;
 
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 
-pub use dyadic::Dyadic;
-pub use tensor::{Tensor, Scalar};
+pub use dyadic::{Dyadic, Tensor};
 pub use rng::XorShift64;
 
 // ─── Dataset → network bridge ─────────────────────────────────────────────────

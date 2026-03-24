@@ -21,11 +21,10 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::marker::PhantomData;
 use std::path::Path;
 
 use crate::quant::{minmax_quantize, none_quantize, standard_score_quantize};
-use crate::{Scalar, Tensor};
+use crate::dyadic::{Dyadic, Tensor};
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -81,24 +80,23 @@ impl DatasetConfig {
 // ─── Builder ──────────────────────────────────────────────────────────────────
 
 /// Fluent builder — mirrors `torch.utils.data` conventions.
-pub struct DatasetBuilder<S: Scalar> {
+pub struct DatasetBuilder {
     path:     std::path::PathBuf,
     config:   DatasetConfig,
-    _phantom: PhantomData<S>,
 }
 
-impl<S: Scalar> DatasetBuilder<S> {
+impl DatasetBuilder {
     pub fn new(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::default(), _phantom: PhantomData }
+        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::default(), }
     }
     pub fn new_csv(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::with_format(FileFormat::CSV), _phantom: PhantomData }
+        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::with_format(FileFormat::CSV), }
     }
     pub fn new_tsv(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::with_format(FileFormat::TSV), _phantom: PhantomData }
+        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::with_format(FileFormat::TSV), }
     }
     pub fn new_parquet(path: impl AsRef<Path>) -> Self {
-        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::with_format(FileFormat::Parquet), _phantom: PhantomData }
+        Self { path: path.as_ref().to_path_buf(), config: DatasetConfig::with_format(FileFormat::Parquet), }
     }
 
     pub fn format(mut self, fmt: FileFormat) -> Self { self.config.format = fmt; self }
@@ -110,14 +108,14 @@ impl<S: Scalar> DatasetBuilder<S> {
     pub fn with_num_classes(mut self, n: usize) -> Self { self.config.num_classes = Some(n); self }
 
     /// Load the dataset according to the current configuration.
-    pub fn load(self) -> crate::data::DataResult<crate::data::Dataset<S>> {
+    pub fn load(self) -> crate::data::DataResult<crate::data::Dataset> {
         match self.config.format {
             FileFormat::CSV | FileFormat::TSV =>
-                load_csv::<S>(&self.path, self.config),
+                load_csv(&self.path, self.config),
 
             FileFormat::Parquet => {
                 #[cfg(feature = "parquet-support")]
-                { return load_parquet::<S>(&self.path, self.config); }
+                { return load_parquet(&self.path, self.config); }
 
                 #[cfg(not(feature = "parquet-support"))]
                 Err(crate::data::DataError::ParseError(
@@ -131,10 +129,10 @@ impl<S: Scalar> DatasetBuilder<S> {
 
 // ─── CSV / TSV loader ─────────────────────────────────────────────────────────
 
-fn load_csv<S: Scalar>(
+fn load_csv(
     path: &Path,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset<S>> {
+) -> crate::data::DataResult<crate::data::Dataset> {
     use crate::data::DataError;
 
     let delimiter = match config.format {
@@ -207,10 +205,10 @@ fn load_csv<S: Scalar>(
 // ─── Parquet loader (feature-gated) ──────────────────────────────────────────
 
 #[cfg(feature = "parquet-support")]
-fn load_parquet<S: Scalar>(
+fn load_parquet(
     path: &Path,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset<S>> {
+) -> crate::data::DataResult<crate::data::Dataset> {
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::Field;
     use crate::data::DataError;
@@ -284,11 +282,11 @@ fn load_parquet<S: Scalar>(
 
 // ─── Shared finalization ──────────────────────────────────────────────────────
 
-fn finalize_dataset<S: Scalar>(
+fn finalize_dataset(
     raw_features: Vec<Vec<f32>>,
     labels: Vec<u8>,
     config: DatasetConfig,
-) -> crate::data::DataResult<crate::data::Dataset<S>> {
+) -> crate::data::DataResult<crate::data::Dataset> {
     let n_samples  = labels.len();
     let n_features = raw_features.first().map_or(0, |r| r.len());
     let n_classes  = config.num_classes
@@ -312,26 +310,28 @@ fn finalize_dataset<S: Scalar>(
         columns.push(quantized);
     }
 
+    let shift_u32 = input_shift.max(0) as u32;
+
     // Row-major input tensor [n_samples × n_features]
-    let mut inp_data = vec![S::default(); n_samples * n_features];
+    let mut inp_data = vec![Dyadic::new(0, shift_u32); n_samples * n_features];
     for (si, row) in inp_data.chunks_exact_mut(n_features).enumerate() {
         for (fi, cell) in row.iter_mut().enumerate() {
-            *cell = S::from_quantized(columns[fi][si]);
+            *cell = Dyadic::new(columns[fi][si], shift_u32);
         }
     }
 
     // One-hot target tensor [n_samples × n_classes], hot bit = 127
-    let mut tgt_data = vec![S::default(); n_samples * n_classes];
+    let mut tgt_data = vec![Dyadic::new(0, shift_u32); n_samples * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt_data[i * n_classes + lbl as usize] = S::from_quantized(127);
+        tgt_data[i * n_classes + lbl as usize] = Dyadic::new(127, shift_u32);
     }
 
-    Ok(crate::data::Dataset::<S> {
-        inputs:      Tensor::<S>::from_vec(inp_data, vec![n_samples, n_features]),
+    Ok(crate::data::Dataset {
+        inputs:      Tensor::from_vec(inp_data, vec![n_samples, n_features]),
         labels,
-        targets:     Tensor::<S>::from_vec(tgt_data, vec![n_samples, n_classes]),
+        targets:     Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
-        input_shift: S::dataset_input_shift(input_shift),
+        input_shift: input_shift,
     })
 }
 

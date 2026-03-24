@@ -23,7 +23,7 @@
 use integers::data::shuffled_indices;
 use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
 use integers::nn::{Linear, ReLU, Sequential, Softmax};
-use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic, TrainingReporter};
+use integers::{argmax, cross_entropy_grad, TrainingReporter};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -41,7 +41,7 @@ fn main() {
 
     // ── Load dataset ──────────────────────────────────────────────────────────
     println!("Loading Iris train dataset from '{train_path}' …");
-    let ds = DatasetBuilder::<i32>::new_csv(train_path)
+    let ds = DatasetBuilder::new_csv(train_path)
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
@@ -53,7 +53,7 @@ fn main() {
             std::process::exit(1);
         });
     println!("Loading Iris test dataset from '{test_path}' …");
-    let test = DatasetBuilder::<i32>::new_csv(test_path)
+    let test = DatasetBuilder::new_csv(test_path)
         .format(FileFormat::TSV)
         .with_features(vec![0, 1, 2, 3])
         .with_label_column(4)
@@ -93,8 +93,8 @@ fn main() {
 
         // Online SGD (batch_size = 1), shuffled each epoch.
         for &i in &shuffled_indices(ds.len()) {
-            let x = sample_to_dyadic(&ds.get_input(i).data,  shift);
-            let t = target_to_dyadic(&ds.get_target(i).data, shift);
+            let x = ds.get_input(i).data;
+            let t = ds.get_target(i).data;
 
             model.zero_grad();
             let y = model.forward(&x);
@@ -109,7 +109,7 @@ fn main() {
         }
         // Evaluate on the test set at the end of each epoch.
         let test_correct: usize = (0..test.len()).filter(|&i| {
-            let x = sample_to_dyadic(&test.get_input(i).data, shift);
+            let x = test.get_input(i).data;
             argmax(&model.forward(&x)) == test.labels[i] as usize
         }).count();
         let test_acc = test_correct as f64 / test.len() as f64 * 100.0;
@@ -119,7 +119,7 @@ fn main() {
 
     // ── Final evaluation ──────────────────────────────────────────────────────
     let correct: usize = (0..ds.len()).filter(|&i| {
-        let x = sample_to_dyadic(&ds.get_input(i).data, shift);
+        let x = ds.get_input(i).data;
         argmax(&model.forward(&x)) == ds.labels[i] as usize
     }).count();
 
@@ -133,7 +133,7 @@ fn main() {
     let nc = ds.n_classes;
     let mut per_class = vec![(0usize, 0usize); nc]; // (correct, total)
     for i in 0..ds.len() {
-        let x   = sample_to_dyadic(&ds.get_input(i).data, shift);
+        let x   = ds.get_input(i).data;
         let y   = model.forward(&x);
         let cls = ds.labels[i] as usize;
         per_class[cls].1 += 1;

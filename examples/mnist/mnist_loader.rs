@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use integers::data::{DataError, DataResult, Dataset};
-use integers::tensor::Tensor;
+use integers::dyadic::{Dyadic, Tensor};
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
@@ -19,10 +19,10 @@ fn normalize_pixel(p: u8) -> i32 {
     scaled.round().clamp(-127.0, 127.0) as i32
 }
 
-fn build_targets(labels: &[u8], n_classes: usize) -> Vec<i32> {
-    let mut tgt = vec![0i32; labels.len() * n_classes];
+fn build_targets(labels: &[u8], n_classes: usize, input_shift: u32) -> Vec<Dyadic> {
+    let mut tgt = vec![Dyadic::new(0, input_shift); labels.len() * n_classes];
     for (i, &lbl) in labels.iter().enumerate() {
-        tgt[i * n_classes + lbl as usize] = 127;
+        tgt[i * n_classes + lbl as usize].v = 127;
     }
     tgt
 }
@@ -46,7 +46,7 @@ pub fn load_mnist_idx(
     images_path: &Path,
     labels_path: &Path,
     normalize:   bool,
-) -> DataResult<Dataset<i32>> {
+) -> DataResult<Dataset> {
     let t0 = Instant::now();
 
     let mut img = BufReader::new(File::open(images_path)?);
@@ -69,26 +69,26 @@ pub fn load_mnist_idx(
     }
     let n_labels = read_u32_be(&mut lbl)? as usize;
     if n_images != n_labels {
-        return Err(DataError::DimensionMismatch { images: n_images, labels: n_labels });
+        return Err(DataError::DimensionMismatch { samples: n_images, labels: n_labels });
     }
     let mut label_bytes = vec![0u8; n_labels];
     lbl.read_exact(&mut label_bytes)?;
 
     let (inp_data, input_shift) = if normalize {
-        (pixel_bytes.iter().map(|&p| normalize_pixel(p)).collect(), 7)
+        (pixel_bytes.iter().map(|&p| Dyadic::new(normalize_pixel(p), 7)).collect(), 7)
     } else {
-        (pixel_bytes.iter().map(|&p| p as i32).collect(), 0)
+        (pixel_bytes.iter().map(|&p| Dyadic::new(p as i32, 0)).collect(), 0)
     };
 
-    let tgt_data = build_targets(&label_bytes, 10);
+    let tgt_data = build_targets(&label_bytes, 10, input_shift);
     eprintln!("  [IDX] loaded {n_images} samples in {}ms", t0.elapsed().as_millis());
 
-    Ok(Dataset::<i32> {
+    Ok(Dataset {
         inputs:      Tensor::from_vec(inp_data,  vec![n_images, n_pixels]),
         labels:      label_bytes,
         targets:     Tensor::from_vec(tgt_data,  vec![n_labels, 10]),
         n_classes:   10,
-        input_shift,
+        input_shift: input_shift as i32,
     })
 }
 
@@ -104,7 +104,7 @@ pub fn load_mnist_idx(
 pub fn load_mnist_parquet(
     path:      &Path,
     normalize: bool,
-) -> DataResult<Dataset<i32>> {
+) -> DataResult<Dataset> {
     use parquet::column::reader::ColumnReader;
     use parquet::file::reader::{FileReader, SerializedFileReader};
 
@@ -116,6 +116,7 @@ pub fn load_mnist_parquet(
     let meta         = reader.metadata();
     let n_rows_total = meta.file_metadata().num_rows() as usize;
     let fields       = meta.file_metadata().schema().get_fields();
+    let input_shift = if normalize { 7 } else { 0 };
 
     // Locate image and label columns by name.
     let img_col = fields.iter().position(|f| matches!(f.name(), "image" | "img"))
@@ -127,7 +128,7 @@ pub fn load_mnist_parquet(
             format!("No label column found. Columns: {:?}",
                 fields.iter().map(|f| f.name()).collect::<Vec<_>>())))?;
 
-    let mut inp_data   = Vec::<i32>::with_capacity(n_rows_total * 784);
+    let mut inp_data   = Vec::<Dyadic>::with_capacity(n_rows_total * 784);
     let mut label_data = Vec::<u8>::with_capacity(n_rows_total);
 
     for rg_idx in 0..meta.num_row_groups() {
@@ -156,7 +157,8 @@ pub fn load_mnist_parquet(
                             format!("Expected 784 bytes per image, got {}", bytes.len())));
                     }
                     inp_data.extend(bytes.iter().map(|&p| {
-                        if normalize { normalize_pixel(p) } else { p as i32 }
+                        let val = if normalize { normalize_pixel(p) } else { p as i32 };
+                        Dyadic::new(val, input_shift)
                     }));
                 }
             }
@@ -192,17 +194,16 @@ pub fn load_mnist_parquet(
 
     let n        = label_data.len();
     let n_pixels = inp_data.len() / n;
-    let input_shift = if normalize { 7 } else { 0 };
-    let tgt_data = build_targets(&label_data, 10);
+    let tgt_data = build_targets(&label_data, 10, input_shift);
 
     eprintln!("  [Parquet] loaded {n} samples in {}ms", t0.elapsed().as_millis());
 
-    Ok(Dataset::<i32> {
+    Ok(Dataset {
         inputs:      Tensor::from_vec(inp_data,  vec![n, n_pixels]),
         labels:      label_data,
         targets:     Tensor::from_vec(tgt_data,  vec![n, 10]),
         n_classes:   10,
-        input_shift,
+        input_shift: input_shift as i32,
     })
 }
 
@@ -258,7 +259,7 @@ pub fn probe_format(dir: &Path) -> Option<MnistFormat> {
 pub fn load_mnist_auto(
     dir:       &Path,
     normalize: bool,
-) -> DataResult<(Dataset<i32>, Dataset<i32>)> {
+) -> DataResult<(Dataset, Dataset)> {
     match probe_format(dir) {
         Some(MnistFormat::Idx { train_images, train_labels, test_images, test_labels }) => {
             println!("  Format: IDX binary");

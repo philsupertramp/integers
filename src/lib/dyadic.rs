@@ -26,7 +26,7 @@ use crate::rng::rng_next;
 /// The representation is non-unique: `(3, 2)`, `(6, 3)` and `(12, 4)` all
 /// encode `3/4`.  `s` is restricted to `u32` (>= 0), so all values satisfy
 /// `|decoded| <= |v|`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct Dyadic {
     /// Raw integer mantissa.
     pub v: i32,
@@ -162,6 +162,45 @@ pub fn ste_clip(grad: Dyadic, v_y: i32, q_min: i32, q_max: i32) -> Dyadic {
 /// Combined STE for `ℛ`: SR is treated as identity, clip gates the gradient.
 pub fn ste_requantize(grad_y: Dyadic, v_y: i32, q_min: i32, q_max: i32) -> Dyadic {
     ste_clip(grad_y, v_y, q_min, q_max)
+}
+
+
+// ─── Tensor ───────────────────────────────────────────────────────────────────
+
+/// A row-major n-dimensional array of `Dyadic` elements.
+///
+/// Indexing convention: `shape = [d₀, d₁, …, dₙ]`, element `[i₀, i₁, …, iₙ]`
+/// lives at `data[i₀·(d₁·…·dₙ) + i₁·(d₂·…·dₙ) + … + iₙ]`.
+#[derive(Clone, Debug)]
+pub struct Tensor {
+    pub data:  Vec<Dyadic>,
+    pub shape: Vec<usize>,
+}
+
+impl Tensor {
+    /// Construct from a flat buffer and a shape.  Panics in debug mode if the
+    /// buffer length does not match the product of the shape dimensions.
+    pub fn from_vec(data: Vec<Dyadic>, shape: Vec<usize>) -> Self {
+        debug_assert_eq!(
+            data.len(),
+            shape.iter().product::<usize>(),
+            "Tensor::from_vec: buffer length {} ≠ shape product {}",
+            data.len(), shape.iter().product::<usize>(),
+        );
+        Self { data, shape }
+    }
+
+    /// Allocate an all-zero tensor with the given shape.
+    pub fn zeros(shape: Vec<usize>) -> Self {
+        let n = shape.iter().product();
+        Self { data: vec![Dyadic::new(0, 0); n], shape }
+    }
+
+    /// Total number of elements.
+    #[inline] pub fn len(&self) -> usize { self.data.len() }
+
+    /// `true` if the tensor has no elements.
+    #[inline] pub fn is_empty(&self) -> bool { self.data.is_empty() }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

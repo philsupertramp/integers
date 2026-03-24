@@ -1,7 +1,7 @@
 //! Quick smoke-test: train a dyadic integer network on XOR.
 //! For the real examples run `cargo run --example iris` or `cargo run --example mnist`.
 
-use integers::{argmax, mse_grad, sample_to_dyadic, target_to_dyadic, Dyadic};
+use integers::{argmax, mse_grad, Dyadic};
 use integers::nn::{Linear, ReLU, Sequential};
 
 const SHIFT: u32 = 7;

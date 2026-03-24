@@ -10,7 +10,7 @@ pub mod dataset_loaders;
 
 use std::io;
 
-use crate::{Scalar, Tensor};
+use crate::dyadic::{Dyadic, Tensor};
 use crate::rng::{rng_range};
 
 // ─── Error type ───────────────────────────────────────────────────────────────
@@ -60,16 +60,16 @@ pub type DataResult<T> = Result<T, DataError>;
 /// | `labels`     | `[n_samples]`            | class index `0..n_classes`     |
 /// | `targets`    | `[n_samples, n_classes]` | one-hot, hot bit = 127         |
 /// | `input_shift`| scalar                   | dyadic scale exponent for inputs |
-pub struct Dataset<S: Scalar> {
-    pub inputs:      Tensor<S>,
+pub struct Dataset {
+    pub inputs:      Tensor,
     pub labels:      Vec<u8>,
-    pub targets:     Tensor<S>,
+    pub targets:     Tensor,
     pub n_classes:   usize,
     /// Dyadic scale exponent `s` such that decoded value = mantissa · 2⁻ˢ.
     pub input_shift: i32,
 }
 
-impl<S: Scalar> Dataset<S> {
+impl Dataset {
     pub fn len(&self) -> usize { self.labels.len() }
     pub fn is_empty(&self) -> bool { self.labels.is_empty() }
 
@@ -78,47 +78,47 @@ impl<S: Scalar> Dataset<S> {
     }
 
     /// Return a single input row as a `[1, n_features]` tensor.
-    pub fn get_input(&self, idx: usize) -> Tensor<S> {
+    pub fn get_input(&self, idx: usize) -> Tensor {
         let nf    = self.n_features();
         let start = idx * nf;
-        Tensor::<S>::from_vec(
+        Tensor::from_vec(
             self.inputs.data[start..start + nf].to_vec(),
             vec![1, nf],
         )
     }
 
     /// Return a single one-hot target row as a `[1, n_classes]` tensor.
-    pub fn get_target(&self, idx: usize) -> Tensor<S> {
+    pub fn get_target(&self, idx: usize) -> Tensor {
         let nc    = self.n_classes;
         let start = idx * nc;
-        Tensor::<S>::from_vec(
+        Tensor::from_vec(
             self.targets.data[start..start + nc].to_vec(),
             vec![1, nc],
         )
     }
 
     /// Predicted class from a `[1, n_classes]` output tensor (argmax).
-    pub fn argmax(output: &Tensor<S>) -> u8 {
+    pub fn argmax(output: &Tensor) -> u8 {
         let (max_idx, _) = output.data
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| {
                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .unwrap_or((0, &S::default()));
+            .unwrap_or((0, &Dyadic::new(0, 0)));
         max_idx as u8
     }
 
     /// Build a mini-batch from the given sample indices.
     ///
     /// Returns `(inputs [batch, n_features], targets [batch, n_classes])`.
-    pub fn minibatch(&self, indices: &[usize]) -> (Tensor<S>, Tensor<S>) {
+    pub fn minibatch(&self, indices: &[usize]) -> (Tensor, Tensor) {
         let nf = self.n_features();
         let nc = self.n_classes;
         let b  = indices.len();
 
-        let mut inp_data = Vec::<S>::with_capacity(b * nf);
-        let mut tgt_data = Vec::<S>::with_capacity(b * nc);
+        let mut inp_data = Vec::<Dyadic>::with_capacity(b * nf);
+        let mut tgt_data = Vec::<Dyadic>::with_capacity(b * nc);
 
         for &i in indices {
             inp_data.extend_from_slice(&self.inputs.data[i * nf..i * nf + nf]);
@@ -126,8 +126,8 @@ impl<S: Scalar> Dataset<S> {
         }
 
         (
-            Tensor::<S>::from_vec(inp_data, vec![b, nf]),
-            Tensor::<S>::from_vec(tgt_data, vec![b, nc]),
+            Tensor::from_vec(inp_data, vec![b, nf]),
+            Tensor::from_vec(tgt_data, vec![b, nc]),
         )
     }
 }

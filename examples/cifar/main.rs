@@ -42,7 +42,7 @@ use integers::data::shuffled_indices;
 use integers::nn::{BatchNorm1D, BatchNorm2D, Conv2D, Dropout, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
 use integers::rng::XorShift64;
 use integers::dyadic::Dyadic;
-use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic};
+use integers::{argmax, cross_entropy_grad};
 
 const CIFAR_CLASSES: [&str; 10] = [
     "airplane", "automobile", "bird", "cat", "deer",
@@ -128,7 +128,7 @@ fn main() {
 
     // ── Fixed eval subset ─────────────────────────────────────────────────────
     let mut eval_rng = XorShift64::new(0xcafebabe);
-    let eval_indices: Vec<usize> = shuffled_indices(test.len(), &mut eval_rng)
+    let eval_indices: Vec<usize> = shuffled_indices(test.len())
         .into_iter().take(N_EVAL).collect();
 
     // ── Training ──────────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ fn main() {
     let mut stopped_at = None;
 
     'training: for epoch in 0..MAX_EPOCHS {
-        let train_indices: Vec<usize> = shuffled_indices(train.len(), &mut train_rng)
+        let train_indices: Vec<usize> = shuffled_indices(train.len())
             .into_iter().take(N_TRAIN).collect();
 
         let mut train_correct = 0usize;
@@ -152,10 +152,10 @@ fn main() {
             model.zero_grad();
 
             let batch_x: Vec<Vec<Dyadic>> = batch.iter()
-                .map(|&i| sample_to_dyadic(&train.get_input(i).data,  shift))
+                .map(|&i| train.get_input(i).data)
                 .collect();
             let batch_t: Vec<Vec<Dyadic>> = batch.iter()
-                .map(|&i| target_to_dyadic(&train.get_target(i).data, shift))
+                .map(|&i| train.get_target(i).data)
                 .collect();
 
             let batch_y = model.forward_batch(&batch_x);
@@ -177,7 +177,7 @@ fn main() {
         // ── Evaluate on the fixed eval subset ──────────────────────────────────
         model.set_training(false);
         let eval_correct: usize = eval_indices.iter().filter(|&&i| {
-            let x = sample_to_dyadic(&test.get_input(i).data, shift);
+            let x = test.get_input(i).data;
             argmax(&model.forward(&x)) == test.labels[i] as usize
         }).count();
         let eval_acc = eval_correct as f64 / N_EVAL as f64 * 100.0;
@@ -204,7 +204,7 @@ fn main() {
     model.set_training(false);
     let mut conf = [[0usize; 10]; 10];
     for i in 0..test.len() {
-        let x    = sample_to_dyadic(&test.get_input(i).data, shift);
+        let x    = test.get_input(i).data;
         let pred = argmax(&model.forward(&x));
         conf[test.labels[i] as usize][pred] += 1;
     }
