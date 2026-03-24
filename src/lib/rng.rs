@@ -56,7 +56,7 @@ thread_local! {
 
 /// Advance the thread-local XorShift64 state and return the next `u64`.
 #[inline(always)]
-pub(crate) fn rng_next() -> u64 {
+pub fn rng_next() -> u64 {
     RNG.with(|c| {
         let mut x = c.get();
         let val = x.next_u64();
@@ -66,9 +66,12 @@ pub(crate) fn rng_next() -> u64 {
 }
 
 #[inline(always)]
-pub(crate) fn rng_range(n: u32) -> u32 {
+pub fn rng_range(n: u32) -> u32 {
     RNG.with(|c| {
-        c.get().gen_range(n)
+        let mut x = c.get();
+        let val = x.gen_range(n);
+        c.set(x);
+        val
     })
 }
 

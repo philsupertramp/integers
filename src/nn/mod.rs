@@ -1,8 +1,8 @@
 //! Neural network layers built on the [`crate::dyadic`] arithmetic system.
 //!
-//! # Layer catalogue
+//! # Module catalogue
 //!
-//! | Layer           | Parameters      | Use for                        |
+//! | Module           | Parameters      | Use for                        |
 //! |-----------------|-----------------|--------------------------------|
 //! | [`Linear`]      | weights, biases | fully-connected                |
 //! | [`ReLU`]        | —               | activation                     |
@@ -16,7 +16,7 @@
 //!
 //! # Implementing a new layer
 //!
-//! 1. Implement the [`Layer`] trait (see below).
+//! 1. Implement the [`Module`] trait (see below).
 //! 2. `model.add(your_layer)` into a [`Sequential`].
 //!
 //! The trait has two forward/backward APIs:
@@ -31,7 +31,7 @@
 //!
 //! BatchNorm must compute μ and σ² over the whole mini-batch before it can
 //! normalise any sample.  This forces a separation between "all forwards" and
-//! "all backwards" in the training loop.  Layers that cache per-sample state
+//! "all backwards" in the training loop.  Modules that cache per-sample state
 //! (Linear, ReLU, Conv2D, MaxPool2D, Dropout) must therefore store **all N
 //! caches** during `forward_batch` so that `backward_batch` can retrieve the
 //! correct cache for each sample.
@@ -48,12 +48,12 @@
 use crate::dyadic::{
     add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
 };
-use rand::Rng;
+use crate::rng::rng_range;
 
-// ─── Layer trait ──────────────────────────────────────────────────────────────
+// ─── Module trait ──────────────────────────────────────────────────────────────
 
 /// The extension point for all layer types.
-pub trait Layer {
+pub trait Module {
     // ── Per-sample API (inference + default batch impl) ───────────────────────
 
     /// Forward pass for a single sample.  Must cache everything `backward` needs.
@@ -102,13 +102,13 @@ pub trait Layer {
 // ─── Sequential ───────────────────────────────────────────────────────────────
 
 pub struct Sequential {
-    pub layers: Vec<Box<dyn Layer>>,
+    pub layers: Vec<Box<dyn Module>>,
 }
 
 impl Sequential {
     pub fn new() -> Self { Self { layers: Vec::new() } }
 
-    pub fn add<L: Layer + 'static>(&mut self, layer: L) {
+    pub fn add<L: Module + 'static>(&mut self, layer: L) {
         self.layers.push(Box::new(layer));
     }
 
@@ -234,14 +234,14 @@ pub struct Linear {
 impl Linear {
     pub fn new(in_features: usize, out_features: usize,
                weight_shift: u32, quant_shift: u32, output_bits: u32) -> Self {
-        let mut rng = rand::thread_rng();
         let n_w = out_features * in_features;
         let k = ((1u32 << weight_shift) as f64 / (in_features as f64).sqrt()).round() as i32;
         let k = k.max(1);
         let z = |n: usize| vec![Dyadic::new(0, weight_shift); n];
+        let weights = (0..n_w).map(|_| Dyadic::new(-k + rng_range(2 * k as u32) as i32, weight_shift)).collect();
         Self {
             in_features, out_features,
-            weights: (0..n_w).map(|_| Dyadic::new(rng.gen_range(-k..=k), weight_shift)).collect(),
+            weights: weights,
             biases: z(out_features),
             quant_shift, output_bits,
             grad_clip: i32::MAX, momentum_shift: None,
@@ -295,7 +295,7 @@ impl Linear {
     }
 }
 
-impl Layer for Linear {
+impl Module for Linear {
     fn name(&self) -> &'static str { "Linear" }
     fn describe(&self) -> String {
         let ws   = self.weights.first().map_or(0, |w| w.s);
@@ -370,7 +370,7 @@ impl ReLU {
 
 impl Default for ReLU { fn default() -> Self { Self::new() } }
 
-impl Layer for ReLU {
+impl Module for ReLU {
     fn name(&self) -> &'static str { "ReLU" }
 
     fn forward(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
@@ -429,7 +429,7 @@ impl Softmax {
     }
 }
 
-impl Layer for Softmax {
+impl Module for Softmax {
     fn name(&self) -> &'static str { "Softmax" }
     fn describe(&self) -> String { format!("Softmax(shift={})", self.output_shift) }
 
@@ -488,7 +488,7 @@ impl Dropout {
     }
 }
 
-impl Layer for Dropout {
+impl Module for Dropout {
     fn name(&self) -> &'static str { "Dropout" }
     fn describe(&self) -> String { format!("Dropout(p={:.2}, training={})", self.drop_rate, self.training) }
     fn set_training(&mut self, t: bool) { self.training = t; }
@@ -613,7 +613,7 @@ impl BatchNorm1D {
     }
 }
 
-impl Layer for BatchNorm1D {
+impl Module for BatchNorm1D {
     fn name(&self) -> &'static str { "BatchNorm1D" }
     fn describe(&self) -> String {
         format!("BatchNorm1D(features={}, shift={}, eps={:.0e}, training={})",
@@ -833,7 +833,7 @@ impl BatchNorm2D {
     }
 }
 
-impl Layer for BatchNorm2D {
+impl Module for BatchNorm2D {
     fn name(&self) -> &'static str { "BatchNorm2D" }
     fn describe(&self) -> String {
         format!("BatchNorm2D(C={}, H={}, W={}, shift={}, training={})",
@@ -1048,7 +1048,6 @@ impl Conv2D {
         weight_shift: u32, quant_shift: u32, output_bits: u32,
     ) -> Self {
         assert!(in_h >= kernel_h && in_w >= kernel_w);
-        let mut rng = rand::thread_rng();
         let fan_in  = in_channels * kernel_h * kernel_w;
         let n_k     = out_channels * fan_in;
         let k       = ((1u32 << weight_shift) as f64 / (fan_in as f64).sqrt()).round() as i32;
@@ -1061,7 +1060,7 @@ impl Conv2D {
             quant_shift, output_bits,
             grad_clip: i32::MAX, momentum_shift: None,
             out_h, out_w,
-            kernels: (0..n_k).map(|_| Dyadic::new(rng.gen_range(-k..=k), weight_shift)).collect(),
+            kernels: (0..n_k).map(|_| Dyadic::new(-k + rng_range(2 * k as u32) as i32, weight_shift)).collect(),
             biases:  z(out_channels),
             input_cache: Vec::new(), output_cache: Vec::new(),
             input_batch_cache: Vec::new(), output_batch_cache: Vec::new(),
@@ -1136,7 +1135,7 @@ impl Conv2D {
     }
 }
 
-impl Layer for Conv2D {
+impl Module for Conv2D {
     fn name(&self) -> &'static str { "Conv2D" }
     fn describe(&self) -> String {
         let ws   = self.kernels.first().map_or(0, |k| k.s);
@@ -1253,7 +1252,7 @@ impl MaxPool2D {
     }
 }
 
-impl Layer for MaxPool2D {
+impl Module for MaxPool2D {
     fn name(&self) -> &'static str { "MaxPool2D" }
     fn describe(&self) -> String {
         format!("MaxPool2D(C={}, {}×{}→{}×{}, k={}, s={})",
@@ -1297,7 +1296,7 @@ impl Layer for MaxPool2D {
 
 /// Pass-through shape bridge (conv → linear). Exists for `summary()` clarity.
 pub struct Flatten;
-impl Layer for Flatten {
+impl Module for Flatten {
     fn name(&self) -> &'static str { "Flatten" }
     fn forward(&mut self, x: &[Dyadic]) -> Vec<Dyadic> { x.to_vec() }
     fn backward(&mut self, g: &[Dyadic]) -> Vec<Dyadic> { g.to_vec() }

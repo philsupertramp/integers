@@ -62,11 +62,11 @@ pub mod rng;
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 
 pub use dyadic::{Dyadic, Tensor};
-pub use rng::XorShift64;
+pub use rng::{seed_rng, rng_range, rng_next};
 
 // ─── Dataset → network bridge ─────────────────────────────────────────────────
 
-/// Convert a flat `&[i32]` row from a `Dataset<i32>` into `Vec<Dyadic>`.
+/// Convert a flat `&[i32]` row into `Vec<Dyadic>`.
 ///
 /// `shift = dataset.input_shift.max(0) as u32`
 pub fn sample_to_dyadic(values: &[i32], shift: u32) -> Vec<Dyadic> {

@@ -80,7 +80,7 @@ fn main() {
     model.add(ReLU::new());
     model.add(Linear::new(8, ds.n_classes, SHIFT, SHIFT, BITS_OUT)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
-    //model.add(Softmax::new(SHIFT));
+    model.add(Softmax::new(SHIFT));
     model.summary();
     println!();
 
