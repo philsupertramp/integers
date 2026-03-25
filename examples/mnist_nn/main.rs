@@ -1,20 +1,11 @@
 //! MNIST digit classification with a dyadic convolutional network.
 //!
-//! # Architecture
-//!
-//! ```text
-//! Input: 1×28×28 (784 flat)
-//!   Conv2D(1→4, 3×3)  →  4×26×26 = 2704   ReLU   MaxPool(2) → 4×13×13 = 676
-//!   Conv2D(4→8, 3×3)  →  8×11×11 = 968    ReLU   MaxPool(2) → 8×5×5   = 200
-//!   Flatten
-//!   Linear(200→64)  ReLU
-//!   Linear(64→10)   Softmax
-//! ```
+//! Architecture: 784 -> 128 ReLU -> 128 -> ReLU -> 10
 //!
 //! # Training regime
 //!
-//! - 256 randomly sampled training images per epoch, in 8 batches of 32
-//! - 20 randomly sampled test images evaluated each epoch
+//! - Train on samples once per epoch, shuffle dataset before training
+//! - evaluate the model on the full testing set each epoch
 //! - Early stopping: halt once 100% eval accuracy is sustained for
 //!   `STOP_PATIENCE` consecutive epochs
 //! - Hard cap at 500 epochs
@@ -29,12 +20,14 @@ mod mnist_loader;
 use crate::mnist_loader::load_mnist_auto;
 
 use std::path::PathBuf;
+use std::time::Instant;
+use std::io::{self, Write}; // Added for the progress bar
 
 use integers::data::shuffled_indices;
-use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
+use integers::nn::{Linear, ReLU, Sequential};
 use integers::rng::XorShift64;
 use integers::dyadic::Dyadic;
-use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic};
+use integers::{argmax, mse_grad, sample_to_dyadic, target_to_dyadic};
 
 fn main() {
     // ── CLI ───────────────────────────────────────────────────────────────────
@@ -85,21 +78,20 @@ fn main() {
     // ── Fix the eval subset once so progress is comparable across epochs ───────
     // Using a separate RNG seeded independently so the eval set doesn't depend
     // on how many training shuffles have been performed.
-    let mut eval_rng  = XorShift64::new(0xdeadbeef);
     let eval_indices: Vec<usize> = shuffled_indices(test.len())
         .into_iter().take(N_EVAL).collect();
 
     // ── Training loop ─────────────────────────────────────────────────────────
-    let mut train_rng     = XorShift64::new(1337);
     let mut perfect_streak = 0u32;
 
-    println!("{:>6}  {:>10}  {:>10}  {:>14}",
-        "Epoch", "Train Acc", "Eval Acc", "Streak (100%)");
-    println!("{}", "─".repeat(48));
+    println!("{:>6}  {:>10}  {:>10}  {:>14}  {:>10}",
+        "Epoch", "Train Acc", "Eval Acc", "Streak (100%)", "Time");
+    println!("{}", "─".repeat(60));
 
     let mut stopped_at = None;
 
     'training: for epoch in 0..MAX_EPOCHS {
+        let epoch_start = Instant::now();
 
         // ── Sample N_TRAIN indices from the training pool ──────────────────────
         let train_indices: Vec<usize> = shuffled_indices(train.len())
@@ -107,9 +99,11 @@ fn main() {
 
         // ── Mini-batch SGD ─────────────────────────────────────────────────────
         let mut train_correct = 0usize;
+        let chunks = train_indices.chunks(BATCH_SIZE);
+        let total_batches = chunks.len();
 
         model.set_training(true);
-        for batch in train_indices.chunks(BATCH_SIZE) {
+        for (b_idx, batch) in chunks.enumerate() {
             model.zero_grad();
 
             // Assemble batch tensors.
@@ -130,14 +124,31 @@ fn main() {
 
             // Compute loss gradients and backward.
             let batch_g: Vec<Vec<Dyadic>> = batch_y.iter().zip(batch_t.iter())
-                .map(|(y, t)| cross_entropy_grad(y, t, shift))
+                .map(|(y, t)| mse_grad(y, t))
                 .collect();
 
             model.backward_batch(&batch_g);
             model.update(LR_SHIFT);
+
+            // Inline progress bar update (every 5 batches or on the very last batch)
+            if b_idx % 5 == 0 || b_idx + 1 == total_batches {
+                let progress = (b_idx + 1) as f64 / total_batches as f64;
+                let bar_width = 25;
+                let filled = (progress * bar_width as f64) as usize;
+                print!(
+                    "\r      [{}{}] {:>5.1}%",
+                    "█".repeat(filled),
+                    " ".repeat(bar_width - filled),
+                    progress * 100.0
+                );
+                let _ = io::stdout().flush();
+            }
         }
 
         let train_acc = train_correct as f64 / N_TRAIN as f64 * 100.0;
+
+        // Clear the progress bar from the line before printing epoch evaluation
+        print!("\r{:60}\r", "");
 
         // ── Evaluate on the fixed eval subset ──────────────────────────────────
         model.set_training(false);
@@ -147,6 +158,9 @@ fn main() {
         }).count();
 
         let eval_acc = eval_correct as f64 / N_EVAL as f64 * 100.0;
+
+        let elapsed = epoch_start.elapsed();
+        let time_str = format!("{:.2}s", elapsed.as_secs_f64());
 
         // ── Early stopping logic ───────────────────────────────────────────────
         if eval_correct == N_EVAL {
@@ -161,8 +175,8 @@ fn main() {
             "—".to_string()
         };
 
-        println!("{:>6}  {:>9.1}%  {:>9.1}%  {:>14}",
-            epoch, train_acc, eval_acc, streak_str);
+        println!("{:>6}  {:>9.1}%  {:>9.1}%  {:>14}  {:>10}",
+            epoch, train_acc, eval_acc, streak_str, time_str);
 
         if perfect_streak >= STOP_PATIENCE {
             stopped_at = Some(epoch);
@@ -171,7 +185,7 @@ fn main() {
     }
 
     // ── Final report ──────────────────────────────────────────────────────────
-    println!("{}", "─".repeat(48));
+    println!("{}", "─".repeat(60));
     match stopped_at {
         Some(e) => println!(
             "\nEarly stop at epoch {e}: {STOP_PATIENCE} consecutive epochs \

@@ -2,7 +2,7 @@
 //!
 //! # Module catalogue
 //!
-//! | Module           | Parameters      | Use for                        |
+//! | Module          | Parameters      | Use for                        |
 //! |-----------------|-----------------|--------------------------------|
 //! | [`Linear`]      | weights, biases | fully-connected                |
 //! | [`ReLU`]        | —               | activation                     |
@@ -229,6 +229,9 @@ pub struct Linear {
     grad_b: Vec<Dyadic>,
     vel_w:  Vec<Dyadic>,
     vel_b:  Vec<Dyadic>,
+
+    q_min: i32,
+    q_max: i32,
 }
 
 impl Linear {
@@ -239,6 +242,7 @@ impl Linear {
         let k = k.max(1);
         let z = |n: usize| vec![Dyadic::new(0, weight_shift); n];
         let weights = (0..n_w).map(|_| Dyadic::new(-k + rng_range(2 * k as u32) as i32, weight_shift)).collect();
+        let (q_min, q_max) = signed_bounds(output_bits);
         Self {
             in_features, out_features,
             weights: weights,
@@ -249,6 +253,7 @@ impl Linear {
             input_batch_cache: Vec::new(), output_batch_cache: Vec::new(),
             grad_w: z(n_w), grad_b: z(out_features),
             vel_w: z(n_w),  vel_b: z(out_features),
+            q_min: q_min, q_max: q_max,
         }
     }
 
@@ -259,14 +264,13 @@ impl Linear {
     #[inline] fn flat(&self, j: usize, i: usize) -> usize { j * self.in_features + i }
 
     fn forward_one(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
-        let (q_min, q_max) = signed_bounds(self.output_bits);
         let mut out = Vec::with_capacity(self.out_features);
         for j in 0..self.out_features {
             let mut acc = self.biases[j];
             for i in 0..self.in_features {
                 acc = add(acc, mul(self.w(j, i), input[i], self.quant_shift));
             }
-            let (y, _) = requantize(acc, acc.s, q_min, q_max);
+            let (y, _) = requantize(acc, acc.s, self.q_min, self.q_max);
             out.push(y);
         }
         out
@@ -278,11 +282,10 @@ impl Linear {
         input:       &[Dyadic],
         output:      &[Dyadic],
     ) -> Vec<Dyadic> {
-        let (q_min, q_max) = signed_bounds(self.output_bits);
         let g_s = grad_output.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_features];
         for j in 0..self.out_features {
-            let gr = ste_requantize(grad_output[j], output[j].v, q_min, q_max);
+            let gr = ste_requantize(grad_output[j], output[j].v, self.q_min, self.q_max);
             let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
             for i in 0..self.in_features {
                 let idx = self.flat(j, i);
@@ -1038,6 +1041,9 @@ pub struct Conv2D {
     grad_b: Vec<Dyadic>,
     vel_k:  Vec<Dyadic>,
     vel_b:  Vec<Dyadic>,
+
+    q_min: i32,
+    q_max: i32,
 }
 
 impl Conv2D {
@@ -1055,6 +1061,7 @@ impl Conv2D {
         let out_h   = in_h - kernel_h + 1;
         let out_w   = in_w - kernel_w + 1;
         let z       = |n: usize| vec![Dyadic::new(0, weight_shift); n];
+        let (q_min, q_max) = signed_bounds(output_bits);
         Self {
             in_channels, out_channels, kernel_h, kernel_w, in_h, in_w,
             quant_shift, output_bits,
@@ -1066,6 +1073,7 @@ impl Conv2D {
             input_batch_cache: Vec::new(), output_batch_cache: Vec::new(),
             grad_k: z(n_k), grad_b: z(out_channels),
             vel_k:  z(n_k), vel_b:  z(out_channels),
+            q_min: q_min, q_max: q_max,
         }
     }
 
@@ -1082,7 +1090,6 @@ impl Conv2D {
     }
 
     fn forward_one(&mut self, input: &[Dyadic]) -> Vec<Dyadic> {
-        let (q_min, q_max) = signed_bounds(self.output_bits);
         let mut out = vec![Dyadic::new(0, 0); self.output_len()];
         for oc in 0..self.out_channels {
             for oh in 0..self.out_h {
@@ -1099,7 +1106,7 @@ impl Conv2D {
                             }
                         }
                     }
-                    let (y, _) = requantize(acc, acc.s, q_min, q_max);
+                    let (y, _) = requantize(acc, acc.s, self.q_min, self.q_max);
                     out[self.out_idx(oc, oh, ow)] = y;
                 }
             }
@@ -1108,14 +1115,13 @@ impl Conv2D {
     }
 
     fn backward_one(&mut self, grad_output: &[Dyadic], input: &[Dyadic], output: &[Dyadic]) -> Vec<Dyadic> {
-        let (q_min, q_max) = signed_bounds(self.output_bits);
         let g_s = grad_output.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_channels * self.in_h * self.in_w];
         for oc in 0..self.out_channels {
             for oh in 0..self.out_h {
                 for ow in 0..self.out_w {
                     let op  = self.out_idx(oc, oh, ow);
-                    let gr  = ste_requantize(grad_output[op], output[op].v, q_min, q_max);
+                    let gr  = ste_requantize(grad_output[op], output[op].v, self.q_min, self.q_max);
                     let gj  = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
                     for ic in 0..self.in_channels {
                         for kh in 0..self.kernel_h {

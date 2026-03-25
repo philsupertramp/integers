@@ -29,6 +29,7 @@ mod mnist_loader;
 use crate::mnist_loader::load_mnist_auto;
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use integers::data::shuffled_indices;
 use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
@@ -101,13 +102,14 @@ fn main() {
     let mut train_rng     = XorShift64::new(1337);
     let mut perfect_streak = 0u32;
 
-    println!("{:>6}  {:>10}  {:>10}  {:>14}",
-        "Epoch", "Train Acc", "Eval Acc", "Streak (100%)");
-    println!("{}", "─".repeat(48));
+    println!("{:>6}  {:>10}  {:>10}  {:>14}  {:>10}",
+        "Epoch", "Train Acc", "Eval Acc", "Streak (100%)", "Time");
+    println!("{}", "─".repeat(64));
 
     let mut stopped_at = None;
 
     'training: for epoch in 0..MAX_EPOCHS {
+        let epoch_start = Instant::now();
 
         // ── Sample N_TRAIN indices from the training pool ──────────────────────
         let train_indices: Vec<usize> = shuffled_indices(train.len())
@@ -168,9 +170,11 @@ fn main() {
         } else {
             "—".to_string()
         };
+        let elapsed = epoch_start.elapsed();
+        let time_str = format!("{:.2}s", elapsed.as_secs_f64());
 
-        println!("{:>6}  {:>9.1}%  {:>9.1}%  {:>14}",
-            epoch, train_acc, eval_acc, streak_str);
+        println!("{:>6}  {:>9.1}%  {:>9.1}%  {:>14}  {:>14}",
+            epoch, train_acc, eval_acc, streak_str, time_str);
 
         if perfect_streak >= STOP_PATIENCE {
             stopped_at = Some(epoch);

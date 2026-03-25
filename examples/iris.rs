@@ -20,6 +20,8 @@
 //! …
 //! ```
 
+use std::time::Instant;
+
 use integers::data::shuffled_indices;
 use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
 use integers::nn::{Linear, ReLU, Sequential, Softmax};
@@ -80,7 +82,7 @@ fn main() {
     model.add(ReLU::new());
     model.add(Linear::new(8, ds.n_classes, SHIFT, SHIFT, BITS_OUT)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
-    model.add(Softmax::new(SHIFT));
+    //model.add(Softmax::new(SHIFT));
     model.summary();
     println!();
 
@@ -88,7 +90,11 @@ fn main() {
     let mut reporter = TrainingReporter::new(EPOCHS, LOG_EVERY, shift);
     reporter.print_header();
 
+    let total_start = Instant::now();
+
     for epoch in 0..EPOCHS {
+        let epoch_start = Instant::now();
+        
         reporter.reset();
 
         // Online SGD (batch_size = 1), shuffled each epoch.
@@ -107,6 +113,7 @@ fn main() {
             model.backward(&g);
             model.update(LR_SHIFT);
         }
+        
         // Evaluate on the test set at the end of each epoch.
         let test_correct: usize = (0..test.len()).filter(|&i| {
             let x = test.get_input(i).data;
@@ -114,8 +121,16 @@ fn main() {
         }).count();
         let test_acc = test_correct as f64 / test.len() as f64 * 100.0;
 
+        let epoch_elapsed = epoch_start.elapsed();
+
         reporter.maybe_print(epoch, Some(test_acc));
+        
+        if epoch % LOG_EVERY == 0 || epoch == EPOCHS - 1 {
+            println!("  └─ Epoch {} duration: {:.4}s", epoch, epoch_elapsed.as_secs_f64());
+        }
     }
+
+    let total_elapsed = total_start.elapsed();
 
     // ── Final evaluation ──────────────────────────────────────────────────────
     let correct: usize = (0..ds.len()).filter(|&i| {
@@ -126,6 +141,7 @@ fn main() {
     println!();
     reporter.print_footer();
     println!();
+    println!("Total training time: {:.4}s", total_elapsed.as_secs_f64());
     println!("Final pass accuracy: {}/{} = {:.1}%",
         correct, ds.len(), correct as f64 / ds.len() as f64 * 100.0);
 
