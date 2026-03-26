@@ -27,7 +27,7 @@ use integers::data::shuffled_indices;
 use integers::nn::{Linear, ReLU, Sequential};
 use integers::rng::XorShift64;
 use integers::dyadic::Dyadic;
-use integers::{argmax, mse_grad, sample_to_dyadic, target_to_dyadic};
+use integers::{argmax, mse_grad};
 
 fn main() {
     // ── CLI ───────────────────────────────────────────────────────────────────

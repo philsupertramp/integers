@@ -35,7 +35,7 @@ use integers::data::shuffled_indices;
 use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
 use integers::rng::XorShift64;
 use integers::dyadic::Dyadic;
-use integers::{argmax, cross_entropy_grad, sample_to_dyadic, target_to_dyadic};
+use integers::{argmax, cross_entropy_grad};
 
 fn main() {
     // ── CLI ───────────────────────────────────────────────────────────────────

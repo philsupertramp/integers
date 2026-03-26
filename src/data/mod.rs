@@ -2,10 +2,7 @@
 //!
 //! `Dataset<S>` holds pre-quantised inputs, integer labels, and one-hot
 //! targets as flat row-major tensors.  It is produced by the loaders in
-//! [`crate::dataset_loaders`] and [`crate::mnist_loader`].
-//!
-//! To feed a sample into the neural network, use the bridge helpers in
-//! [`crate`] (`sample_to_dyadic` / `target_to_dyadic`).
+//! [`crate::dataset_loaders`].
 pub mod dataset_loaders;
 
 use std::io;
@@ -65,7 +62,7 @@ pub struct Dataset {
     pub labels:      Vec<u8>,
     pub targets:     Tensor,
     pub n_classes:   usize,
-    /// Dyadic scale exponent `s` such that decoded value = mantissa · 2⁻ˢ.
+    /// Dyadic scale exponent `s` such that decoded value = mantissa · 2^{-s}.
     pub input_shift: i32,
 }
 
@@ -134,7 +131,7 @@ impl Dataset {
 
 // ─── Shuffle utility ──────────────────────────────────────────────────────────
 
-/// Build a Fisher-Yates shuffled index array of length `n` using [`crate::XorShift64`].
+/// Build a Fisher-Yates shuffled index array of length `n` using [`crate::rng::XorShift64`].
 ///
 /// Entirely in integer arithmetic — no floating-point RNG needed.
 ///
