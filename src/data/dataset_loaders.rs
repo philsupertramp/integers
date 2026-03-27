@@ -355,7 +355,7 @@ mod tests {
             "5.1,3.5,1.4,0.2,setosa\n\
              7.0,3.2,4.7,1.4,versicolor\n\
              6.3,3.3,6.0,2.5,virginica\n");
-        let ds = DatasetBuilder::<i32>::new_csv(&p)
+        let ds = DatasetBuilder::new_csv(&p)
             .with_features(vec![0, 1, 2, 3])
             .with_label_column(4)
             .load().unwrap();
@@ -370,7 +370,7 @@ mod tests {
             "sl,sw,pl,pw,species\n\
              5.1,3.5,1.4,0.2,setosa\n\
              7.0,3.2,4.7,1.4,versicolor\n");
-        let ds = DatasetBuilder::<i32>::new_csv(&p)
+        let ds = DatasetBuilder::new_csv(&p)
             .with_header(true)
             .with_features(vec![0, 1, 2, 3])
             .with_label_column(4)
@@ -384,7 +384,7 @@ mod tests {
             "5.1,3.5,1.4,0.2,0\n\
              7.0,3.2,4.7,1.4,1\n\
              6.3,3.3,6.0,2.5,2\n");
-        let ds = DatasetBuilder::<i32>::new_csv(&p)
+        let ds = DatasetBuilder::new_csv(&p)
             .with_features(vec![0, 1, 2, 3])
             .with_label_column(4)
             .load().unwrap();
@@ -395,14 +395,14 @@ mod tests {
     fn csv_minmax_quantization() {
         let p = write_tmp("test_mm.csv",
             "0.0,0.0,0\n1.0,0.5,1\n");
-        let ds = DatasetBuilder::<i32>::new_csv(&p)
+        let ds = DatasetBuilder::new_csv(&p)
             .with_features(vec![0, 1])
             .with_label_column(2)
             .with_quantization(QuantizationMethod::MinMax)
             .load().unwrap();
         assert_eq!(ds.input_shift, 7);
         for &v in &ds.inputs.data {
-            assert!(v >= -127 && v <= 127);
+            assert!(v.v >= -127 && v.v <= 127);
         }
     }
 }

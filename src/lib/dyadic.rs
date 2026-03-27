@@ -171,13 +171,92 @@ pub fn ste_requantize(grad_y: Dyadic, v_y: i32, q_min: i32, q_max: i32) -> Dyadi
 ///
 /// Indexing convention: `shape = [d₀, d₁, …, dₙ]`, element `[i₀, i₁, …, iₙ]`
 /// lives at `data[i₀·(d₁·…·dₙ) + i₁·(d₂·…·dₙ) + … + iₙ]`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Tensor {
     pub data:  Vec<Dyadic>,
     pub shape: Vec<usize>,
 }
 
+/// A View into a Tensor. It BORROWS the memory.
+/// This is what an iterator yields
+#[derive(Debug, Clone)]
+pub struct TensorView<'a> {
+    pub data: &'a [Dyadic],
+    pub shape: &'a [usize],
+}
+
+/// A Mutable View into a Tensor.
+/// Allows modifying the original Tensor's data in-place.
+#[derive(Debug)]
+pub struct TensorViewMut<'a> {
+    pub data: &'a mut [Dyadic],
+    pub shape: &'a [usize],
+}
+
+
+impl<'a> TensorView<'a> {
+    /// Materializes the borrowed view into a fully owned Tensor.
+    /// This allocates memory and copies the underlying data.
+    pub fn to_tensor(&self) -> Tensor {
+        Tensor {
+            data: self.data.to_vec(),
+            shape: self.shape.to_vec(),
+        }
+    }
+}
+
+impl<'a> From<TensorView<'a>> for Tensor {
+    fn from(view: TensorView<'a>) -> Self {
+        view.to_tensor()
+    }
+}
+
+
+
+/// Iterator yielding read-only views (TensorView)
+pub struct TensorIter<'a> {
+    chunks: std::slice::Chunks<'a, Dyadic>,
+    sub_shape: &'a [usize],
+}
+
+impl<'a> Iterator for TensorIter<'a> {
+    type Item = TensorView<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.chunks.next().map(|chunk| TensorView {
+            data: chunk,
+            shape: self.sub_shape,
+        })
+    }
+}
+
+/// Iterator yielding mutable views (TensorViewMut)
+pub struct TensorIterMut<'a> {
+    // ChunksMut guarantees we don't yield overlapping mutable references
+    chunks: std::slice::ChunksMut<'a, Dyadic>,
+    sub_shape: &'a [usize],
+}
+
+impl<'a> Iterator for TensorIterMut<'a> {
+    type Item = TensorViewMut<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.chunks.next().map(|chunk| TensorViewMut {
+            data: chunk,
+            shape: self.sub_shape,
+        })
+    }
+}
+
+
+
 impl Tensor {
+    pub fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            shape: vec![]
+        }
+    }
     /// Construct from a flat buffer and a shape.  Panics in debug mode if the
     /// buffer length does not match the product of the shape dimensions.
     pub fn from_vec(data: Vec<Dyadic>, shape: Vec<usize>) -> Self {
@@ -201,6 +280,93 @@ impl Tensor {
 
     /// `true` if the tensor has no elements.
     #[inline] pub fn is_empty(&self) -> bool { self.data.is_empty() }
+
+    /// Borrows the ENTIRE Tensor as a read-only View.
+    /// This is O(1) and does no allocation.
+    pub fn view(&self) -> TensorView<'_> {
+        TensorView {
+            data: &self.data, // Borrows the whole Vec as a slice
+            shape: &self.shape,
+        }
+    }
+
+    /// Borrows the ENTIRE Tensor as a mutable View.
+    pub fn view_mut(&mut self) -> TensorViewMut<'_> {
+        TensorViewMut {
+            data: &mut self.data,
+            shape: &self.shape,
+        }
+    }
+    /// Returns an iterator over the first dimension (the batch dimension)
+    pub fn iter(&self) -> TensorIter<'_> {
+        // Calculate how many elements are in one "item" of the batch
+        let item_size = if self.shape.len() <= 1 {
+            1
+        } else {
+            self.shape[1..].iter().product()
+        };
+
+        // The shape of the yielded views (everything except the batch dimension)
+        let sub_shape = if self.shape.is_empty() { &[] } else { &self.shape[1..] };
+
+        TensorIter {
+            chunks: self.data.chunks(item_size.max(1)),
+            sub_shape,
+        }
+    }
+
+    /// Returns a mutable iterator over the first dimension
+    pub fn iter_mut(&mut self) -> TensorIterMut<'_> {
+        let item_size = if self.shape.len() <= 1 {
+            1
+        } else {
+            self.shape[1..].iter().product()
+        };
+
+        let sub_shape = if self.shape.is_empty() { &[] } else { &self.shape[1..] };
+
+        TensorIterMut {
+            chunks: self.data.chunks_mut(item_size.max(1)),
+            sub_shape,
+        }
+    }
+}
+impl FromIterator<Tensor> for Tensor {
+    fn from_iter<I: IntoIterator<Item = Tensor>>(iter: I) -> Self {
+        let mut iter = iter.into_iter();
+        let mut all_data = Vec::new();
+        let mut base_shape = None;
+        let mut batch_size = 0;
+
+        // Peel off the first item to get the shape and item size
+        if let Some(first) = iter.next() {
+            base_shape = Some(first.shape.clone());
+            let item_size = first.data.len();
+            
+            // THE MAGIC TRICK: Ask the iterator how many items are left,
+            // and pre-allocate the EXACT memory needed for the whole batch!
+            let (lower_bound_remaining, _) = iter.size_hint();
+            all_data.reserve(item_size * (lower_bound_remaining + 1));
+            
+            all_data.extend(first.data);
+            batch_size += 1;
+            
+            for tensor in iter {
+                all_data.extend(tensor.data); // No more reallocations!
+                batch_size += 1;
+            }
+        }
+
+        let mut final_shape = vec![batch_size];
+        if let Some(shape) = base_shape {
+            final_shape.extend(shape);
+        }
+
+        Tensor {
+            data: all_data,
+            shape: final_shape,
+        }
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -208,6 +374,7 @@ impl Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::{seed_rng};
     const EPS: f64 = 1e-5;
 
     #[test] fn interpretation_map() {

@@ -16,6 +16,17 @@ name              = "cifar"
 path              = "examples/cifar/main.rs"
 required-features = ["parquet-support", "image-decode"]
 
+[[bench]]
+name = "tensor_bench"
+harness = false
+required-features = ["bench"]
+
+
+[[bench]]
+name = "memory_bench"
+harness = false
+
+
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
 rand = "0.8"
@@ -41,8 +52,14 @@ version          = "0.25"
 optional         = true
 default-features = false
 features         = ["png", "jpeg"]   # CIFAR-10 HuggingFace uses PNG
+
+
+[dependencies.criterion]
+version = "0.4"
+optional = true
   
 [features]
 default         = []
 parquet-support = ["dep:parquet", "dep:arrow"]
 image-decode    = ["dep:image"]
+bench           = ["dep:criterion"]

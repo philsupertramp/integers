@@ -26,6 +26,7 @@ use integers::data::shuffled_indices;
 use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
 use integers::nn::{Linear, ReLU, Sequential, Softmax};
 use integers::{argmax, cross_entropy_grad, TrainingReporter};
+use integers::dyadic::Tensor;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -99,25 +100,25 @@ fn main() {
 
         // Online SGD (batch_size = 1), shuffled each epoch.
         for &i in &shuffled_indices(ds.len()) {
-            let x = ds.get_input(i).data;
-            let t = ds.get_target(i).data;
+            let x = ds.get_input(i);
+            let t = ds.get_target(i);
 
             model.zero_grad();
-            let y = model.forward(&x);
+            let y = model.forward(x.view());
 
-            let correct = argmax(&y) == ds.labels[i] as usize;
-            let g = cross_entropy_grad(&y, &t, shift);
-            let sq = g.iter().map(|d| (d.v as i64).pow(2)).sum::<i64>();
+            let correct = argmax(&y.data) == ds.labels[i] as usize;
+            let g = Tensor::from_vec(cross_entropy_grad(&y.data, &t.data, shift), y.shape.clone());
+            let sq = g.data.iter().map(|d| (d.v as i64).pow(2)).sum::<i64>();
 
             reporter.record(sq, correct);
-            model.backward(&g);
+            model.backward(g.view());
             model.update(LR_SHIFT);
         }
         
         // Evaluate on the test set at the end of each epoch.
         let test_correct: usize = (0..test.len()).filter(|&i| {
-            let x = test.get_input(i).data;
-            argmax(&model.forward(&x)) == test.labels[i] as usize
+            let x = test.get_input(i);
+            argmax(&model.forward(x.view()).data) == test.labels[i] as usize
         }).count();
         let test_acc = test_correct as f64 / test.len() as f64 * 100.0;
 
@@ -134,8 +135,8 @@ fn main() {
 
     // ── Final evaluation ──────────────────────────────────────────────────────
     let correct: usize = (0..ds.len()).filter(|&i| {
-        let x = ds.get_input(i).data;
-        argmax(&model.forward(&x)) == ds.labels[i] as usize
+        let x = ds.get_input(i);
+        argmax(&model.forward(x.view()).data) == ds.labels[i] as usize
     }).count();
 
     println!();
@@ -149,8 +150,8 @@ fn main() {
     let nc = ds.n_classes;
     let mut per_class = vec![(0usize, 0usize); nc]; // (correct, total)
     for i in 0..ds.len() {
-        let x   = ds.get_input(i).data;
-        let y   = model.forward(&x);
+        let x   = ds.get_input(i);
+        let y   = model.forward(x.view()).data;
         let cls = ds.labels[i] as usize;
         per_class[cls].1 += 1;
         if argmax(&y) == cls { per_class[cls].0 += 1; }

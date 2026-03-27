@@ -155,12 +155,13 @@ pub fn shuffled_indices(n: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Tensor, XorShift64};
+    use crate::Tensor;
+    use crate::rng::XorShift64;
 
     #[test]
     fn shuffled_indices_length_and_contents() {
         let mut rng = XorShift64::new(42);
-        let idx = shuffled_indices(10, &mut rng);
+        let idx = shuffled_indices(10);
         assert_eq!(idx.len(), 10);
         let mut sorted = idx.clone();
         sorted.sort_unstable();
@@ -170,14 +171,14 @@ mod tests {
     #[test]
     fn shuffled_indices_is_not_identity() {
         let mut rng = XorShift64::new(42);
-        let idx = shuffled_indices(100, &mut rng);
+        let idx = shuffled_indices(100);
         assert_ne!(idx, (0..100).collect::<Vec<_>>(),
             "shuffle returned identity permutation");
     }
 
     #[test]
     fn argmax_picks_max() {
-        let t = Tensor::from_vec(vec![-10i32, 50, 20], vec![1, 3]);
+        let t = Tensor::from_vec(vec![Dyadic {v: -10i32, s: 0}, Dyadic { v: 50, s: 0}, Dyadic{ v: 20, s: 0}], vec![1, 3]);
         assert_eq!(Dataset::argmax(&t), 1);
     }
 }
