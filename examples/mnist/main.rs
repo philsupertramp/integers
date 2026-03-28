@@ -153,7 +153,7 @@ fn main() {
         model.set_training(false);
         let eval_correct: usize = eval_indices.iter().filter(|&&i| {
             let x = test.get_input(i);
-            argmax(&model.forward(x.view()).data) == test.labels[i] as usize
+            argmax(&model.forward(&x.view()).data) == test.labels[i] as usize
         }).count();
 
         let eval_acc = eval_correct as f64 / N_EVAL as f64 * 100.0;
@@ -201,7 +201,7 @@ fn main() {
     let mut conf = [[0usize; 10]; 10];
     for i in 0..test.len() {
         let x    = test.get_input(i);
-        let pred = argmax(&model.forward(x.view()).data);
+        let pred = argmax(&model.forward(&x.view()).data);
         conf[test.labels[i] as usize][pred] += 1;
     }
     let total_correct: usize = (0..10).map(|c| conf[c][c]).sum();

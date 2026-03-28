@@ -88,7 +88,7 @@ impl Conv2D {
         + kh * self.kernel_w + kw
     }
 
-    fn forward_one(&mut self, input: TensorView) -> Tensor {
+    fn forward_one(&mut self, input: &TensorView) -> Tensor {
         let mut out = vec![Dyadic::new(0, 0); self.output_len()];
         for oc in 0..self.out_channels {
             for oh in 0..self.out_h {
@@ -113,7 +113,7 @@ impl Conv2D {
         Tensor::from_vec(out, vec![self.output_len()])
     }
 
-    fn backward_one(&mut self, grad_output: TensorView, input: TensorView, output: TensorView) -> Tensor {
+    fn backward_one(&mut self, grad_output: &TensorView, input: &TensorView, output: &TensorView) -> Tensor {
         let g_s = grad_output.data.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_channels * self.in_h * self.in_w];
         for oc in 0..self.out_channels {
@@ -152,21 +152,21 @@ impl Module for Conv2D {
             self.in_h, self.in_w, self.out_h, self.out_w)
     }
 
-    fn forward(&mut self, input: TensorView) -> Tensor {
-        let out = self.forward_one(input.clone());
+    fn forward(&mut self, input: &TensorView) -> Tensor {
+        let out = self.forward_one(&input.clone());
         self.input_cache  = input.to_tensor();
         self.output_cache = out.clone();
         out
     }
 
-    fn backward(&mut self, grad: TensorView) -> Tensor {
+    fn backward(&mut self, grad: &TensorView) -> Tensor {
         let inp = self.input_cache.clone();
         let out = self.output_cache.clone();
-        self.backward_one(grad, inp.view(), out.view())
+        self.backward_one(grad, &inp.view(), &out.view())
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
-        let outputs: Tensor = inputs.iter().map(|x| self.forward_one(x)).collect();
+        let outputs: Tensor = inputs.iter().map(|x| self.forward_one(&x)).collect();
         self.input_batch_cache  = inputs.clone();
         self.output_batch_cache = outputs.clone();
         outputs
@@ -177,7 +177,7 @@ impl Module for Conv2D {
         let outputs = std::mem::take(&mut self.output_batch_cache);
         grads.iter().zip(inputs.iter().zip(outputs.iter()))
             .map(|(g, (inp, out))| {
-                self.backward_one(g, inp, out)
+                self.backward_one(&g, &inp, &out)
             })
             .collect()
     }

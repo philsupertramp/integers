@@ -44,7 +44,7 @@ impl Dropout {
         }).collect()
     }
 
-    fn apply_mask(input: TensorView, mask: &[bool], scale: Dyadic, qs: u32) -> Tensor {
+    fn apply_mask(input: &TensorView, mask: &[bool], scale: Dyadic, qs: u32) -> Tensor {
         Tensor::from_vec(
             input.data.iter().zip(mask).map(|(&x, &keep)| {
                 if keep { mul(x, scale, qs) } else { Dyadic::new(0, x.s) }
@@ -59,15 +59,15 @@ impl Module for Dropout {
     fn describe(&self) -> String { format!("Dropout(p={:.2}, training={})", self.drop_rate, self.training) }
     fn set_training(&mut self, t: bool) { self.training = t; }
 
-    fn forward(&mut self, input: TensorView) -> Tensor {
+    fn forward(&mut self, input: &TensorView) -> Tensor {
         if !self.training { self.mask.clear(); return input.to_tensor(); }
         self.mask = Self::sample_mask(input.data.len(), self.keep_prob_bits);
-        Self::apply_mask(input, &self.mask, self.scale, self.quant_shift)
+        Self::apply_mask(&input, &self.mask, self.scale, self.quant_shift)
     }
 
-    fn backward(&mut self, grad: TensorView) -> Tensor {
+    fn backward(&mut self, grad: &TensorView) -> Tensor {
         if !self.training || self.mask.is_empty() { return grad.to_tensor(); }
-        Self::apply_mask(grad, &self.mask, self.scale, self.quant_shift)
+        Self::apply_mask(&grad, &self.mask, self.scale, self.quant_shift)
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
@@ -78,7 +78,7 @@ impl Module for Dropout {
         let mut masks = Vec::with_capacity(inputs.len());
         let outputs: Tensor = inputs.iter().map(|x| {
             let m = Self::sample_mask(x.data.len(), self.keep_prob_bits);
-            let out = Self::apply_mask(x, &m, self.scale, self.quant_shift);
+            let out = Self::apply_mask(&x, &m, self.scale, self.quant_shift);
             masks.push(m);
             out
         }).collect();
@@ -89,7 +89,7 @@ impl Module for Dropout {
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
         if !self.training || self.batch_masks.is_empty() { return grads.clone(); }
         grads.iter().enumerate()
-            .map(|(n, g)| Self::apply_mask(g, &self.batch_masks[n], self.scale, self.quant_shift))
+            .map(|(n, g)| Self::apply_mask(&g, &self.batch_masks[n], self.scale, self.quant_shift))
             .collect()
     }
 
@@ -190,7 +190,7 @@ impl Module for BatchNorm1D {
 
     /// Single-sample forward — uses running statistics.
     /// During training this is an approximation; prefer `forward_batch`.
-    fn forward(&mut self, input: TensorView) -> Tensor {
+    fn forward(&mut self, input: &TensorView) -> Tensor {
         let scale = (1u32 << self.shift) as f64;
         let mut out = Vec::with_capacity(self.num_features);
 
@@ -213,7 +213,7 @@ impl Module for BatchNorm1D {
         Tensor::from_vec(out, vec![self.num_features])
     }
 
-    fn backward(&mut self, grad: TensorView) -> Tensor {
+    fn backward(&mut self, grad: &TensorView) -> Tensor {
         // Single-sample STE: pass gradient through scaled by γ/σ.
         // (Full backward requires the batch; this is used when batch_size=1.)
         let scale = (1u32 << self.shift) as f64;
@@ -413,7 +413,7 @@ impl Module for BatchNorm2D {
     fn set_training(&mut self, t: bool) { self.training = t; }
 
     /// Single-sample forward using running statistics.
-    fn forward(&mut self, input: TensorView) -> Tensor {
+    fn forward(&mut self, input: &TensorView) -> Tensor {
         let scale = (1u32 << self.shift) as f64;
         let hw    = self.h * self.w;
         let m_ema = self.momentum as f64;
@@ -447,7 +447,7 @@ impl Module for BatchNorm2D {
         out
     }
 
-    fn backward(&mut self, grad: TensorView) -> Tensor {
+    fn backward(&mut self, grad: &TensorView) -> Tensor {
         // Single-sample STE: γ/σ passthrough.
         let scale = (1u32 << self.shift) as f64;
         let hw    = self.h * self.w;
@@ -482,6 +482,9 @@ impl Module for BatchNorm2D {
         let decoded: Vec<Vec<f64>> = inputs.iter()
             .map(|x| x.data.iter().map(|d| d.to_f64()).collect())
             .collect();
+
+        println!("Incoming SHAPE {}", inputs.shape);
+        println!("DECODED SHAPE: {} [{}]", decoded.len(), decoded[0].len());
 
         let mut inv_stds  = vec![0.0f64; self.channels];
         let mut x_hat_all = vec![vec![0.0f64; self.channels * hw]; n];
@@ -623,7 +626,7 @@ impl MaxPool2D {
     #[inline] fn out_idx(&self, c: usize, h: usize, w: usize) -> usize { c * self.out_h * self.out_w + h * self.out_w + w }
 
     fn pool_forward(
-        &self, input: TensorView, mask: &mut Vec<usize>,
+        &self, input: &TensorView, mask: &mut Vec<usize>,
     ) -> Tensor {
         let mut out = Tensor::from_vec(
             vec![Dyadic::new(0, 0); self.output_len()],
@@ -653,7 +656,7 @@ impl MaxPool2D {
     }
 
     fn pool_backward(
-        &self, grad: TensorView, mask: &[usize],
+        &self, grad: &TensorView, mask: &[usize],
     ) -> Tensor {
         let g_s = grad.data.first().map_or(0, |g| g.s);
         let mut gi = Tensor::from_vec(
@@ -674,14 +677,14 @@ impl Module for MaxPool2D {
             self.channels, self.in_h, self.in_w, self.out_h, self.out_w, self.kernel, self.stride)
     }
 
-    fn forward(&mut self, input: TensorView) -> Tensor {
+    fn forward(&mut self, input: &TensorView) -> Tensor {
         let mut mask = Vec::new();
         let out = self.pool_forward(input, &mut mask);
         self.max_mask = mask;
         out
     }
 
-    fn backward(&mut self, grad: TensorView) -> Tensor {
+    fn backward(&mut self, grad: &TensorView) -> Tensor {
         self.pool_backward(grad, &self.max_mask.clone())
     }
 
@@ -689,7 +692,7 @@ impl Module for MaxPool2D {
         let mut all_masks = Vec::with_capacity(inputs.len());
         let outputs: Tensor = inputs.iter().map(|x| {
             let mut mask = Vec::new();
-            let out = self.pool_forward(x, &mut mask);
+            let out = self.pool_forward(&x, &mut mask);
             all_masks.push(mask);
             out
         }).collect();
@@ -699,7 +702,7 @@ impl Module for MaxPool2D {
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
         grads.iter().enumerate()
-            .map(|(n, g)| self.pool_backward(g, &self.batch_max_masks[n]))
+            .map(|(n, g)| self.pool_backward(&g, &self.batch_max_masks[n]))
             .collect()
     }
 

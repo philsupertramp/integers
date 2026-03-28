@@ -76,7 +76,7 @@ impl Linear {
     #[inline] fn w(&self, j: usize, i: usize) -> Dyadic { self.weights.data[j * self.in_features + i] }
     #[inline] fn flat(&self, j: usize, i: usize) -> usize { j * self.in_features + i }
 
-    fn forward_one(&mut self, input: TensorView) -> Tensor {
+    fn forward_one(&mut self, input: &TensorView) -> Tensor {
         let mut out = Vec::with_capacity(self.out_features);
         for j in 0..self.out_features {
             let mut acc = self.biases.data[j];
@@ -91,9 +91,9 @@ impl Linear {
 
     fn backward_one(
         &mut self,
-        grad_output: TensorView,
-        input:       TensorView,
-        output:      TensorView,
+        grad_output: &TensorView,
+        input:       &TensorView,
+        output:      &TensorView,
     ) -> Tensor {
         let g_s = grad_output.data.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_features];
@@ -121,22 +121,22 @@ impl Module for Linear {
             self.in_features, self.out_features, self.quant_shift, self.output_bits)
     }
 
-    fn forward(&mut self, input: TensorView) -> Tensor {
-        let out = self.forward_one(input.clone());
+    fn forward(&mut self, input: &TensorView) -> Tensor {
+        let out = self.forward_one(&input.clone());
         self.input_cache  = input.to_tensor();
         self.output_cache = out.clone();
         out
     }
 
-    fn backward(&mut self, grad_output: TensorView) -> Tensor {
+    fn backward(&mut self, grad_output: &TensorView) -> Tensor {
         let input  = self.input_cache.clone();
         let output = self.output_cache.clone();
-        self.backward_one(grad_output, input.view(), output.view())
+        self.backward_one(grad_output, &input.view(), &output.view())
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
         let outputs: Tensor = inputs.iter()
-            .map(|x| self.forward_one(x))
+            .map(|x| self.forward_one(&x))
             .collect();
         self.input_batch_cache  = inputs.clone();
         self.output_batch_cache = outputs.clone();
@@ -148,7 +148,7 @@ impl Module for Linear {
         let outputs = std::mem::take(&mut self.output_batch_cache);
         grads.iter().zip(inputs.iter().zip(outputs.iter()))
             .map(|(g, (inp, out))| {
-                self.backward_one(g, inp, out)
+                self.backward_one(&g, &inp, &out)
             })
             .collect()
     }

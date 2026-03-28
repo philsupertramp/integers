@@ -70,10 +70,10 @@ pub trait Module {
     // ── Per-sample API (inference + default batch impl) ───────────────────────
 
     /// Forward pass for a single sample.  Must cache everything `backward` needs.
-    fn forward(&mut self, input: TensorView) -> Tensor;
+    fn forward(&mut self, input: &TensorView) -> Tensor;
 
     /// Backward pass for a single sample.  *Accumulates* `∂L/∂params`.
-    fn backward(&mut self, grad_output: TensorView) -> Tensor;
+    fn backward(&mut self, grad_output: &TensorView) -> Tensor;
 
     // ── Batch API (training) ──────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ pub trait Module {
     /// needs to see all N inputs simultaneously (BatchNorm) or needs to store
     /// all N caches so that `backward_batch` can use them (Linear, ReLU, …).
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
-        inputs.iter().map(|x| self.forward(x)).collect()
+        inputs.iter().map(|x| self.forward(&x)).collect()
     }
 
     /// Backward pass for a mini-batch.
@@ -91,7 +91,7 @@ pub trait Module {
     /// Default: calls `backward` once per grad.  Override whenever
     /// `forward_batch` is overridden.
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        grads.iter().map(|g| self.backward(g)).collect()
+        grads.iter().map(|g| self.backward(&g)).collect()
     }
 
     // ── Parameter management ──────────────────────────────────────────────────
@@ -126,16 +126,16 @@ impl Sequential {
     }
 
     /// Per-sample forward — use for inference.
-    pub fn forward(&mut self, input: TensorView) -> Tensor {
+    pub fn forward(&mut self, input: &TensorView) -> Tensor {
         let mut x = input.to_tensor();
-        for layer in &mut self.layers { x = layer.forward(x.view()); }
+        for layer in &mut self.layers { x = layer.forward(&x.view()); }
         x
     }
 
     /// Per-sample backward.
-    pub fn backward(&mut self, grad: TensorView) -> Tensor {
+    pub fn backward(&mut self, grad: &TensorView) -> Tensor {
         let mut g = grad.to_tensor();
-        for layer in self.layers.iter_mut().rev() { g = layer.backward(g.view()); }
+        for layer in self.layers.iter_mut().rev() { g = layer.backward(&g.view()); }
         g
     }
 
@@ -226,8 +226,8 @@ fn apply_updates(
 pub struct Flatten;
 impl Module for Flatten {
     fn name(&self) -> &'static str { "Flatten" }
-    fn forward(&mut self, x: TensorView) -> Tensor { x.to_tensor() }
-    fn backward(&mut self, g: TensorView) -> Tensor { g.to_tensor() }
+    fn forward(&mut self, x: &TensorView) -> Tensor { x.to_tensor() }
+    fn backward(&mut self, g: &TensorView) -> Tensor { g.to_tensor() }
     fn update(&mut self, _: u32) {}
     fn zero_grad(&mut self) {}
 }
