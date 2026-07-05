@@ -5,14 +5,61 @@ edition = "2024"
 
 [[example]]
 name = "mnist"
-path = "examples/mnist.rs"
+path = "examples/mnist/main.rs"
 
 [[example]]
 name = "iris"
 path = "examples/iris.rs"
 
+[[example]]
+name              = "cifar"
+path              = "examples/cifar/main.rs"
+required-features = ["parquet-support", "image-decode"]
+
+[[bench]]
+name = "tensor_bench"
+harness = false
+required-features = ["bench"]
+
+
+[[bench]]
+name = "memory_bench"
+harness = false
+
+
+# ─── Dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
-arrow = "58.0.0"
-parquet = "58.0.0"
+rand = "0.8"
+ 
+# Parquet support is optional — only needed if you load .parquet files.
+# Enable with: cargo run --example iris --features parquet-support
+[dependencies.parquet]
+version  = "58"
+optional = true
+default-features = false
+features = ["snap", "arrow"]
+ 
+[dependencies.arrow]
+version  = "58"
+optional = true
+default-features = false
+
+# Image decoding — needed for CIFAR-10 (PNG-encoded pixels in parquet).
+# The `image` crate is kept optional because MNIST uses raw bytes and Iris uses
+# CSV, so there is no reason to pay the compile cost for those workflows.
+[dependencies.image]
+version          = "0.25"
+optional         = true
+default-features = false
+features         = ["png", "jpeg"]   # CIFAR-10 HuggingFace uses PNG
 
 
+[dependencies.criterion]
+version = "0.4"
+optional = true
+  
+[features]
+default         = []
+parquet-support = ["dep:parquet", "dep:arrow"]
+image-decode    = ["dep:image"]
+bench           = ["dep:criterion"]

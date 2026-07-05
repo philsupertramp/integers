@@ -13,7 +13,7 @@ use std::path::Path;
 use arrow::array::{UInt8Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_writer::ArrowWriter;
 
 fn read_u32_be(r: &mut impl Read) -> io::Result<u32> {
     let mut buf = [0u8; 4];
