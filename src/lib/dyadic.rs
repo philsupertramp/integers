@@ -1,6 +1,6 @@
 //! Dyadic rational arithmetic for integer neural network training.
 //!
-//! Every value is a pair `(v, s)` that encodes the rational number `v · 2⁻ˢ`.
+//! Every value is a pair `(v, s)` that encodes the rational number `v · 2^{-s}`.
 //! All arithmetic preserves this invariant exactly (add/sub) or approximately
 //! (mul/div/requantize), with stochastic rounding used to keep results unbiased.
 //!
