@@ -2,9 +2,9 @@
 //!
 //! # Quick start
 //! ```no_run
-//! use dyadic_nn::dataset_loaders::{DatasetBuilder, QuantizationMethod};
+//! use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod};
 //!
-//! let ds = DatasetBuilder::<i32>::new_csv("iris.csv")
+//! let ds = DatasetBuilder::new_csv("iris.csv")
 //!     .with_header(true)
 //!     .with_features(vec![0, 1, 2, 3])
 //!     .with_label_column(4)

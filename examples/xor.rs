@@ -26,10 +26,10 @@ fn main() {
         let mut sq_err = 0i64;
         for (x, t) in &data {
             model.zero_grad();
-            let y   = model.forward(x.view());
+            let y   = model.forward(&x.view());
             let g   = Tensor::from_vec(mse_grad(&y.data, &t.data), t.shape.clone());
             sq_err += g.data.iter().map(|d| (d.v as i64).pow(2)).sum::<i64>();
-            model.backward(g.view());
+            model.backward(&g.view());
             model.update(5);
         }
         if epoch % 50 == 0 || epoch == 299 {
@@ -40,7 +40,7 @@ fn main() {
 
     println!("\nFinal predictions:");
     for (x, t) in &data {
-        let y = model.forward(x.view()).data;
+        let y = model.forward(&x.view()).data;
         println!("  [{:5.2}, {:5.2}] → {:6.3}  (target {:5.2})",
             x.data[0].to_f64(), x.data[1].to_f64(), y[0].to_f64(), t.data[0].to_f64());
     }
