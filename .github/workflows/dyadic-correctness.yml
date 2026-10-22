@@ -2,9 +2,9 @@ name: Dyadic correctness candidate
 
 on:
   pull_request:
-    branches: [big-refactor]
+    branches: [master, big-refactor]
   push:
-    branches: [test/dyadic-invariants-20261022]
+    branches: [master, big-refactor]
 
 permissions:
   contents: read
