@@ -9,21 +9,21 @@
 //! | [`quant`]            | Per-column quantisation strategies |
 //! | [`rng`]              | `XorShift64` — deterministic integer PRNG for shuffling |
 //! | [`data`]             | `Dataset<S>` struct and `shuffled_indices` |
-//! | [`dataset_loaders`]  | Fluent `DatasetBuilder` for CSV / TSV / Parquet |
-//! | [`mnist_loader`]     | IDX binary format loader for MNIST |
+//! | [`data::dataset_loaders`] | Fluent `DatasetBuilder` for CSV / TSV / Parquet |
+//! | MNIST loaders        | IDX loader provided with the MNIST example |
 //!
 //! # Quick-start
 //!
 //! ```no_run
 //! use integers::nn::{Sequential, Linear, ReLU, Softmax};
-//! use integers::dataset_loaders::{DatasetBuilder, QuantizationMethod};
-//! use integers::{sample_to_dyadic, target_to_dyadic, cross_entropy_grad, argmax};
+//! use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod};
+//! use integers::{cross_entropy_grad, Tensor};
 //! use integers::data::shuffled_indices;
-//! use integers::rng::XorShift64;
+//! use integers::rng::seed_rng;
 //!
 //! const S: u32 = 7;
 //!
-//! let ds = DatasetBuilder::<i32>::new_csv("iris.csv")
+//! let ds = DatasetBuilder::new_csv("iris.csv")
 //!     .with_features(vec![0,1,2,3]).with_label_column(4)
 //!     .with_quantization(QuantizationMethod::MinMax)
 //!     .load().unwrap();
@@ -36,15 +36,15 @@
 //! model.add(Linear::new(8, 3, S, S, 32).with_grad_clip(8192).with_momentum(1));
 //! model.add(Softmax::new(S));
 //!
-//! let mut rng = XorShift64::new(42);
+//! seed_rng(42);
 //! for _epoch in 0..200 {
-//!     for &i in &shuffled_indices(ds.len(), &mut rng) {
-//!         let x = sample_to_dyadic(&ds.get_input(i).data,  shift);
-//!         let t = target_to_dyadic(&ds.get_target(i).data, shift);
+//!     for &i in &shuffled_indices(ds.len()) {
+//!         let x = ds.get_input(i);
+//!         let t = ds.get_target(i);
 //!         model.zero_grad();
-//!         let y = model.forward(&x);
-//!         let g = cross_entropy_grad(&y, &t, shift);
-//!         model.backward(&g);
+//!         let y = model.forward(&x.view());
+//!         let g = Tensor::from_vec(cross_entropy_grad(&y.data, &t.data, shift), y.shape.clone());
+//!         model.backward(&g.view());
 //!         model.update(7);
 //!     }
 //! }
@@ -146,16 +146,16 @@ pub fn argmax(output: &[Dyadic]) -> usize {
 /// # Usage
 /// ```no_run
 /// # use integers::{TrainingReporter};
-/// let mut reporter = TrainingReporter::new(500, 50);   // 500 epochs, log every 50
+/// let mut reporter = TrainingReporter::new(500, 50, 7); // scale exponent 7
 /// reporter.print_header();
 ///
 /// for epoch in 0..500 {
 ///     reporter.reset();
 ///     // ... training loop ...
-///     // reporter.record(sq_err_sum, n_correct, n_samples, test_acc_opt);
-///     reporter.maybe_print(epoch, Some(test_accuracy));
+///     reporter.record(0, false); // replace with sample loss and correctness
+///     reporter.maybe_print(epoch, None);
 /// }
-/// reporter.print_footer(final_train_acc, final_test_acc);
+/// reporter.print_footer();
 /// ```
 pub struct TrainingReporter {
     pub total_epochs:  u32,
