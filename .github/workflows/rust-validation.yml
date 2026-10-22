@@ -1,0 +1,24 @@
+name: Rust validation
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Library unit tests
+        run: cargo test --locked --lib
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+      - name: Documentation tests
+        run: cargo test --locked --doc
