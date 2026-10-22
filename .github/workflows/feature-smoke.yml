@@ -1,0 +1,34 @@
+name: Candidate feature compatibility
+
+on:
+  pull_request:
+    branches: [big-refactor]
+  push:
+    branches: [big-refactor]
+
+permissions:
+  contents: read
+
+jobs:
+  feature-check:
+    name: cargo check (${{ matrix.configuration.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - name: no-default-features
+            args: --no-default-features
+          - name: parquet-support
+            args: --no-default-features --features parquet-support
+          - name: image-decode
+            args: --no-default-features --features image-decode
+          - name: bench
+            args: --no-default-features --features bench
+          - name: all-features
+            args: --all-features
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check this feature configuration (all targets, no data required)
+        run: cargo check --locked --all-targets ${{ matrix.configuration.args }}
