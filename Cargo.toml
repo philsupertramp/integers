@@ -16,6 +16,11 @@ name              = "cifar"
 path              = "examples/cifar/main.rs"
 required-features = ["parquet-support", "image-decode"]
 
+[[example]]
+name = "mnist_to_parquet"
+path = "examples/mnist_to_parquet.rs"
+required-features = ["parquet-support"]
+
 [[bench]]
 name = "tensor_bench"
 harness = false
