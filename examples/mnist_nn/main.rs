@@ -26,7 +26,7 @@ use std::io::{self, Write}; // Added for the progress bar
 use integers::data::shuffled_indices;
 use integers::nn::{Linear, ReLU, Sequential};
 use integers::rng::XorShift64;
-use integers::dyadic::Dyadic;
+use integers::dyadic::Tensor;
 use integers::{argmax, mse_grad};
 
 fn main() {
@@ -107,24 +107,24 @@ fn main() {
             model.zero_grad();
 
             // Assemble batch tensors.
-            let batch_x: Vec<Vec<Dyadic>> = batch.iter()
-                .map(|&i| train.get_input(i).data)
+            let batch_x: Tensor = batch.iter()
+                .map(|&i| train.get_input(i))
                 .collect();
-            let batch_t: Vec<Vec<Dyadic>> = batch.iter()
-                .map(|&i| train.get_target(i).data)
+            let batch_t: Tensor = batch.iter()
+                .map(|&i| train.get_target(i))
                 .collect();
 
             // Forward (BatchNorm sees all N samples at once).
             let batch_y = model.forward_batch(&batch_x);
 
             for (n, (&idx, y)) in batch.iter().zip(batch_y.iter()).enumerate() {
-                if argmax(y) == train.labels[idx] as usize { train_correct += 1; }
+                if argmax(y.data) == train.labels[idx] as usize { train_correct += 1; }
                 let _ = n;
             }
 
             // Compute loss gradients and backward.
-            let batch_g: Vec<Vec<Dyadic>> = batch_y.iter().zip(batch_t.iter())
-                .map(|(y, t)| mse_grad(y, t))
+            let batch_g: Tensor = batch_y.iter().zip(batch_t.iter())
+                .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
                 .collect();
 
             model.backward_batch(&batch_g);
@@ -153,8 +153,8 @@ fn main() {
         // ── Evaluate on the fixed eval subset ──────────────────────────────────
         model.set_training(false);
         let eval_correct: usize = eval_indices.iter().filter(|&&i| {
-            let x = test.get_input(i).data;
-            argmax(&model.forward(&x)) == test.labels[i] as usize
+            let x = test.get_input(i);
+            argmax(&model.forward(&x.view()).data) == test.labels[i] as usize
         }).count();
 
         let eval_acc = eval_correct as f64 / N_EVAL as f64 * 100.0;
@@ -202,8 +202,8 @@ fn main() {
     model.set_training(false);
     let mut conf = [[0usize; 10]; 10];
     for i in 0..test.len() {
-        let x    = test.get_input(i).data;
-        let pred = argmax(&model.forward(&x));
+        let x    = test.get_input(i);
+        let pred = argmax(&model.forward(&x.view()).data);
         conf[test.labels[i] as usize][pred] += 1;
     }
     let total_correct: usize = (0..10).map(|c| conf[c][c]).sum();
