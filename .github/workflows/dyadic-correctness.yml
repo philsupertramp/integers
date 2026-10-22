@@ -1,0 +1,23 @@
+name: Dyadic correctness candidate
+
+on:
+  pull_request:
+    branches: [big-refactor]
+  push:
+    branches: [test/dyadic-invariants-20261022]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Existing library unit tests
+        run: cargo test --locked --lib
+      - name: Dyadic independent-oracle regressions
+        run: cargo test --locked --test dyadic_regression
+      - name: Check targets and examples (diagnostic baseline)
+        run: cargo check --locked --all-targets
