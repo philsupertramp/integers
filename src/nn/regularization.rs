@@ -483,7 +483,7 @@ impl Module for BatchNorm2D {
             .map(|x| x.data.iter().map(|d| d.to_f64()).collect())
             .collect();
 
-        println!("Incoming SHAPE {}", inputs.shape);
+        println!("Incoming SHAPE {:?}", inputs.shape);
         println!("DECODED SHAPE: {} [{}]", decoded.len(), decoded[0].len());
 
         let mut inv_stds  = vec![0.0f64; self.channels];
