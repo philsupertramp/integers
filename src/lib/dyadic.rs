@@ -41,8 +41,18 @@ impl Dyadic {
     #[inline] pub fn to_f64(self) -> f64 { (self.v as f64) * 2f64.powi(-(self.s as i32)) }
 
     /// Two representations are equivalent if they encode the same rational.
+    ///
+    /// Reduce powers of two from each mantissa rather than shifting by the
+    /// other operand's exponent. The latter can overflow even an i64.
     pub fn equivalent(self, rhs: Self) -> bool {
-        (self.v as i64) << rhs.s == (rhs.v as i64) << self.s
+        fn canonical(mut v: i32, mut s: u32) -> (i32, u32) {
+            if v == 0 { return (0, 0); }
+            let factors = v.trailing_zeros().min(s);
+            v >>= factors;
+            s -= factors;
+            (v, s)
+        }
+        canonical(self.v, self.s) == canonical(rhs.v, rhs.s)
     }
 }
 
@@ -73,25 +83,59 @@ pub fn stochastic_round(v: i32, k: u32) -> i32 {
 /// Stochastic rounding for `i64` intermediates (used in [`mul`]).
 #[inline]
 pub fn stochastic_round_i64(v: i64, k: u32) -> i32 {
-    if k == 0  { return v as i32; }
-    if k >= 64 { return 0; }
-
-    let mask      = (1u64 << k) - 1;
-    let threshold = rng_next() & mask;
-    let floor     = v >> k;
-    let remainder = (v as u64) & mask;
-    (floor + i64::from(remainder > threshold)) as i32
+    // A narrowing cast would wrap and change sign for wide products. The
+    // integer backend uses saturating i32 storage instead.
+    let rounded = if k == 0 {
+        v
+    } else if k < 64 {
+        let mask      = (1u64 << k) - 1;
+        let threshold = rng_next() & mask;
+        let floor     = v >> k;
+        let remainder = (v as u64) & mask;
+        floor + i64::from(remainder > threshold)
+    } else {
+        // Shifts of >= 64 are currently treated as underflow. They are outside
+        // the supported stochastic-precision range; handle explicitly so we
+        // never shift by the integer width.
+        0
+    };
+    rounded.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 // ─── Scale alignment ─────────────────────────────────────────────────────────
 
-/// Align `x_i = (v_i, s_i)` to a coarser target scale `s^* >= s_i`.
+/// Rescale mantissa so `v * 2^(-s)` stays invariant when representable.
 ///
-/// `align(x_i, s^*) = (⌊v_i / 2^(s^*−s_i)⌉, s^*)` using stochastic rounding.
-/// Lossy: bits shifted out are irrecoverable.
+/// Increasing the exponent makes the resolution *finer*: the mantissa must be
+/// left-shifted. If it exceeds i32, saturate rather than wrap. Decreasing the
+/// exponent is a lossy coarsening operation and uses stochastic rounding.
+/// Returns `(mantissa, overflowed_i32)`.
+fn rescale_mantissa(x: Dyadic, target_shift: u32) -> (i32, bool) {
+    if target_shift == x.s { return (x.v, false); }
+    if target_shift < x.s {
+        let k = x.s - target_shift;
+        return (if k < 32 { stochastic_round(x.v, k) }
+                else { stochastic_round_i64(x.v as i64, k) }, false);
+    }
+
+    let k = target_shift - x.s;
+    if k >= 32 {
+        return if x.v == 0 { (0, false) }
+               else if x.v < 0 { (i32::MIN, true) }
+               else { (i32::MAX, true) };
+    }
+    // i32 << 31 fits i64; a wider intermediate detects i32 saturation.
+    let wide = (x.v as i64) << k;
+    let narrowed = wide.clamp(i32::MIN as i64, i32::MAX as i64);
+    (narrowed as i32, wide != narrowed)
+}
+
+/// Align a Dyadic to a target exponent, preserving decoded value when possible.
+///
+/// A larger exponent means a *finer*, not coarser, scale. Saturates on overflow;
+/// reducing the exponent uses stochastic rounding.
 pub fn align(x: Dyadic, s_star: u32) -> Dyadic {
-    debug_assert!(s_star >= x.s, "align: target scale must be ≥ source scale");
-    Dyadic { v: stochastic_round(x.v, s_star - x.s), s: s_star }
+    Dyadic { v: rescale_mantissa(x, s_star).0, s: s_star }
 }
 
 // ─── Four arithmetic operations ───────────────────────────────────────────────
@@ -141,15 +185,15 @@ pub fn clip(v: i32, q_min: i32, q_max: i32) -> i32 { v.clamp(q_min, q_max) }
 
 // ─── Requantisation ───────────────────────────────────────────────────────────
 
-/// `ℛ(x, s_t) = (clip(SR(v_x, s_t-s_x), Q_{min}, Q_{max}), s_t)`.
+/// Rescale to `s_target` then clamp into the supplied signed storage bounds.
 ///
-/// Combines stochastic rescaling with bit-width enforcement.
-/// Returns the quantised value and a flag indicating whether clipping occurred.
+/// Rescaling to a larger exponent requires multiplying the mantissa, while
+/// rescaling to a smaller exponent requires stochastic rounding. The clipping
+/// flag also records overflow of the intermediate i32 mantissa itself.
 pub fn requantize(x: Dyadic, s_target: u32, q_min: i32, q_max: i32) -> (Dyadic, bool) {
-    debug_assert!(s_target >= x.s, "requantize: s_target must be >= x.s");
-    let rounded     = stochastic_round(x.v, s_target - x.s);
-    let was_clipped = rounded < q_min || rounded > q_max;
-    (Dyadic { v: clip(rounded, q_min, q_max), s: s_target }, was_clipped)
+    let (scaled, overflowed) = rescale_mantissa(x, s_target);
+    let was_clipped = overflowed || scaled < q_min || scaled > q_max;
+    (Dyadic { v: clip(scaled, q_min, q_max), s: s_target }, was_clipped)
 }
 
 // ─── Straight-Through Estimator ───────────────────────────────────────────────
@@ -389,7 +433,8 @@ mod tests {
     #[test] fn align_exact_power_of_two() {
         let a = align(Dyadic::new(4, 0), 2);
         assert_eq!(a.s, 2);
-        assert_eq!(a.v, 1);
+        assert_eq!(a.v, 16);
+        assert_eq!(a.to_f64(), 4.0);
     }
 
     #[test] fn add_same_scale() {
