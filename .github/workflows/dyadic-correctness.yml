@@ -19,5 +19,7 @@ jobs:
         run: cargo test --locked --lib
       - name: Dyadic independent-oracle regressions
         run: cargo test --locked --test dyadic_regression
-      - name: Check targets and examples (diagnostic baseline)
+      - name: Documentation tests
+        run: cargo test --locked --doc
+      - name: Check all default targets and examples
         run: cargo check --locked --all-targets
