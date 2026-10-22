@@ -2,7 +2,7 @@
 //!
 //! `Dataset<S>` holds pre-quantised inputs, integer labels, and one-hot
 //! targets as flat row-major tensors.  It is produced by the loaders in
-//! [`crate::dataset_loaders`].
+//! [`crate::data::dataset_loaders`].
 pub mod dataset_loaders;
 
 use std::io;
@@ -137,8 +137,8 @@ impl Dataset {
 ///
 /// # Example
 /// ```no_run
-/// let mut rng = dyadic_nn::rng::XorShift64::new(42);
-/// let idx = dyadic_nn::data::shuffled_indices(1000, &mut rng);
+/// integers::rng::seed_rng(42);
+/// let idx = integers::data::shuffled_indices(1000);
 /// for batch in idx.chunks(32) { /* train on batch */ }
 /// ```
 pub fn shuffled_indices(n: usize) -> Vec<usize> {
