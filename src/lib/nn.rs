@@ -837,7 +837,7 @@ mod tests {
 
         assert!(matches!(
             params.state.as_ref().unwrap(),
-            OptimizerState<S>::None,
+            OptimizerState::None,
         ))
     }
 
