@@ -29,9 +29,9 @@ cargo test --locked --doc
 cargo check --locked --all-targets
 ```
 See CONTRIBUTING.md for per-feature smoke commands (no-default-features, parquet-support, image-decode, bench and all-features). Use `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings` to inspect hygiene, but record pre-existing failures instead of mixing a large formatting sweep into functional work.
-Dataset-dependent examples and benchmarks are **not** CI acceptance tests without explicitly documented data provenance, seeds, and execution requirements. Do not commit data dumps, checkpoints, generated binaries, or access tokens.
+The bundled XOR and Iris examples have a **runtime smoke** workflow; it exercises the checked-in train/test Iris TSV splits but does not assert convergence or held-out generalization. MNIST/CIFAR require external datasets and are not executed in normal CI. Document data provenance, seeds and execution requirements for full experiments; do not commit data dumps, checkpoints, generated binaries or access tokens.
 
 ## PR handoff
-For [#14](https://github.com/philsupertramp/integers/issues/14), provide independent seeded layer/gradient oracles including quantization and STE tolerances. For [#26](https://github.com/philsupertramp/integers/issues/26), inventory actual runtime float use across layers and updates and guard noncompliant components. Partial #12/#13 baseline must not be mistaken for full closure.
+For [#14](https://github.com/philsupertramp/integers/issues/14), provide independent seeded layer/gradient oracles including quantization and STE tolerances. For [#26](https://github.com/philsupertramp/integers/issues/26), inventory actual runtime float use across layers and updates and guard noncompliant components. Passing candidate builds, layer oracles, or bundled example smoke tests does not establish full held-out accuracy or Raspberry Pi performance (#15/#18).
 
 Each PR must identify its base, linked issue, architectural decision (or `none`), numerical invariants touched, tests run (and tests not run), and any accuracy/performance results with device, compiler, flags, input, and baseline. Prefer small, reviewable changes. Treat stale docs or example programs as unverified until checked against the selected branch.

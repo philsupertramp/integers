@@ -1,22 +1,25 @@
 //! Iris classification with a dyadic integer network.
 //!
-//! Architecture: 4 → 8 → ReLU → 8 → ReLU → 3 → Softmax
-//! Loss:         Cross-entropy  (gradient = softmax_out − one_hot_target)
+//! Architecture: 4 → 8 → ReLU → 8 → ReLU → 3 (raw class scores)
+//! Loss:         half squared error (surrogate gradient = output − one_hot_target)
 //! Optimizer:    SGD with momentum (momentum_shift = 1, lr_shift = 7)
 //!
-//! This matches the architecture reported in the blog post that achieves 95%
-//! accuracy on i32, surpassing the f32 baseline of 90%.
+//! This is a runnable historical experiment, not a fixed-seed held-out benchmark.
+//! Softmax is deliberately absent: its FP64 forward pass is not permitted in
+//! the integer-only Sequential backend (ADR-002). Do not describe the resulting
+//! squared-error training as cross-entropy or compare its reported accuracy
+//! to a controlled FP32 baseline.
 //!
 //! # Usage
 //! ```sh
 //! cargo run --release --example iris
-//! cargo run --release --example iris -- path/to/iris.csv
+//! cargo run --release --example iris -- path/to/train.tsv path/to/test.tsv
 //! ```
 //!
-//! Expects the UCI Iris CSV (no header, label in column 4):
+//! Expects separate TSV train/test files (no header, numeric label in column 4):
 //! ```text
-//! 5.1,3.5,1.4,0.2,Iris-setosa
-//! 4.9,3.0,1.4,0.2,Iris-setosa
+//! 5.1\t3.5\t1.4\t0.2\t0
+//! 4.9\t3.0\t1.4\t0.2\t0
 //! …
 //! ```
 
@@ -24,14 +27,19 @@ use std::time::Instant;
 
 use integers::data::shuffled_indices;
 use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
-use integers::nn::{Linear, ReLU, Sequential, Softmax};
-use integers::{argmax, cross_entropy_grad, TrainingReporter};
+use integers::nn::{Linear, ReLU, Sequential};
+use integers::{argmax, mse_grad, TrainingReporter};
 use integers::dyadic::Tensor;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() != 1 && args.len() != 3 {
+        eprintln!("Usage: {} [TRAIN.tsv TEST.tsv]", args[0]);
+        eprintln!("Supply both paths to avoid evaluating on the training data.");
+        std::process::exit(2);
+    }
     let train_path = args.get(1).map(|s| s.as_str()).unwrap_or("data/iris_train.tsv");
-    let test_path = args.get(1).map(|s| s.as_str()).unwrap_or("data/iris_test.tsv");
+    let test_path = args.get(2).map(|s| s.as_str()).unwrap_or("data/iris_test.tsv");
 
     // ── Hyperparameters ───────────────────────────────────────────────────────
     const SHIFT:     u32 = 7;
@@ -73,7 +81,7 @@ fn main() {
         ds.len(), ds.n_features(), ds.n_classes);
 
     // ── Model ─────────────────────────────────────────────────────────────────
-    //  4 → Linear(8) → ReLU → Linear(8) → ReLU → Linear(3) → Softmax
+    //  4 → Linear(8) → ReLU → Linear(8) → ReLU → Linear(3) (raw scores)
     let mut model = Sequential::new();
     model.add(Linear::new(ds.n_features(), 8, SHIFT, SHIFT, BITS_OUT)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
@@ -83,7 +91,7 @@ fn main() {
     model.add(ReLU::new());
     model.add(Linear::new(8, ds.n_classes, SHIFT, SHIFT, BITS_OUT)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
-    //model.add(Softmax::new(SHIFT));
+    // No Softmax: the integer backend forbids its FP64 runtime path.
     model.summary();
     println!();
 
@@ -107,7 +115,7 @@ fn main() {
             let y = model.forward(&x.view());
 
             let correct = argmax(&y.data) == ds.labels[i] as usize;
-            let g = Tensor::from_vec(cross_entropy_grad(&y.data, &t.data, shift), y.shape.clone());
+            let g = Tensor::from_vec(mse_grad(&y.data, &t.data), y.shape.clone());
             let sq = g.data.iter().map(|d| (d.v as i64).pow(2)).sum::<i64>();
 
             reporter.record(sq, correct);

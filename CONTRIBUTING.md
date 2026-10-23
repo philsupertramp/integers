@@ -25,14 +25,14 @@ cargo check --locked --all-targets --no-default-features --features image-decode
 cargo check --locked --all-targets --no-default-features --features bench
 cargo check --locked --all-targets --all-features
 ```
-`cifar` requires both `parquet-support` and `image-decode`, `mnist_to_parquet` requires `parquet-support`, and `tensor_bench` requires `bench`. Compilation is not an assertion that dataset-dependent examples train correctly. See the separate feature-smoke workflow and track failures under [#13](https://github.com/philsupertramp/integers/issues/13)/[#20](https://github.com/philsupertramp/integers/issues/20).
+`cifar` requires both `parquet-support` and `image-decode`, `mnist_to_parquet` requires `parquet-support`, and `tensor_bench` requires `bench`. Compilation is not an assertion that dataset-dependent models learn. In addition to the separate feature-smoke workflow, the bundled-example workflow runs XOR and the checked-in Iris train/test splits as **runtime smoke tests**; MNIST/CIFAR full dataset runs remain outside CI (#15). Track feature and integration regressions under [#13](https://github.com/philsupertramp/integers/issues/13) and wider hygiene under [#20](https://github.com/philsupertramp/integers/issues/20).
 
 Formatting and lint diagnostics:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 ```
-A failing pre-existing check should be noted, not concealed. CI presently targets compilation and unit-level validation; wider quality gates will follow once the baseline is known.
+A failing pre-existing check should be noted, not concealed. CI presently covers compilation, unit/oracle tests, bundled example execution and optional feature builds; wider hygiene and held-out experiment gates remain separate.
 
 ## Experiments and claims
 Record Rust compiler version, git commit, target hardware, seed, dataset identity and split, hyperparameters, iterations, accuracy on a complete held-out test set, runtime, memory, and methodology. Distinguish arithmetic correctness from model convergence and runtime performance. When comparing to FP32, specify whether kernels and implementation quality are comparable. Don't commit licensed datasets without confirming redistribution rights.
