@@ -1,0 +1,40 @@
+name: Held-out protocol smoke
+
+on:
+  pull_request:
+    branches: [big-refactor]
+  push:
+    branches: [big-refactor]
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Deterministic split and sampling unit tests
+        run: cargo test --locked --test experiment_protocol
+      - name: Paired integer / FP32 Iris fixture smoke
+        run: python3 experiments/run_baselines.py --dataset iris --smoke --epochs 2 --seeds 1337 2027 --output-dir /tmp/integers-smoke
+      - name: Validate report structure and test isolation
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/tmp/integers-smoke/iris/smoke")
+          reports = list(root.glob("*-seed-*.json"))
+          assert len(reports) == 4
+          assert (root / "manifest.json").exists()
+          assert (root / "summary.md").exists()
+          for path in reports:
+              row = json.loads(path.read_text())
+              assert row["smoke"] is True
+              assert row["train_size"] == 12
+              assert row["validation_size"] == 3
+              assert row["test_size"] == 30
+              assert len(row["learning_curve"]) == 2
+              assert 0 <= row["test_accuracy_pct"] <= 100
+          PY
