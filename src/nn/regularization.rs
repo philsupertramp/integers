@@ -45,6 +45,7 @@ impl Dropout {
     }
 
     fn apply_mask(input: &TensorView, mask: &[bool], scale: Dyadic, qs: u32) -> Tensor {
+        assert_eq!(input.data.len(), mask.len(), "Dropout: mask/gradient shape mismatch");
         Tensor::from_vec(
             input.data.iter().zip(mask).map(|(&x, &keep)| {
                 if keep { mul(x, scale, qs) } else { Dyadic::new(0, x.s) }
@@ -66,7 +67,8 @@ impl Module for Dropout {
     }
 
     fn backward(&mut self, grad: &TensorView) -> Tensor {
-        if !self.training || self.mask.is_empty() { return grad.to_tensor(); }
+        if !self.training { return grad.to_tensor(); }
+        assert_eq!(grad.data.len(), self.mask.len(), "Dropout: missing or incorrect forward mask");
         Self::apply_mask(&grad, &self.mask, self.scale, self.quant_shift)
     }
 
@@ -87,7 +89,10 @@ impl Module for Dropout {
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        if !self.training || self.batch_masks.is_empty() { return grads.clone(); }
+        if !self.training { return grads.clone(); }
+        assert!(grads.shape.len() >= 2, "Dropout: expected batched gradients");
+        assert_eq!(grads.shape[0], self.batch_masks.len(), "Dropout: batch mask count mismatch");
+        assert_eq!(grads.data.len(), grads.shape.iter().product::<usize>(), "Dropout: invalid gradient buffer shape");
         grads.iter().enumerate()
             .map(|(n, g)| Self::apply_mask(&g, &self.batch_masks[n], self.scale, self.quant_shift))
             .collect()
@@ -600,6 +605,21 @@ impl Module for BatchNorm2D {
 }
 
 
+// Compare v * 2^(-s) without floats or unbounded shifts.
+// Equal highest binary exponents imply a scale difference of at most 31.
+fn dyadic_greater(a: Dyadic, b: Dyadic) -> bool {
+    if a.v == 0 || b.v == 0 || (a.v < 0) != (b.v < 0) {
+        return a.v > b.v;
+    }
+    let a_order = (31 - a.v.unsigned_abs().leading_zeros()) as i64 - a.s as i64;
+    let b_order = (31 - b.v.unsigned_abs().leading_zeros()) as i64 - b.s as i64;
+    if a_order != b_order {
+        return if a.v > 0 { a_order > b_order } else { a_order < b_order };
+    }
+    let shift = a.s.max(b.s);
+    ((a.v as i64) << (shift - a.s)) > ((b.v as i64) << (shift - b.s))
+}
+
 pub struct MaxPool2D {
     pub channels: usize,
     pub in_h:     usize,
@@ -614,6 +634,8 @@ pub struct MaxPool2D {
 
 impl MaxPool2D {
     pub fn new(channels: usize, in_h: usize, in_w: usize, kernel: usize, stride: usize) -> Self {
+        assert!(channels > 0 && kernel > 0 && stride > 0, "MaxPool2D: nonzero channels, kernel and stride required");
+        assert!(in_h >= kernel && in_w >= kernel, "MaxPool2D: kernel must fit input");
         let out_h = (in_h - kernel) / stride + 1;
         let out_w = (in_w - kernel) / stride + 1;
         Self { channels, in_h, in_w, kernel, stride, out_h, out_w,
@@ -628,6 +650,7 @@ impl MaxPool2D {
     fn pool_forward(
         &self, input: &TensorView, mask: &mut Vec<usize>,
     ) -> Tensor {
+        assert_eq!(input.data.len(), self.channels * self.in_h * self.in_w, "MaxPool2D: input shape mismatch");
         let mut out = Tensor::from_vec(
             vec![Dyadic::new(0, 0); self.output_len()],
             vec![self.output_len()]
@@ -638,12 +661,11 @@ impl MaxPool2D {
                 for ow in 0..self.out_w {
                     let ih0 = oh * self.stride;
                     let iw0 = ow * self.stride;
-                    let mut mx  = i32::MIN;
                     let mut mxi = self.in_idx(c, ih0, iw0);
                     for kh in 0..self.kernel {
                         for kw in 0..self.kernel {
                             let idx = self.in_idx(c, ih0 + kh, iw0 + kw);
-                            if input.data[idx].v > mx { mx = input.data[idx].v; mxi = idx; }
+                            if dyadic_greater(input.data[idx], input.data[mxi]) { mxi = idx; }
                         }
                     }
                     let op = self.out_idx(c, oh, ow);
@@ -658,6 +680,8 @@ impl MaxPool2D {
     fn pool_backward(
         &self, grad: &TensorView, mask: &[usize],
     ) -> Tensor {
+        assert_eq!(grad.data.len(), self.output_len(), "MaxPool2D: output gradient size mismatch");
+        assert_eq!(mask.len(), self.output_len(), "MaxPool2D: missing forward mask");
         let g_s = grad.data.first().map_or(0, |g| g.s);
         let mut gi = Tensor::from_vec(
             vec![Dyadic::new(0, g_s); self.channels * self.in_h * self.in_w],
@@ -689,6 +713,10 @@ impl Module for MaxPool2D {
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
+        let sample = self.channels * self.in_h * self.in_w;
+        assert!(inputs.shape.len() >= 2, "MaxPool2D: expected batched input");
+        assert_eq!(inputs.shape[1..].iter().product::<usize>(), sample, "MaxPool2D: input sample shape mismatch");
+        assert_eq!(inputs.data.len(), inputs.shape[0] * sample, "MaxPool2D: input buffer mismatch");
         let mut all_masks = Vec::with_capacity(inputs.len());
         let outputs: Tensor = inputs.iter().map(|x| {
             let mut mask = Vec::new();
@@ -701,6 +729,10 @@ impl Module for MaxPool2D {
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
+        assert!(grads.shape.len() >= 2, "MaxPool2D: expected batched gradients");
+        assert_eq!(grads.shape[0], self.batch_max_masks.len(), "MaxPool2D: batch size mismatch");
+        assert_eq!(grads.shape[1..].iter().product::<usize>(), self.output_len(), "MaxPool2D: gradient sample size mismatch");
+        assert_eq!(grads.data.len(), grads.shape[0] * self.output_len(), "MaxPool2D: gradient buffer mismatch");
         grads.iter().enumerate()
             .map(|(n, g)| self.pool_backward(&g, &self.batch_max_masks[n]))
             .collect()

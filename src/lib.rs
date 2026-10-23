@@ -85,9 +85,10 @@ pub fn target_to_dyadic(values: &[i32], shift: u32) -> Vec<Dyadic> {
 /// Both slices must share the same dyadic scale.  The result is passed
 /// directly to [`nn::Sequential::backward`].
 pub fn mse_grad(output: &[Dyadic], target: &[Dyadic]) -> Vec<Dyadic> {
+    assert_eq!(output.len(), target.len(), "mse_grad: output/target length mismatch");
     output.iter().zip(target.iter())
         .map(|(&y, &t)| {
-            debug_assert_eq!(y.s, t.s, "output and target must share scale for MSE grad");
+            assert_eq!(y.s, t.s, "mse_grad: output/target scale mismatch");
             Dyadic::new(y.v.saturating_sub(t.v), y.s)
         })
         .collect()
@@ -117,8 +118,11 @@ pub fn mse_grad(output: &[Dyadic], target: &[Dyadic]) -> Vec<Dyadic> {
 /// ```
 pub fn cross_entropy_grad(output: &[Dyadic], target: &[Dyadic], shift: u32) -> Vec<Dyadic> {
     // p − t: both at `shift`, result at `shift`.
+    assert_eq!(output.len(), target.len(), "cross_entropy_grad: output/target length mismatch");
     output.iter().zip(target.iter())
         .map(|(&p, &t)| {
+            assert_eq!(p.s, shift, "cross_entropy_grad: probability scale mismatch");
+            assert_eq!(t.s, shift, "cross_entropy_grad: target scale mismatch");
             Dyadic::new(p.v.saturating_sub(t.v), shift)
         })
         .collect()

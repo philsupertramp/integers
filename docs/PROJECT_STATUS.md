@@ -23,8 +23,8 @@
 
 ## Known training risks
 
-- **#14:** Retained layer forward/backward gradients, shape errors, cache isolation, gradient accumulation, saturation/STE and independent FP64 oracles are not validated.
-- **#26:** ADR-002 requires *all* actual integer-backend forward/backward/optimizer update calculations to be integer arithmetic. BatchNorm1D and BatchNorm2D currently perform **f64** during forward and backward; they are **noncompliant** for integer training until redesigned or excluded with enforcement tests. Float in initialization, dataset preparation, tests, independent oracles and reporting is allowed.
+- **#14 (draft PR #28):** Dataset-free independent oracle tests now cover Linear, ReLU, Conv2D, MaxPool2D, Flatten, loss gradients, Softmax STE and Dropout, with shape, batch/cache, accumulation and saturation regression cases. See [layer verification](LAYER_VERIFICATION.md) for the limited numerical matrix. Final CI and review remain required; coverage does **not** establish full neural network correctness.
+- **#26:** In addition to previously identified floating-point BatchNorm1D/2D, source review for #14 found that Softmax forward computes FP64 exponentials during runtime. Neither layer family is compliant. ADR-002 requires *all* actual integer-backend forward/backward/optimizer update calculations to be integer arithmetic. BatchNorm1D and BatchNorm2D currently perform **f64** during forward and backward; they are **noncompliant** for integer training until redesigned or excluded with enforcement tests. Float in initialization, dataset preparation, tests, independent oracles and reporting is allowed.
 - The default MNIST CNN example trains on **256 sampled train images** and checks **20 sampled test images** per epoch. Do not present this as held-out convergence evidence. No accepted full-dataset experiment, x86_64 model-level accuracy proof or measured Pi 5 AArch64 performance yet.
 - The current loss-gradient helpers use `zip` and/or assume shared scale; input length/shape assumptions and division overflow behavior need deliberate coverage before production claims.
 

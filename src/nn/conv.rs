@@ -27,6 +27,8 @@ pub struct Conv2D {
     output_cache:       Tensor,
     input_batch_cache:  Tensor,
     output_batch_cache: Tensor,
+    clip_cache: Vec<bool>,
+    clip_batch_cache: Vec<Vec<bool>>,
     grad_k: Tensor,
     grad_b: Tensor,
     vel_k:  Tensor,
@@ -43,6 +45,7 @@ impl Conv2D {
         in_h: usize, in_w: usize,
         weight_shift: u32, quant_shift: u32, output_bits: u32,
     ) -> Self {
+        assert!(in_channels > 0 && out_channels > 0 && kernel_h > 0 && kernel_w > 0, "Conv2D: dimensions must be nonzero");
         assert!(in_h >= kernel_h && in_w >= kernel_w);
         let fan_in  = in_channels * kernel_h * kernel_w;
         let n_k     = out_channels * fan_in;
@@ -67,6 +70,8 @@ impl Conv2D {
             output_cache: Tensor::new(),
             input_batch_cache: Tensor::new(),
             output_batch_cache: Tensor::new(),
+            clip_cache: Vec::new(),
+            clip_batch_cache: Vec::new(),
             grad_k: Tensor::zeros(vec![n_k]),
             grad_b: Tensor::zeros(vec![out_channels]),
             vel_k:  Tensor::zeros(vec![n_k]),
@@ -88,8 +93,10 @@ impl Conv2D {
         + kh * self.kernel_w + kw
     }
 
-    fn forward_one(&mut self, input: &TensorView) -> Tensor {
+    fn forward_one(&mut self, input: &TensorView) -> (Tensor, Vec<bool>) {
+        assert_eq!(input.data.len(), self.in_channels * self.in_h * self.in_w, "Conv2D: input tensor size mismatch");
         let mut out = vec![Dyadic::new(0, 0); self.output_len()];
+        let mut clipped = vec![false; self.output_len()];
         for oc in 0..self.out_channels {
             for oh in 0..self.out_h {
                 for ow in 0..self.out_w {
@@ -105,22 +112,32 @@ impl Conv2D {
                             }
                         }
                     }
-                    let (y, _) = requantize(acc, acc.s, self.q_min, self.q_max);
-                    out[self.out_idx(oc, oh, ow)] = y;
+                    let (y, saturated) = requantize(acc, acc.s, self.q_min, self.q_max);
+                    let op = self.out_idx(oc, oh, ow);
+                    out[op] = y;
+                    clipped[op] = saturated;
                 }
             }
         }
-        Tensor::from_vec(out, vec![self.output_len()])
+        (Tensor::from_vec(out, vec![self.output_len()]), clipped)
     }
 
-    fn backward_one(&mut self, grad_output: &TensorView, input: &TensorView, output: &TensorView) -> Tensor {
+    fn backward_one(&mut self, grad_output: &TensorView, input: &TensorView, output: &TensorView, clipped: &[bool]) -> Tensor {
+        assert_eq!(grad_output.data.len(), self.output_len(), "Conv2D: output gradient size mismatch");
+        assert_eq!(input.data.len(), self.in_channels * self.in_h * self.in_w, "Conv2D: missing input cache");
+        assert_eq!(output.data.len(), self.output_len(), "Conv2D: missing output cache");
+        assert_eq!(clipped.len(), self.output_len(), "Conv2D: missing saturation cache");
         let g_s = grad_output.data.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_channels * self.in_h * self.in_w];
         for oc in 0..self.out_channels {
             for oh in 0..self.out_h {
                 for ow in 0..self.out_w {
                     let op  = self.out_idx(oc, oh, ow);
-                    let gr  = ste_requantize(grad_output.data[op], output.data[op].v, self.q_min, self.q_max);
+                    let gr  = if clipped[op] {
+                        Dyadic::new(0, grad_output.data[op].s)
+                    } else {
+                        ste_requantize(grad_output.data[op], output.data[op].v, self.q_min, self.q_max)
+                    };
                     let gj  = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
                     for ic in 0..self.in_channels {
                         for kh in 0..self.kernel_h {
@@ -153,31 +170,46 @@ impl Module for Conv2D {
     }
 
     fn forward(&mut self, input: &TensorView) -> Tensor {
-        let out = self.forward_one(&input.clone());
+        let (out, clipped) = self.forward_one(input);
         self.input_cache  = input.to_tensor();
         self.output_cache = out.clone();
+        self.clip_cache = clipped;
         out
     }
 
     fn backward(&mut self, grad: &TensorView) -> Tensor {
         let inp = self.input_cache.clone();
         let out = self.output_cache.clone();
-        self.backward_one(grad, &inp.view(), &out.view())
+        let clipped = self.clip_cache.clone();
+        self.backward_one(grad, &inp.view(), &out.view(), &clipped)
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
-        let outputs: Tensor = inputs.iter().map(|x| self.forward_one(&x)).collect();
+        let sample = self.in_channels * self.in_h * self.in_w;
+        assert!(inputs.shape.len() >= 2, "Conv2D: expected batched input");
+        assert_eq!(inputs.shape[1..].iter().product::<usize>(), sample, "Conv2D: batch sample shape mismatch");
+        assert_eq!(inputs.data.len(), inputs.shape[0] * sample, "Conv2D: batch buffer size mismatch");
+        let mut clips = Vec::with_capacity(inputs.shape[0]);
+        let outputs: Tensor = inputs.iter().map(|x| { let (out, clipped) = self.forward_one(&x); clips.push(clipped); out }).collect();
+        self.clip_batch_cache = clips;
         self.input_batch_cache  = inputs.clone();
         self.output_batch_cache = outputs.clone();
         outputs
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
+        let n = self.input_batch_cache.shape.first().copied().expect("Conv2D: missing batch cache");
+        assert!(grads.shape.len() >= 2, "Conv2D: expected batched output gradients");
+        assert_eq!(grads.shape[0], n, "Conv2D: gradient batch size mismatch");
+        assert_eq!(grads.shape[1..].iter().product::<usize>(), self.output_len(), "Conv2D: gradient sample shape mismatch");
+        assert_eq!(grads.data.len(), n * self.output_len(), "Conv2D: gradient buffer size mismatch");
+        assert_eq!(self.clip_batch_cache.len(), n, "Conv2D: missing batch saturation cache");
         let inputs = std::mem::take(&mut self.input_batch_cache);
         let outputs = std::mem::take(&mut self.output_batch_cache);
-        grads.iter().zip(inputs.iter().zip(outputs.iter()))
-            .map(|(g, (inp, out))| {
-                self.backward_one(&g, &inp, &out)
+        let clips = std::mem::take(&mut self.clip_batch_cache);
+        grads.iter().zip(inputs.iter().zip(outputs.iter())).zip(clips.iter())
+            .map(|((g, (inp, out)), clipped)| {
+                self.backward_one(&g, &inp, &out, clipped)
             })
             .collect()
     }

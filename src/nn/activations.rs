@@ -9,6 +9,7 @@ pub struct ReLU {
     mask_bits: Vec<u64>,
     batch_size: usize,
     sample_size: usize,
+    shape_cache: Vec<usize>,
 }
 
 impl ReLU {
@@ -17,6 +18,7 @@ impl ReLU {
             mask_bits: Vec::new(), 
             batch_size: 0,
             sample_size: 0,
+            shape_cache: Vec::new(),
         } 
     }
 }
@@ -28,6 +30,7 @@ impl Module for ReLU {
         
         self.batch_size = 1;
         self.sample_size = sample_size;
+        self.shape_cache = input.shape.to_vec();
         self.mask_bits.clear();
         self.mask_bits.reserve((sample_size + 63) / 64);
 
@@ -58,6 +61,7 @@ impl Module for ReLU {
     fn backward(&mut self, grad: &TensorView) -> Tensor {
         assert_eq!(self.batch_size, 1, "Use backward_batch for batched gradients");
         assert_eq!(grad.data.len(), self.sample_size);
+        assert_eq!(grad.shape, self.shape_cache, "ReLU: gradient shape differs from cached forward");
         
         let grad_output: Vec<Dyadic> = grad.data.iter().enumerate().map(|(i, &g)| {
             let bit_idx = i % 64;
@@ -75,10 +79,13 @@ impl Module for ReLU {
         assert!(batch.shape.len() >= 1, "Expected batched input");
         
         let batch_size = batch.shape[0];
-        let sample_size = batch.data.len() / batch_size;
+        assert!(batch_size > 0, "ReLU: empty batch is unsupported");
+        let sample_size = batch.shape[1..].iter().product::<usize>();
+        assert_eq!(batch.data.len(), batch_size * sample_size, "ReLU: batch data/shape mismatch");
         
         self.batch_size = batch_size;
         self.sample_size = sample_size;
+        self.shape_cache = batch.shape.clone();
         
         let bits_per_sample = (sample_size + 63) / 64;
         self.mask_bits.clear();
@@ -121,6 +128,7 @@ impl Module for ReLU {
     /// Backward pass for a batch
     fn backward_batch(&mut self, grad: &Tensor) -> Tensor {
         assert_eq!(grad.data.len(), self.batch_size * self.sample_size);
+        assert_eq!(grad.shape, self.shape_cache, "ReLU: batched gradient shape mismatch");
         
         let bits_per_sample = (self.sample_size + 63) / 64;
         let mut grad_output = Vec::with_capacity(grad.data.len());
