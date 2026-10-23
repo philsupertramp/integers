@@ -75,9 +75,11 @@ cargo test --locked --doc
 cargo check --locked --all-targets
 cargo run --example xor
 cargo run --release --example iris
+# For custom Iris input, supply separate no-header TSV train and test splits:
+cargo run --release --example iris -- data/iris_train.tsv data/iris_test.tsv
 ```
 
-The CI workflows validate default unit/regression/doctest/integration compilation and separately attempt all-target feature checks. They **do not download MNIST/CIFAR datasets or run dataset-dependent training**.
+The correctness and feature workflows validate default tests/doctests and all-target compilation under separate configurations. The dedicated `example-runtime.yml` workflow **executes** bundled XOR and Iris training using the checked-in Iris train/test TSV files, and checks that Iris rejects a train-only dataset path. Passing these smoke runs shows that the examples execute, **not** that model convergence, accuracy, or generalization has been independently validated. CI does **not** download MNIST/CIFAR datasets or execute those full training programs.
 
 ### Cargo features
 
@@ -102,6 +104,6 @@ cargo run --release --example cifar --features parquet-support,image-decode
 
 **Integer-only training** ([ADR-002](docs/ARCHITECTURE_DECISIONS.md)): `Sequential::new()` enforces a fail-closed integer-only layer allowlist during forward, backward and parameter updates. `Linear`, `Conv2D`, `ReLU`, `MaxPool2D`, `Flatten` and `Dropout` explicitly declare compliant runtime arithmetic. Initialization/preprocessing, diagnostic output and FP reference tests may use floats. The known floating-point runtime paths in `Softmax` and `BatchNorm1D/2D` are excluded by default; opt in with `Sequential::new_experimental_float()` **only for historical float experiments**, not integer-only training. Custom modules require explicit source review/declaration. See [the audited boundary](docs/INTEGER_TRAINING_BOUNDARY.md) and [#26](https://github.com/philsupertramp/integers/issues/26). This is not a complete mathematical correctness or binary-level absence-of-FP proof.
 
-PR #24 fixed major scale and integration regressions; broader division/overflow ranges remain open in [#12](https://github.com/philsupertramp/integers/issues/12), feature/example checks in [#13](https://github.com/philsupertramp/integers/issues/13), and gradient/oracle/caching checks in [#14](https://github.com/philsupertramp/integers/issues/14). The default MNIST CNN demo samples only 256 training and 20 evaluation images per epoch; this is **not** a full held-out benchmark. No verified deployment/benchmark evidence on Raspberry Pi 5 AArch64 yet.
+PR #24 fixed major scale and integration regressions; additional numerical checks are tracked under [#12](https://github.com/philsupertramp/integers/issues/12) and layer/gradient oracle work under [#14](https://github.com/philsupertramp/integers/issues/14). Example execution is covered by [#13](https://github.com/philsupertramp/integers/issues/13); reproducible, independently held-out model comparison remains [#15](https://github.com/philsupertramp/integers/issues/15). The default MNIST CNN demo samples only 256 training and 20 evaluation images per epoch; this is **not** a full held-out benchmark. No verified deployment/benchmark evidence on Raspberry Pi 5 AArch64 yet.
 
 Follow [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [project status](docs/PROJECT_STATUS.md) for scoped contributions; do not merge PR #9 into `master` without separate maintainer approval.
