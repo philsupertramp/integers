@@ -292,3 +292,30 @@ fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_s
         bn2.backward_batch(&t(&[128; 4], S, &[1, 4]));
     });
 }
+
+#[test]
+fn experimental_extreme_inputs_and_saturation_are_bounded() {
+    const S: u32 = 7;
+    let mut sm = Sequential::new_experimental_float();
+    sm.add(Softmax::new(S));
+    let logits = Tensor::from_vec(vec![d(i32::MIN, 0), d(i32::MAX, 0)], vec![2]);
+    // The ideal [0, 1] is clipped to 8-bit signed representability at s=7.
+    assert_eq!(sm.forward(&logits.view()).data, vec![d(0, S), d(127, S)]);
+
+    let mut bn1 = Sequential::new_experimental_float();
+    bn1.add(BatchNorm1D::new(1, S));
+    let extremes = Tensor::from_vec(
+        vec![d(i32::MIN, S), d(i32::MAX, S)],
+        vec![2, 1],
+    );
+    let outputs = bn1.forward_batch(&extremes);
+    near(outputs.data[0], -1.0, 0.51);
+    near(outputs.data[1], 1.0, 0.51);
+
+    let mut saturated = BatchNorm1D::new(1, S);
+    saturated.gamma.data[0] = d(i32::MAX, S);
+    let positive = saturated.forward_batch(&t(&[0, 0, 128], S, &[3, 1]));
+    assert_eq!(positive.data[2].v, i32::MAX);
+    let negative = saturated.forward_batch(&t(&[0, 0, -128], S, &[3, 1]));
+    assert_eq!(negative.data[2].v, i32::MIN);
+}
