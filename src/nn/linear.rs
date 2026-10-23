@@ -22,6 +22,8 @@ pub struct Linear {
     // batch caches (batch call)
     input_batch_cache:  Tensor,
     output_batch_cache: Tensor,
+    clip_cache: Vec<bool>,
+    clip_batch_cache: Vec<Vec<bool>>,
     // gradients + velocity
     grad_w: Tensor,
     grad_b: Tensor,
@@ -61,6 +63,8 @@ impl Linear {
             output_cache: Tensor::new(),
             input_batch_cache: Tensor::new(),
             output_batch_cache: Tensor::new(),
+            clip_cache: Vec::new(),
+            clip_batch_cache: Vec::new(),
             grad_w: Tensor::zeros(vec![n_w]),
             grad_b: Tensor::zeros(vec![out_features]),
             vel_w: Tensor::zeros(vec![n_w]),
@@ -76,17 +80,20 @@ impl Linear {
     #[inline] fn w(&self, j: usize, i: usize) -> Dyadic { self.weights.data[j * self.in_features + i] }
     #[inline] fn flat(&self, j: usize, i: usize) -> usize { j * self.in_features + i }
 
-    fn forward_one(&mut self, input: &TensorView) -> Tensor {
+    fn forward_one(&mut self, input: &TensorView) -> (Tensor, Vec<bool>) {
+        assert_eq!(input.data.len(), self.in_features, "Linear: input feature count mismatch");
         let mut out = Vec::with_capacity(self.out_features);
+        let mut clipped = Vec::with_capacity(self.out_features);
         for j in 0..self.out_features {
             let mut acc = self.biases.data[j];
             for i in 0..self.in_features {
                 acc = add(acc, mul(self.w(j, i), input.data[i], self.quant_shift));
             }
-            let (y, _) = requantize(acc, acc.s, self.q_min, self.q_max);
+            let (y, was_clipped) = requantize(acc, acc.s, self.q_min, self.q_max);
             out.push(y);
+            clipped.push(was_clipped);
         }
-        Tensor::from_vec(out, vec![self.out_features])
+        (Tensor::from_vec(out, vec![self.out_features]), clipped)
     }
 
     fn backward_one(
@@ -94,11 +101,20 @@ impl Linear {
         grad_output: &TensorView,
         input:       &TensorView,
         output:      &TensorView,
+        clipped:     &[bool],
     ) -> Tensor {
+        assert_eq!(grad_output.data.len(), self.out_features, "Linear: output gradient count mismatch");
+        assert_eq!(input.data.len(), self.in_features, "Linear: missing or invalid forward cache");
+        assert_eq!(output.data.len(), self.out_features, "Linear: missing output cache");
+        assert_eq!(clipped.len(), self.out_features, "Linear: missing saturation cache");
         let g_s = grad_output.data.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_features];
         for j in 0..self.out_features {
-            let gr = ste_requantize(grad_output.data[j], output.data[j].v, self.q_min, self.q_max);
+            let gr = if clipped[j] {
+                Dyadic::new(0, grad_output.data[j].s)
+            } else {
+                ste_requantize(grad_output.data[j], output.data[j].v, self.q_min, self.q_max)
+            };
             let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
             for i in 0..self.in_features {
                 let idx = self.flat(j, i);
@@ -122,33 +138,47 @@ impl Module for Linear {
     }
 
     fn forward(&mut self, input: &TensorView) -> Tensor {
-        let out = self.forward_one(&input.clone());
+        let (out, clipped) = self.forward_one(input);
         self.input_cache  = input.to_tensor();
         self.output_cache = out.clone();
+        self.clip_cache = clipped;
         out
     }
 
     fn backward(&mut self, grad_output: &TensorView) -> Tensor {
         let input  = self.input_cache.clone();
         let output = self.output_cache.clone();
-        self.backward_one(grad_output, &input.view(), &output.view())
+        let clipped = self.clip_cache.clone();
+        self.backward_one(grad_output, &input.view(), &output.view(), &clipped)
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
+        assert!(inputs.shape.len() >= 2, "Linear: expected [batch, features]");
+        assert_eq!(inputs.shape[1..].iter().product::<usize>(), self.in_features, "Linear: batch feature shape mismatch");
+        assert_eq!(inputs.data.len(), inputs.shape[0] * self.in_features, "Linear: batch buffer length mismatch");
+        let mut clips = Vec::with_capacity(inputs.shape[0]);
         let outputs: Tensor = inputs.iter()
-            .map(|x| self.forward_one(&x))
+            .map(|x| { let (out, clipped) = self.forward_one(&x); clips.push(clipped); out })
             .collect();
+        self.clip_batch_cache = clips;
         self.input_batch_cache  = inputs.clone();
         self.output_batch_cache = outputs.clone();
         outputs
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
+        let n = self.input_batch_cache.shape.first().copied().expect("Linear: missing batch forward cache");
+        assert!(grads.shape.len() >= 2, "Linear: expected batched gradients");
+        assert_eq!(grads.shape[0], n, "Linear: gradient batch size mismatch");
+        assert_eq!(grads.shape[1..].iter().product::<usize>(), self.out_features, "Linear: gradient feature shape mismatch");
+        assert_eq!(grads.data.len(), n * self.out_features, "Linear: gradient buffer mismatch");
+        assert_eq!(self.clip_batch_cache.len(), n, "Linear: missing batch saturation cache");
         let inputs = std::mem::take(&mut self.input_batch_cache);
         let outputs = std::mem::take(&mut self.output_batch_cache);
-        grads.iter().zip(inputs.iter().zip(outputs.iter()))
-            .map(|(g, (inp, out))| {
-                self.backward_one(&g, &inp, &out)
+        let clips = std::mem::take(&mut self.clip_batch_cache);
+        grads.iter().zip(inputs.iter().zip(outputs.iter())).zip(clips.iter())
+            .map(|((g, (inp, out)), clipped)| {
+                self.backward_one(&g, &inp, &out, clipped)
             })
             .collect()
     }
