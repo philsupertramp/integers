@@ -21,6 +21,8 @@ jobs:
         run: cargo test --locked --test dyadic_regression
       - name: Public API integration smoke
         run: cargo test --locked --test public_api_smoke
+      - name: Independent layer and gradient oracles
+        run: cargo test --locked --test layer_oracles
       - name: Documentation tests
         run: cargo test --locked --doc
       - name: Check all default targets and examples
