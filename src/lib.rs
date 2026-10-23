@@ -30,7 +30,8 @@
 //!
 //! let shift = ds.input_shift.max(0) as u32;
 //!
-//! let mut model = Sequential::new();
+//! // The Float Softmax layer is retained solely for historical experiments.
+//! let mut model = Sequential::new_experimental_float();
 //! model.add(Linear::new(4, 8, S, S, 32).with_grad_clip(8192).with_momentum(1));
 //! model.add(ReLU::new());
 //! model.add(Linear::new(8, 3, S, S, 32).with_grad_clip(8192).with_momentum(1));
