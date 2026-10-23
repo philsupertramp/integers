@@ -1,4 +1,4 @@
-use crate::nn::{Module, apply_updates};
+use crate::nn::{Module, TrainingArithmetic, apply_updates};
 use crate::dyadic::{
     add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
     Tensor, TensorView
@@ -56,6 +56,7 @@ impl Dropout {
 }
 
 impl Module for Dropout {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
     fn name(&self) -> &'static str { "Dropout" }
     fn describe(&self) -> String { format!("Dropout(p={:.2}, training={})", self.drop_rate, self.training) }
     fn set_training(&mut self, t: bool) { self.training = t; }
@@ -186,6 +187,7 @@ impl BatchNorm1D {
 }
 
 impl Module for BatchNorm1D {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::FloatingPoint }
     fn name(&self) -> &'static str { "BatchNorm1D" }
     fn describe(&self) -> String {
         format!("BatchNorm1D(features={}, shift={}, eps={:.0e}, training={})",
@@ -410,6 +412,7 @@ impl BatchNorm2D {
 }
 
 impl Module for BatchNorm2D {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::FloatingPoint }
     fn name(&self) -> &'static str { "BatchNorm2D" }
     fn describe(&self) -> String {
         format!("BatchNorm2D(C={}, H={}, W={}, shift={}, training={})",
@@ -695,6 +698,7 @@ impl MaxPool2D {
 }
 
 impl Module for MaxPool2D {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
     fn name(&self) -> &'static str { "MaxPool2D" }
     fn describe(&self) -> String {
         format!("MaxPool2D(C={}, {}×{}→{}×{}, k={}, s={})",
