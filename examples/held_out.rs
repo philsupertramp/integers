@@ -188,13 +188,12 @@ impl DenseFp32 {
         // momentum convention; different arithmetic (continuous FP32 vs dyadic).
         let lr = 2f32.powi(-(LR_SHIFT as i32));
         let decay = 2f32.powi(-(MOM_SHIFT as i32));
-        let clip = GRAD_CLIP as f32 / (1u32 << SHIFT) as f32;
         for i in 0..self.weights.len() {
-            self.vel_w[i] = decay * self.vel_w[i] + self.grad_w[i].clamp(-clip, clip);
+            self.vel_w[i] = decay * self.vel_w[i] + self.grad_w[i];
             self.weights[i] -= lr * self.vel_w[i];
         }
         for i in 0..self.biases.len() {
-            self.vel_b[i] = decay * self.vel_b[i] + self.grad_b[i].clamp(-clip, clip);
+            self.vel_b[i] = decay * self.vel_b[i] + self.grad_b[i];
             self.biases[i] -= lr * self.vel_b[i];
         }
     }
@@ -235,12 +234,17 @@ impl FloatMlp {
             let layer = &mut self.layers[k];
             let input_act = &activations[k];
             let mut previous = vec![0.0; layer.input];
+            // Match integer Linear::backward_one: clip the *per-example*
+            // upstream neuron gradient before parameter accumulation,
+            // not the aggregate gradient at optimizer update time.
+            let clip = GRAD_CLIP as f32 / (1u32 << SHIFT) as f32;
             for j in 0..layer.output {
-                layer.grad_b[j] += grad[j];
+                let g = grad[j].clamp(-clip, clip);
+                layer.grad_b[j] += g;
                 for i in 0..layer.input {
                     let p = j * layer.input + i;
-                    layer.grad_w[p] += grad[j] * input_act[i];
-                    previous[i] += grad[j] * layer.weights[p];
+                    layer.grad_w[p] += g * input_act[i];
+                    previous[i] += g * layer.weights[p];
                 }
             }
             if k > 0 {
