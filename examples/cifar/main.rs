@@ -92,7 +92,9 @@ fn main() {
     // MaxPool(2,2) on 13×13: out = (13-2)/2+1 = 6   ✓
     // Flatten: 32 × 6 × 6 = 1152
 
-    let mut model = Sequential::new();
+    // Explicit legacy experiment: BatchNorm and Softmax perform FP64 at runtime.
+    // This model is NOT an integer-only training path (ADR-002, issue #26).
+    let mut model = Sequential::new_experimental_float();
     model.add(Conv2D::new(3, 16, 3, 3, 32, 32, SHIFT, SHIFT, 32)
         .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
     model.add(BatchNorm2D::new(16, 30, 30, SHIFT));
