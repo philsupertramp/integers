@@ -65,8 +65,23 @@ use crate::rng::rng_range;
 
 // ─── Module trait ──────────────────────────────────────────────────────────────
 
+/// Declares whether a layer may execute in the ADR-002 integer training backend.
+///
+/// This is an explicit code-review contract, not an automatic proof.
+/// Third-party modules default to Unverified until explicitly audited.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrainingArithmetic {
+    IntegerOnly,
+    FloatingPoint,
+    Unverified,
+}
+
 /// The extension point for all layer types.
 pub trait Module {
+    /// Default fail-closed: custom layers are not implicitly integer-safe.
+    fn training_arithmetic(&self) -> TrainingArithmetic {
+        TrainingArithmetic::Unverified
+    }
     // ── Per-sample API (inference + default batch impl) ───────────────────────
 
     /// Forward pass for a single sample.  Must cache everything `backward` needs.
@@ -115,18 +130,49 @@ pub trait Module {
 // ─── Sequential ───────────────────────────────────────────────────────────────
 
 pub struct Sequential {
+    /// Public for legacy compatibility; entrypoints revalidate to prevent bypass.
     pub layers: Vec<Box<dyn Module>>,
+    allow_experimental_float: bool,
 }
 
 impl Sequential {
-    pub fn new() -> Self { Self { layers: Vec::new() } }
+    /// Default backend: require integer-only forward/backward/update.
+    pub fn new() -> Self {
+        Self { layers: Vec::new(), allow_experimental_float: false }
+    }
+
+    /// Explicit opt-in to the historical floating-point experimental path.
+    /// This is NOT the ADR-002 integer backend. Softmax and BatchNorm still
+    /// perform FP64 runtime operations here.
+    pub fn new_experimental_float() -> Self {
+        Self { layers: Vec::new(), allow_experimental_float: true }
+    }
+
+    fn check_integer_backend(&self) {
+        if self.allow_experimental_float { return; }
+        for layer in &self.layers {
+            assert!(
+                layer.training_arithmetic() == TrainingArithmetic::IntegerOnly,
+                "Sequential integer backend rejects '{}' ({:?}); use the experimental float mode if intended",
+                layer.name(), layer.training_arithmetic(),
+            );
+        }
+    }
 
     pub fn add<L: Module + 'static>(&mut self, layer: L) {
+        if !self.allow_experimental_float {
+            assert!(
+                layer.training_arithmetic() == TrainingArithmetic::IntegerOnly,
+                "Sequential integer backend rejects '{}' ({:?}); use the experimental float mode if intended",
+                layer.name(), layer.training_arithmetic(),
+            );
+        }
         self.layers.push(Box::new(layer));
     }
 
     /// Per-sample forward — use for inference.
     pub fn forward(&mut self, input: &TensorView) -> Tensor {
+        self.check_integer_backend();
         let mut x = input.to_tensor();
         for layer in &mut self.layers { x = layer.forward(&x.view()); }
         x
@@ -134,6 +180,7 @@ impl Sequential {
 
     /// Per-sample backward.
     pub fn backward(&mut self, grad: &TensorView) -> Tensor {
+        self.check_integer_backend();
         let mut g = grad.to_tensor();
         for layer in self.layers.iter_mut().rev() { g = layer.backward(&g.view()); }
         g
@@ -141,6 +188,7 @@ impl Sequential {
 
     /// Batch forward — use during training (required for BatchNorm correctness).
     pub fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
+        self.check_integer_backend();
         let mut x: Tensor = inputs.clone();
         for layer in &mut self.layers {
             x = layer.forward_batch(&x);
@@ -150,6 +198,7 @@ impl Sequential {
 
     /// Batch backward.
     pub fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
+        self.check_integer_backend();
         let mut g: Tensor = grads.clone();
         for layer in self.layers.iter_mut().rev() {
             g = layer.backward_batch(&g);
@@ -158,14 +207,17 @@ impl Sequential {
     }
 
     pub fn update(&mut self, lr_shift: u32) {
+        self.check_integer_backend();
         for layer in &mut self.layers { layer.update(lr_shift); }
     }
 
     pub fn zero_grad(&mut self) {
+        self.check_integer_backend();
         for layer in &mut self.layers { layer.zero_grad(); }
     }
 
     pub fn set_training(&mut self, training: bool) {
+        self.check_integer_backend();
         for layer in &mut self.layers { layer.set_training(training); }
     }
 
@@ -225,6 +277,7 @@ fn apply_updates(
 /// Pass-through shape bridge (conv → linear). Exists for `summary()` clarity.
 pub struct Flatten;
 impl Module for Flatten {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
     fn name(&self) -> &'static str { "Flatten" }
     fn forward(&mut self, x: &TensorView) -> Tensor { x.to_tensor() }
     fn backward(&mut self, g: &TensorView) -> Tensor { g.to_tensor() }
