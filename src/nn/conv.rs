@@ -1,4 +1,4 @@
-use crate::nn::{Module, apply_updates};
+use crate::nn::{Module, TrainingArithmetic, apply_updates};
 use crate::dyadic::{
     add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
     Tensor, TensorView
@@ -158,6 +158,7 @@ impl Conv2D {
 }
 
 impl Module for Conv2D {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
     fn name(&self) -> &'static str { "Conv2D" }
     fn describe(&self) -> String {
         let ws   = self.kernels.data.first().map_or(0, |k| k.s);
