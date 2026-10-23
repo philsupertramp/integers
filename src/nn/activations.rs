@@ -1,4 +1,4 @@
-use crate::nn::{Module};
+use crate::nn::{Module, TrainingArithmetic};
 use crate::dyadic::{
     signed_bounds, Dyadic, Tensor, TensorView
 };
@@ -24,6 +24,7 @@ impl ReLU {
 }
 
 impl Module for ReLU {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
     /// Forward pass for a single sample
     fn forward(&mut self, input: &TensorView) -> Tensor {
         let sample_size = input.data.len();
@@ -192,6 +193,7 @@ impl Softmax {
 }
 
 impl Module for Softmax {
+    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::FloatingPoint }
     fn name(&self) -> &'static str { "Softmax" }
     fn describe(&self) -> String { format!("Softmax(shift={})", self.output_shift) }
 
