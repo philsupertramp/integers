@@ -1,8 +1,9 @@
 //! Dyadic rational arithmetic for integer neural network training.
 //!
 //! Every value is a pair `(v, s)` that encodes the rational number `v · 2^{-s}`.
-//! All arithmetic preserves this invariant exactly (add/sub) or approximately
-//! (mul/div/requantize), with stochastic rounding used to keep results unbiased.
+//! Operations preserve the scale interpretation, subject to explicitly
+//! documented rounding, saturating storage, and invalid-scale errors.
+//! See docs/DYADIC_NUMERICS.md for the exact per-operation contract.
 //!
 //! # Stochastic rounding performance
 //!
@@ -95,23 +96,27 @@ pub fn stochastic_round(v: i32, k: u32) -> i32 {
     floor + i32::from(remainder > threshold)
 }
 
-/// Draw a Bernoulli event with probability `magnitude / 2^bits`.
+/// Draw a Bernoulli event with ideal probability `magnitude / 2^bits`.
 ///
-/// This is needed when the requested rounding shift is >= 64. Sampling
-/// leading zero bits in 64-bit chunks terminates quickly for enormous shifts,
-/// but retains the mathematically required (very rare) non-zero result.
+/// Sample in 32-bit chunks so even a full-zero chunk is possible with the
+/// non-zero-state XorShift64 generator. Early rejection makes huge exponents
+/// cheap on average without deterministically eliminating rare outcomes.
+/// As with all pseudorandom rounding, unbiasedness assumes uniform draws.
 #[inline]
 fn bernoulli_power_of_two(magnitude: u64, bits: u32) -> bool {
     debug_assert!(bits >= 64);
     let mut extra_bits = bits - 64;
-    while extra_bits >= 64 {
-        if rng_next() != 0 { return false; }
-        extra_bits -= 64;
+    while extra_bits >= 32 {
+        if (rng_next() >> 32) != 0 { return false; }
+        extra_bits -= 32;
     }
-    if extra_bits > 0 && (rng_next() & ((1u64 << extra_bits) - 1)) != 0 {
+    if extra_bits > 0 && ((rng_next() >> 32) & ((1u64 << extra_bits) - 1)) != 0 {
         return false;
     }
-    rng_next() < magnitude
+    // Compose two 32-bit draws rather than one XorShift64 result: the
+    // XorShift64 state/output never equals zero, but a composed draw can.
+    let draw = ((rng_next() >> 32) << 32) | (rng_next() >> 32);
+    draw < magnitude
 }
 
 /// Stochastic rounding for `i64` intermediates (used in [`mul`]).
