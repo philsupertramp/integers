@@ -14,6 +14,16 @@
 //! | [`MaxPool2D`]   | —               | spatial downsampling           |
 //! | [`Flatten`]     | —               | bridge conv → linear           |
 //!
+//! # Integer-training arithmetic boundary (ADR-002)
+//!
+//! `Sequential::new()` fails closed: only built-in or custom modules explicitly
+//! declaring `TrainingArithmetic::IntegerOnly` may run its forward/backward
+//! and update paths. Softmax and BatchNorm1D/2D are excluded because they
+//! perform known FP64 runtime calculations. To reproduce those historical
+//! experiments, use `Sequential::new_experimental_float()` and **do not**
+//! describe that mode as integer-only. Direct calls to FP layers are likewise
+//! outside the enforced integer backend.
+//!
 //! # Implementing a new layer
 //!
 //! 1. Implement the [`Module`] trait (see below).
