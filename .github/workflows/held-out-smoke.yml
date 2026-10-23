@@ -34,7 +34,7 @@ jobs:
               assert row["smoke"] is True
               assert row["train_size"] == 12
               assert row["validation_size"] == 3
-              assert row["test_size"] == 30
+              assert row["test_size"] == 20
               assert len(row["learning_curve"]) == 2
               assert 0 <= row["test_accuracy_pct"] <= 100
           PY
