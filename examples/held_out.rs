@@ -111,12 +111,12 @@ fn iris_dataset(rows: &[([f32; 4], u8)], limits: &[(f32, f32); 4]) -> Dataset {
 fn load_data(cfg: &Config) -> ExperimentData {
     match cfg.task {
         Task::Iris => {
-            // Historical repository split (120 development + 30 reserved).
+            // Historical repository split (130 development + 20 reserved).
             // IMPORTANT: the 30 were already evaluated in historical blogs;
             // this is a held-out protocol, not a pristine never-seen dataset.
             let pool = iris_rows(Path::new("data/iris_train.tsv"));
             let test = iris_rows(Path::new("data/iris_test.tsv"));
-            assert_eq!((pool.len(), test.len()), (120, 30), "expected bundled Iris split");
+            assert_eq!((pool.len(), test.len()), (130, 20), "expected bundled Iris split");
             let labels: Vec<u8> = pool.iter().map(|r| r.1).collect();
             let (mut train_ids, validation_ids) =
                 protocol::stratified_validation(&labels, if cfg.smoke { 1 } else { 8 }, SPLIT_SEED);
