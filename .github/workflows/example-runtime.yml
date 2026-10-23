@@ -1,0 +1,22 @@
+name: Candidate bundled example runtime smoke
+
+on:
+  pull_request:
+    branches: [big-refactor]
+  push:
+    branches: [big-refactor]
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: XOR built-in data (complete short experiment)
+        run: cargo run --locked --example xor
+      - name: Iris bundled TSV train/test (runtime smoke, not accuracy gate)
+        run: cargo run --locked --example iris
