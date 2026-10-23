@@ -13,7 +13,7 @@
 
 **Complete:** PR #24 repaired scale alignment direction and saturation, corrected the contradictory alignment unit test, and added eight independent oracle-backed tests. They cover mixed-scale conversion/add/sub, signed clipping, negative and large-scale equivalence, simple multiplication/division, stochastic determinism and signed rounding symmetry.
 
-**Outstanding:** Specify the complete supported rounding/overflow/domain contract; examine division with extreme shifts and scale arithmetic (`div` uses `(i64) << p`), very large exponents, unbiased stochastic behavior outside ordinary shift ranges, and broader generated/property tests. Current tests do not prove arbitrary inputs or end-to-end model accuracy. Keep [#12](https://github.com/philsupertramp/integers/issues/12) open.
+**Follow-up under review:** [draft PR #32](https://github.com/philsupertramp/integers/pull/32) adds the formal [dyadic numerical contract](DYADIC_NUMERICS.md), integer/rational division and product property grids, explicit invalid-scale rejection, saturating extreme-shift division, a diagnostic-exponent fix and seeded statistical checks across the i32/i64 stochastic shift limits. Its test-first commit failed the correctness workflow as intended, and subsequent candidate commits require final-head CI validation. Passing finite-domain regressions is not a proof of arbitrary-input correctness or end-to-end model accuracy. Keep [#12](https://github.com/philsupertramp/integers/issues/12) open until review and merge.
 
 ## #13 integration — partial
 
