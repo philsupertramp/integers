@@ -1,266 +1,107 @@
 # integers
 
-A Rust library for training and running neural networks using integer arithmetic.
+Experimental Rust library researching neural-network training with **integer-stored dyadic rationals**, rather than only quantized inference.
 
-`integers` implements feed-forward and recurrent neural networks where weights, activations,
-and gradients are stored and computed as fixed-point integers (`i32`) rather than floating-point
-values. An `f32` backend is also provided for reference, debugging, and baseline comparison.
-Both backends share the same API through a unified `Scalar` trait.
+**Candidate branch:** `big-refactor` (described here) is conditionally selected under [ADR-001](docs/ARCHITECTURE_DECISIONS.md). The default `master` still uses legacy `Scalar`/`Numeric` APIs; those types, `RNNCell` and old `src/lib/nn/` paths **do not describe this candidate**. [PR #9](https://github.com/philsupertramp/integers/pull/9) is still open and **not approved for merge**.
 
-## Motivation
+## Dyadic arithmetic
 
-Floating-point arithmetic is convenient but expensive in hardware. Quantised integer networks
-can be significantly faster and more energy-efficient on inference hardware that lacks an FPU,
-while still achieving competitive accuracy. This library explores how far you can push
-**training entirely in integer arithmetic** — not just quantised inference after float training —
-using stochastic rounding to keep the process unbiased.
+`Dyadic { v: i32, s: u32 }` represents `v × 2^(-s)`. For example `Dyadic::new(3, 2)` decodes to 0.75, equivalent to `Dyadic::new(6, 3)`. Larger `s` gives **finer** precision. The `dyadic` module provides `add`, `sub`, `mul`, `div`, `align`, `requantize`, clipping, stochastic rounding and STE helpers; lossy conversions may round or saturate. `Tensor` stores row-major `Vec<Dyadic>` and shape metadata; `view()` borrows a `TensorView`. `to_f64()` is for references/inspection.
 
-## Key Concepts
+## Public API: one training step
 
-### Fixed-Point Representation
-
-Values are stored as scaled integers. A value `v` at shift `s` represents the real number
-`v / 2^s`. All tensors carry their shift alongside them through the forward and backward passes.
-Modules are responsible for tracking `input_shift` and `output_shift` so downstream layers
-can correctly interpret the values they receive.
-
-### Stochastic Rounding (Downcast)
-
-Whenever precision must be reduced (e.g. after a dot product that accumulates into a wider
-accumulator), `stochastic_downcast` is used instead of deterministic truncation. The fractional
-bits are rounded up or down with probability proportional to their magnitude. This keeps the
-expected value unbiased and prevents systematic quantisation drift during training.
-
-### Scalar Trait
-
-The `Scalar` trait abstracts over element types. Implementing `Scalar` for a type gives access
-to the full layer and training infrastructure. Two implementations are provided:
-
-| Type  | Accumulator | Use case |
-|-------|-------------|----------|
-| `f32` | `f32`       | Baseline / debugging |
-| `i32` | `i32`       | Integer training & inference |
-
-
-**Note**: The idea for the future is using different, bigger Accumulator types like `i32` for smaller
-"base" types, e.g. quantize `i32` to `i8` for inference.
-
----
-
-## Architecture
-
-```
-src/
-├── lib.rs                  # Tensor, Scalar, Numeric traits; XorShift64 RNG; argmax / accuracy
-└── lib/
-    ├── nn.rs               # Module trait, Linear, Sequential, Params, HasWeights
-    ├── nn/
-    │   ├── activations.rs  # ReLU, Tanh
-    │   ├── kernels.rs      # dot_product, stochastic_downcast, tanh LUT, isqrt, NEON kernels
-    │   ├── losses.rs       # MSE, MAE
-    │   ├── optim.rs        # SGD (with momentum), Adam
-    │   ├── conv.rs         # Conv2d
-    │   └── rnn.rs          # RNNCell
-    ├── data.rs             # Dataset struct, minibatch, shuffled_indices
-    ├── dataset_loaders.rs  # DatasetBuilder (CSV / TSV / Parquet), quantization
-    ├── quant.rs            # minmax_quantize, standard_score_quantize
-    └── debug.rs            # OverflowStats, thread-local counters (debug builds only)
-
-examples/
-├── iris.rs                 # Iris classification (4 features → 3 classes)
-├── iris_f32.rs             # [FP32 version] Iris classification (4 features → 3 classes)
-├── mnist.rs                # MNIST digit classification (784 → 128 → 128 → 10)
-├── mnist_f32.rs            # [FP32 version] MNIST digit classification (784 → 128 → 128 → 10)
-├── mnist_to_parquet.rs     # One-shot converter: MNIST IDX binary → Parquet
-└── pairity.rs              # Binary parity with RNNCell (sequence classification)
-```
-
----
-
-## Layers & Components
-
-### `Linear<S>`
-
-A fully-connected layer. Weights are stored in transposed form `[out, in]` for cache-friendly
-access. Xavier uniform initialisation is used by default. After initialisation the weight
-quantisation shift is inferred automatically from the magnitude of the master weights.
+The candidate uses `nn::Module`, `Sequential` and concrete layers; `Linear::new(in, out, weight_shift, quant_shift, output_bits)`. This code demonstrates a **single step**, not verified convergence:
 
 ```rust
-let mut layer = Linear::<f32>::new(784, 128);
-layer.init(&mut rng);
+use integers::{Dyadic, Tensor, mse_grad};
+use integers::nn::{Linear, ReLU, Sequential};
+
+let s = 7u32;
+let mut model = Sequential::new();
+model.add(Linear::new(2, 4, s, s, 16).with_grad_clip(8192));
+model.add(ReLU::new());
+model.add(Linear::new(4, 1, s, s, 16));
+
+let x = Tensor::from_vec(
+    vec![Dyadic::new(64, s), Dyadic::new(-32, s)], vec![1, 2]
+);
+let target = Tensor::from_vec(vec![Dyadic::new(64, s)], vec![1, 1]);
+
+model.zero_grad();
+let y = model.forward(&x.view());
+let g = Tensor::from_vec(mse_grad(&y.data, &target.data), y.shape.clone());
+model.backward(&g.view());
+model.update(6); // integer shift for learning rate
 ```
 
-**Shift tracking.** Each `Linear` layer records `input_shift` and `output_shift`. The combined
-output shift after a forward pass is `weights.quant_shift + input_shift + s_x`. Backward pass
-uses the cached input and shift to compute correct weight and input gradients.
+For mini-batches use `forward_batch` / `backward_batch`. `set_training(bool)` toggles supported stochastic/batch-dependent layers. Other candidate components are `ReLU`, `Softmax`, `Conv2D`, `MaxPool2D`, `Flatten`, `Dropout`, `BatchNorm1D` and `BatchNorm2D`; not all have verified gradients or integer-only implementations.
 
-### `Sequential<S>`
+## Repository layout and examples
 
-A container that chains modules in order, threading the shift value through each one.
+| Location | Contents |
+| --- | --- |
+| `src/lib/dyadic.rs` | `Dyadic`, `Tensor`, views, arithmetic, rounding, quantization helpers |
+| `src/nn/` | `Module`, `Sequential`, Linear, Conv2D, activations, pooling, dropout, BatchNorm |
+| `src/data/` | `Dataset`, shuffle/minibatches; `data::dataset_loaders::DatasetBuilder` |
+| `src/lib/quant.rs` and `src/lib/rng.rs` | Preprocessing quantizers and seeded XorShift64 |
+| `tests/` | Independent dyadic regressions and public API smoke test |
+| `examples/xor.rs`, `examples/iris.rs` | XOR (built-in inputs) and Iris tabular experiment |
+| `examples/mnist/main.rs`, `examples/cifar/main.rs` | Dataset-dependent convolutional experiments |
+| `benches/` | Candidate benchmark experiments |
 
-```rust
-let mut model = Sequential::<f32>::new();
-model
-    .add(Linear::<f32>::new(4, 8))
-    .add(ReLU::<f32>::new())
-    .add(Linear::<f32>::new(8, 3));
-```
-
-### Activations: `ReLU<S>`, `Tanh<S>`
-
-Both cache their input for the backward pass. `Tanh` for `i32` uses a pre-computed 256-entry
-lookup table generated at first use (`OnceLock`), mapping `i8` inputs to `i8` outputs scaled
-to `[-127, 127]`.
-
-### `RNNCell<S>`
-
-An Elman-style recurrent cell: `h_t = tanh(W_ih · x_t + W_hh · h_{t-1})`.
-
-Hidden state is accumulated across time steps via `h_prev`. Backpropagation through time
-(BPTT) is implemented by storing the carry gradient `d_h_next` between backward calls. Call
-`reset_state()` between sequences.
-
-### Losses: `MSE`, `MAE`
-
-Both return `(scalar_loss, gradient_tensor)`. Gradient for MSE is the element-wise error;
-for MAE it is the sign of the error.
-
-### Optimisers: `SGDConfig`, `AdamConfig`
-
-Learning rates and momentum/beta coefficients are expressed as bit-shifts (`1/2^shift`) to
-stay in integer arithmetic. Helper constructors accept floating-point values and convert them:
+The dataset loader is **non-generic**, exported as `integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat}`. For an existing TSV:
 
 ```rust
-let optim = SGDConfig::new()
-    .with_learn_rate(0.01)        // → lr_shift = 7
-    .with_momentum(0.9);          // → momentum_shift = 3
-```
+use integers::data::dataset_loaders::{DatasetBuilder, FileFormat, QuantizationMethod};
 
-Adam maintains per-weight first and second moment estimates (`m`, `v`) in `OptimizerState`.
-
----
-
-## Dataset Loading
-
-`DatasetBuilder` provides a fluent API for loading labelled tabular datasets from CSV, TSV,
-or Parquet files.
-
-```rust
-let train_ds = DatasetBuilder::<f32>::new("data/iris_train.tsv")
+let ds = DatasetBuilder::new_csv("data/iris_train.tsv")
     .format(FileFormat::TSV)
     .with_features(vec![0, 1, 2, 3])
     .with_label_column(4)
-    .with_quantization(QuantizationMethod::StandardScore)
+    .with_quantization(QuantizationMethod::MinMax)
     .load()?;
+# Ok::<(), integers::data::DataError>(())
 ```
 
-String labels are mapped to numeric class indices automatically. Two quantisation strategies
-are supported:
+## Build and validation
 
-| Method | Description | Output shift |
-|--------|-------------|-------------|
-| `MinMax` | Scales each feature column to `[-127, 127]` | 7 |
-| `StandardScore` | Z-score normalised, then scaled by 32 | 5 |
+Requires a Rust toolchain supporting **edition 2024** (minimum supported version not yet determined). Baseline commands:
 
-The resulting `Dataset<S>` exposes `get_input(i)`, `get_target(i)`, and `minibatch(&indices)`
-for efficient training loops.
-
----
-
-## Quickstart
-
-### Prerequisites
-
-- Rust 1.85+ (edition 2024)
-- For MNIST: download the raw IDX files and convert them to Parquet once with
-  `cargo run --example mnist_to_parquet -- data/mnist/ data/`
-
-### Run the Iris example
-
-```bash
-cargo run --example iris --release
+```sh
+cargo test --locked --lib
+cargo test --locked --test dyadic_regression
+cargo test --locked --test public_api_smoke
+cargo test --locked --doc
+cargo check --locked --all-targets
+cargo run --example xor
+cargo run --release --example iris
 ```
 
-### Run MNIST
+The CI workflows validate default unit/regression/doctest/integration compilation and separately attempt all-target feature checks. They **do not download MNIST/CIFAR datasets or run dataset-dependent training**.
 
-```bash
-cargo run --example mnist --release
+### Cargo features
+
+| Feature | Description |
+| --- | --- |
+| Default / `--no-default-features` | Core dyadic library, plain-text data loaders |
+| `parquet-support` | Arrow/Parquet support; enables `mnist_to_parquet` example |
+| `image-decode` | PNG/JPEG support; needed with Parquet for the CIFAR example |
+| `bench` | Optional Criterion benchmark (`tensor_bench`) |
+
+```sh
+cargo check --locked --all-targets --no-default-features
+cargo check --locked --all-targets --features parquet-support
+cargo check --locked --all-targets --features image-decode
+cargo check --locked --all-targets --features bench
+cargo check --locked --all-targets --all-features
+# CIFAR requires both:
+cargo run --release --example cifar --features parquet-support,image-decode
 ```
 
-### Run the parity RNN
+## Limitations and architectural boundary
 
-```bash
-cargo run --example pairity --release
-```
+**Integer-only training computation is a *requirement*, not yet a verified description of every layer** ([ADR-002](docs/ARCHITECTURE_DECISIONS.md)). Actual integer-backend forward, backward and parameter/optimizer updates must use integers; floating point is permitted during preprocessing, initialization *before training*, FP references/tests, diagnostics and reports. **BatchNorm1D/2D currently use `f64` during runtime normalization and gradient calculations. Do not claim integer-only training with these layers enabled.** [#26](https://github.com/philsupertramp/integers/issues/26) will enforce the boundary.
 
-### Run tests
+PR #24 fixed major scale and integration regressions; broader division/overflow ranges remain open in [#12](https://github.com/philsupertramp/integers/issues/12), feature/example checks in [#13](https://github.com/philsupertramp/integers/issues/13), and gradient/oracle/caching checks in [#14](https://github.com/philsupertramp/integers/issues/14). The default MNIST CNN demo samples only 256 training and 20 evaluation images per epoch; this is **not** a full held-out benchmark. No verified deployment/benchmark evidence on Raspberry Pi 5 AArch64 yet.
 
-```bash
-cargo test
-```
-
----
-
-## Diagnostics (Debug Builds)
-
-Building in debug mode enables thread-local overflow counters via `debug::OverflowStats`:
-
-| Counter | Tracks |
-|---------|--------|
-| `forward_wraps` | Wrapping additions in forward loops |
-| `backward_wraps` | Wrapping subtractions in weight updates |
-| `downcast_clamps` | Stochastic downcast saturation events |
-
-Call `reset_overflow_stats()` / `get_overflow_stats()` around epochs to monitor numerical
-health during development.
-
----
-
-## Recommended Hyperparameters
-
-These have been empirically stable across the included examples.
-
-| Setting | Conservative | Aggressive |
-|---------|-------------|------------|
-| `lr_shift` | 8 | 6–7 |
-| `batch_size` | 16 | 32 |
-| Optimiser | `SGDConfig` with momentum | `AdamConfig` |
-
-For networks deeper than two hidden layers, increase `lr_shift` by 1–2 to compensate for
-gradient cascade.
-
----
-
-## CI/CD
-
-A `post-receive` Git hook in `.githooks/` automates deployment and testing on push to `master`:
-it checks out the working tree to the target directory and runs `cargo test`. Install it on
-your remote with:
-
-```bash
-cp .githooks/post-receive <remote_repo>/hooks/post-receive
-chmod +x <remote_repo>/hooks/post-receive
-```
-
----
-
-## Dependencies
-
-| Crate | Purpose |
-|-------|---------|
-| `arrow 58` | Columnar memory format for Parquet I/O |
-| `parquet 58` | Reading Parquet dataset files |
-
-No external ML framework dependencies. The rest of the library is `std`-only.
-
----
-
-## Contributing
-
-Contributions are welcome. Key areas for future work:
-
-- **Convolutional layers** (`Conv2d`)
-- **Batch normalisation** in integer arithmetic
-- **SIMD kernels** — an ARM NEON dot-product stub exists in `kernels::arm_neon`, we should extend our set of kernels further.
-- **Serialisation** of trained model weights
-- **Caching** for the Parquet loader (noted in source as a known bottleneck for "large" datasets; MNIST is already quite slow)
+Follow [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [project status](docs/PROJECT_STATUS.md) for scoped contributions; do not merge PR #9 into `master` without separate maintainer approval.

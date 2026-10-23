@@ -16,11 +16,13 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATED_BYTES.fetch_add(layout.size(), Ordering::SeqCst);
         ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
-        System.alloc(layout)
+        // SAFETY: Forward the allocator-provided Layout to the system allocator.
+        unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
+        // SAFETY: Forward the original pointer/Layout pair to the system allocator.
+        unsafe { System.dealloc(ptr, layout) }
     }
 }
 
