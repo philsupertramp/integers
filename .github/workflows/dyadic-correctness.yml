@@ -31,13 +31,6 @@ jobs:
         run: cargo test --locked --doc
       - name: Check all default targets and examples
         run: cargo check --locked --all-targets
-      - name: Temporary formatted integer-boundary tests
-        run: |
-          rustfmt --edition 2024 tests/integer_boundary.rs
-          echo "BOUNDARY_FORMAT_BEGIN"
-          base64 -w0 tests/integer_boundary.rs
-          echo
-          echo "BOUNDARY_FORMAT_END"
       - name: Rustfmt diagnostic baseline (tracked in issue 20)
         continue-on-error: true
         run: cargo fmt --all -- --check
