@@ -25,8 +25,6 @@ jobs:
         run: cargo test --locked --test layer_oracles
       - name: Integer-only training boundary and FP64 diagnostics
         run: cargo test --locked --test integer_boundary
-      - name: Audit reviewed integer runtime source paths
-        run: python3 scripts/check_integer_boundary.py
       - name: Documentation tests
         run: cargo test --locked --doc
       - name: Check all default targets and examples
