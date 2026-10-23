@@ -194,5 +194,5 @@ fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_s
             near(backward.data[sample*4+channel*2+spatial],expected,1.5);
         }}
     }
-    panics(|| bn2.backward_batch(&t(&[128;4],S,&[1,4])));
+    panics(|| { bn2.backward_batch(&t(&[128;4],S,&[1,4])); });
 }
