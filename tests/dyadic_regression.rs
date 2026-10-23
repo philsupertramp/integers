@@ -246,3 +246,36 @@ fn extreme_signed_stochastic_rounding_is_seeded_and_statistically_unbiased() {
 fn signed_bounds_rejects_zero_bit_storage() {
     assert!(std::panic::catch_unwind(|| signed_bounds(0)).is_err());
 }
+
+#[test]
+fn mixed_scale_multiplication_is_within_one_output_lsb_of_exact_product() {
+    // Integer rational oracle: the requested post-shift mantissa represents
+    // (a.v * b.v) / 2^q, irrespective of the original input exponents.
+    seed_rng(0x5678_abcd);
+    for a_shift in 0..=6 {
+        for b_shift in 0..=6 {
+            for q in 0..=(a_shift + b_shift) {
+                for a in [-91, -7, -1, 0, 1, 19, 97] {
+                    for b in [-31, -3, -1, 0, 1, 7, 57] {
+                        let actual = mul(Dyadic::new(a, a_shift), Dyadic::new(b, b_shift), q);
+                        assert_eq!(actual.s, a_shift + b_shift - q);
+                        let product = a as i128 * b as i128;
+                        let scale = 1i128 << q;
+                        let scaled = actual.v as i128 * scale;
+                        assert!(
+                            (scaled - product).abs() < scale || (q == 0 && scaled == product),
+                            "{a}/2^{a_shift} * {b}/2^{b_shift}, q={q}: {actual:?}"
+                        );
+                        if product % scale == 0 {
+                            assert_eq!(scaled, product, "exactly representable product");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(mul(Dyadic::new(i32::MIN, 0), Dyadic::new(-1, 0), 0).v,
+               i32::MAX);
+    assert_eq!(mul(Dyadic::new(i32::MIN, 0), Dyadic::new(2, 0), 0).v,
+               i32::MIN);
+}
