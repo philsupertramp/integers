@@ -66,7 +66,7 @@ BAD = re.compile(r"\b(?:f32|f64)\b|\bto_f64\s*\(|\.(?:sqrt|exp|log2|powi|powf|ro
 def block(text: str, needle: str) -> str:
     """Extract a balanced Rust braced block from a known symbol's declaration."""
     if needle.startswith("fn "):
-        pattern = r"(?<![\w])" + re.escape(needle) + r"\s*\("
+        pattern = r"(?<![\w])" + re.escape(needle) + r"(?:<[^{}()]*>)?\s*\("
     else:
         pattern = r"(?<![\w])" + re.escape(needle) + r"\s*\{"
     m = re.search(pattern, text)
