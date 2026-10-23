@@ -1,0 +1,37 @@
+name: Dyadic correctness candidate
+
+on:
+  pull_request:
+    branches: [master, big-refactor]
+  push:
+    branches: [master, big-refactor]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Existing library unit tests
+        run: cargo test --locked --lib
+      - name: Dyadic independent-oracle regressions
+        run: cargo test --locked --test dyadic_regression
+      - name: Public API integration smoke
+        run: cargo test --locked --test public_api_smoke
+      - name: Independent layer and gradient oracles
+        run: cargo test --locked --test layer_oracles
+      - name: Integer-only training boundary and FP64 diagnostics
+        run: cargo test --locked --test integer_boundary
+      - name: Documentation tests
+        run: cargo test --locked --doc
+      - name: Check all default targets and examples
+        run: cargo check --locked --all-targets
+      - name: Rustfmt diagnostic baseline (tracked in issue 20)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - name: Clippy diagnostic baseline (tracked in issue 20)
+        continue-on-error: true
+        run: cargo clippy --locked --all-targets -- -D warnings
