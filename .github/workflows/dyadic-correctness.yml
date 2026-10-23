@@ -27,3 +27,9 @@ jobs:
         run: cargo test --locked --doc
       - name: Check all default targets and examples
         run: cargo check --locked --all-targets
+      - name: Rustfmt diagnostic baseline (tracked in issue 20)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+      - name: Clippy diagnostic baseline (tracked in issue 20)
+        continue-on-error: true
+        run: cargo clippy --locked --all-targets -- -D warnings
