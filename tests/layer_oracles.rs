@@ -371,3 +371,59 @@ fn pool_mixed_scale_negative_and_boundary_ties() {
     assert_eq!(pool.forward(&x.view()).data, vec![d(-1,0)]);
     assert_eq!(pool.backward(&t(&[4],0,&[1]).view()).data, t(&[0,0,4,0],0,&[4]).data);
 }
+
+#[test]
+fn independent_minibatch_accumulation_and_conv_momentum() {
+    seed_rng(21);
+    let mut linear = Linear::new(1,1,2,2,32);
+    linear.weights.data[0] = d(4,2);
+    linear.biases.data[0] = d(0,2);
+    let input = t(&[4],2,&[1,1]);
+    let grad = t(&[4],2,&[1,1]);
+    for _ in 0..2 {
+        linear.forward_batch(&input);
+        assert_eq!(linear.backward_batch(&grad).data, vec![d(4,2)]);
+    }
+    linear.update(0);
+    assert_eq!(linear.weights.data[0], d(-4,2));
+    assert_eq!(linear.biases.data[0], d(-8,2));
+    linear.zero_grad();
+    let w_before = linear.weights.data.clone();
+    linear.update(0);
+    assert_eq!(linear.weights.data, w_before);
+
+    let mut conv = Conv2D::new(1,1,1,1,1,1,2,2,32).with_momentum(1);
+    conv.kernels.data[0] = d(4,2);
+    conv.biases.data[0] = d(0,2);
+    conv.forward_batch(&t(&[4],2,&[1,1]));
+    assert_eq!(conv.backward_batch(&t(&[8],2,&[1,1])).data, vec![d(8,2)]);
+    conv.update(0);
+    assert_eq!(conv.kernels.data[0], d(-4,2));
+    assert_eq!(conv.biases.data[0], d(-8,2));
+    conv.zero_grad();
+    conv.update(0);
+    assert_eq!(conv.kernels.data[0], d(-8,2));
+    assert_eq!(conv.biases.data[0], d(-12,2));
+}
+
+#[test]
+fn successive_batch_forwards_replace_linear_and_conv_caches() {
+    seed_rng(22);
+    let mut linear = Linear::new(1,1,0,0,32);
+    linear.weights.data[0] = d(3,0);
+    linear.biases.data[0] = d(0,0);
+    linear.forward_batch(&t(&[5],0,&[1,1]));
+    linear.forward_batch(&t(&[2],0,&[1,1]));
+    linear.backward_batch(&t(&[4],0,&[1,1]));
+    linear.update(0);
+    assert_eq!(linear.weights.data[0], d(-5,0)); // 3 - (2*4)
+
+    let mut conv = Conv2D::new(1,1,1,1,1,1,0,0,32);
+    conv.kernels.data[0] = d(3,0);
+    conv.biases.data[0] = d(0,0);
+    conv.forward_batch(&t(&[5],0,&[1,1]));
+    conv.forward_batch(&t(&[2],0,&[1,1]));
+    conv.backward_batch(&t(&[4],0,&[1,1]));
+    conv.update(0);
+    assert_eq!(conv.kernels.data[0], d(-5,0));
+}
