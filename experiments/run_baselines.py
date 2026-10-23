@@ -95,7 +95,7 @@ def summarize(records, source, output_dir, metadata):
     if records[0]["dataset"] == "iris":
         lines.extend([
             "",
-            "**Iris caveat:** the repository's 30-row reserved test split has appeared in",
+            "**Iris caveat:** the repository's 20-row reserved test split has appeared in",
             "historical experiments. It is excluded from *this* run's training,",
             "preprocessing and selection, but cannot be called an unseen pristine test set.",
         ])
