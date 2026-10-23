@@ -160,7 +160,7 @@ def main():
             subprocess.run(cmd, cwd=ROOT, check=True)
             row = json.loads(path.read_text())
             assert row["seed"] == seed and row["backend"] == backend
-            assert row["test_size"] == (30 if args.dataset == "iris" else 10000)
+            assert row["test_size"] == (20 if args.dataset == "iris" else 10000)
             assert len(row["learning_curve"]) == row["epochs"]
             records.append(row)
     summarize(records, source, output_dir, metadata)
