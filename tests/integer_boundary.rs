@@ -304,10 +304,7 @@ fn experimental_extreme_inputs_and_saturation_are_bounded() {
 
     let mut bn1 = Sequential::new_experimental_float();
     bn1.add(BatchNorm1D::new(1, S));
-    let extremes = Tensor::from_vec(
-        vec![d(i32::MIN, S), d(i32::MAX, S)],
-        vec![2, 1],
-    );
+    let extremes = Tensor::from_vec(vec![d(i32::MIN, S), d(i32::MAX, S)], vec![2, 1]);
     let outputs = bn1.forward_batch(&extremes);
     near(outputs.data[0], -1.0, 0.51);
     near(outputs.data[1], 1.0, 0.51);
