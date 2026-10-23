@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Run issue #15 paired integer/FP32 experiments and preserve their provenance.
+
+No external Python packages required. Each backend/seed runs in a NEW process,
+so Linux VmHWM measures its own peak RSS. No test-driven tuning is performed.
+"""
+import argparse
+import hashlib
+import json
+import platform
+import statistics
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def command_output(*args):
+    try:
+        return subprocess.check_output(args, cwd=ROOT, text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unavailable"
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def source_paths(dataset, data_dir):
+    if dataset == "iris":
+        return [ROOT / "data/iris_train.tsv", ROOT / "data/iris_test.tsv"]
+    # Force canonical original IDX inputs, rather than silently changing format.
+    return [data_dir / name for name in (
+        "train-images-idx3-ubyte", "train-labels-idx1-ubyte",
+        "t10k-images-idx3-ubyte", "t10k-labels-idx1-ubyte",
+    )]
+
+
+def summarize(records, source, output_dir, metadata):
+    grouped = {}
+    for row in records:
+        grouped.setdefault(row["backend"], []).append(row)
+    lines = [
+        "# Held-out experiment report",
+        "",
+        f"Dataset: **{records[0]['dataset']}**; smoke mode: **{records[0]['smoke']}**.",
+        f"Commit: `{metadata['git_commit']}`; Rust: `{metadata['rustc']}`.",
+        f"Target: `{metadata['platform']}`; generated at `{metadata['timestamp_utc']}`.",
+        "",
+        "Source SHA-256 (each exact input file):",
+        "",
+    ]
+    for path, digest in source.items():
+        lines.append(f"- `{path}`: `{digest}`")
+    lines.extend([
+        "",
+        "## Results (held-out test evaluated once per run, after fixed epochs)",
+        "",
+        "| Backend | Seeds | Test accuracy mean [min, max] | Wall time mean [min, max], s | Peak RSS mean [min, max], MiB |",
+        "| --- | --- | --- | --- | --- |",
+    ])
+    for backend, runs in sorted(grouped.items()):
+        def triplet(values, factor=1.0):
+            if any(value is None for value in values):
+                return "not available"
+            values = [value / factor for value in values]
+            return f"{statistics.mean(values):.2f} [{min(values):.2f}, {max(values):.2f}]"
+        lines.append(
+            f"| {backend} | {', '.join(str(row['seed']) for row in runs)} | "
+            f"{triplet([row['test_accuracy_pct'] for row in runs])}% | "
+            f"{triplet([row['wall_ms'] for row in runs], 1000)} | "
+            f"{triplet([row['peak_rss_kb'] for row in runs], 1024)} |"
+        )
+    lines += [
+        "",
+        "Each seed/backend JSON contains its **full per-epoch learning curve**, split sizes,",
+        "fixed hyperparameters, test result, and process-local wall time / peak RSS.",
+        "Training accuracy is measured online (before parameter updates), while",
+        "validation is measured after each epoch. Final test is evaluated only once.",
+        "Validation is used for diagnostics; epochs and hyperparameters are specified",
+        "in advance and never selected using test performance.",
+        "",
+        "**Comparison limits:** FP32 is a transparent scalar Rust reference, not an",
+        "optimized BLAS/PyTorch implementation. It uses the identical dense architecture,",
+        "starting weights, sample order, target and squared-error objective, power-of-two",
+        "learning rate and momentum convention, but continuous arithmetic differs from",
+        "dyadic quantization, stochastic rounding, and STE. Latency reflects kernels and",
+        "implementation maturity, not intrinsic integer-versus-float hardware efficiency.",
+    ]
+    if records[0]["dataset"] == "iris":
+        lines.extend([
+            "",
+            "**Iris caveat:** the repository's 30-row reserved test split has appeared in",
+            "historical experiments. It is excluded from *this* run's training,",
+            "preprocessing and selection, but cannot be called an unseen pristine test set.",
+        ])
+    if records[0]["smoke"]:
+        lines.extend(["", "**SMOKE ONLY:** fixture-scale execution is not benchmark evidence."])
+    output_dir.joinpath("summary.md").write_text("\n".join(lines) + "\n")
+    output_dir.joinpath("manifest.json").write_text(json.dumps({
+        "schema": 1, "environment": metadata, "sources_sha256": source,
+        "runs": [f"{r['backend']}-seed-{r['seed']}.json" for r in records],
+    }, indent=2) + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", choices=("iris", "mnist"), default="iris")
+    parser.add_argument("--data-dir", type=Path, default=ROOT / "data/mnist")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[1337, 2027, 4242])
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "reports/held_out")
+    parser.add_argument("--smoke", action="store_true")
+    args = parser.parse_args()
+    if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
+        parser.error("seeds must be unique positive nonzero integers")
+    if args.batch_size <= 0 or (args.epochs is not None and args.epochs <= 0):
+        parser.error("batch size and epochs must be positive")
+    if args.dataset == "mnist" and args.data_dir != ROOT / "data/mnist":
+        args.data_dir = args.data_dir.resolve()
+    paths = source_paths(args.dataset, args.data_dir)
+    for path in paths:
+        if not path.is_file():
+            parser.error(f"missing source: {path} (get MNIST IDX files first)")
+    source = {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path):
+              file_sha256(path) for path in paths}
+    output_dir = args.output_dir.resolve() / args.dataset / ("smoke" if args.smoke else "full")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "git_commit": command_output("git", "rev-parse", "HEAD"),
+        "rustc": command_output("rustc", "--version"),
+        "cargo": command_output("cargo", "--version"),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    records = []
+    for seed in args.seeds:
+        for backend in ("integer", "fp32"):
+            name = f"{backend}-seed-{seed}.json"
+            path = output_dir / name
+            cmd = [
+                "cargo", "run", "--locked", "--release" if not args.smoke else "--quiet",
+                "--example", "held_out", "--",
+                "--dataset", args.dataset, "--backend", backend,
+                "--seed", str(seed), "--batch-size", str(args.batch_size),
+                "--data-dir", str(args.data_dir), "--report", str(path),
+            ]
+            if args.epochs is not None:
+                cmd.extend(["--epochs", str(args.epochs)])
+            if args.smoke:
+                cmd.append("--smoke")
+            print("$", " ".join(cmd), flush=True)
+            subprocess.run(cmd, cwd=ROOT, check=True)
+            row = json.loads(path.read_text())
+            assert row["seed"] == seed and row["backend"] == backend
+            assert row["test_size"] == (30 if args.dataset == "iris" else 10000)
+            assert len(row["learning_curve"]) == row["epochs"]
+            records.append(row)
+    summarize(records, source, output_dir, metadata)
+    print(f"Complete: {output_dir / 'summary.md'}")
+
+
+if __name__ == "__main__":
+    main()
