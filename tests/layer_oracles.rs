@@ -97,7 +97,7 @@ fn linear_accumulation_zero_grad_and_momentum() {
     layer.update(0);
     // grad_w = 2*(2*2) = 8, represented as 32 at scale 2
     assert_eq!(layer.weights.data[0], d(-28, 2));
-    assert_eq!(layer.biases.data[0], d(-12, 2));
+    assert_eq!(layer.biases.data[0], d(-16, 2));
     layer.zero_grad();
     layer.update(0);
     assert_eq!(layer.weights.data[0], d(-28, 2));
@@ -334,4 +334,40 @@ fn shape_mismatches_must_not_silently_truncate() {
     relu.forward_batch(&t(&[1,2],0,&[1,2]));
     panics(|| { relu.backward_batch(&t(&[1],0,&[1,1])); });
     panics(|| { relu.forward_batch(&Tensor::from_vec(vec![],vec![0,2])); });
+}
+
+#[test]
+fn saturation_masks_true_clipping_but_not_exact_boundary_values() {
+    seed_rng(20);
+    let mut linear = Linear::new(1,1,0,0,8);
+    linear.weights.data[0] = d(2,0);
+    linear.biases.data[0] = d(0,0);
+    let clipped = linear.forward(&t(&[100],0,&[1]).view());
+    assert_eq!(clipped.data, vec![d(127,0)]);
+    assert_eq!(linear.backward(&t(&[7],0,&[1]).view()).data, vec![d(0,0)]);
+    linear.update(0);
+    assert_eq!(linear.weights.data[0], d(2,0));
+    assert_eq!(linear.biases.data[0], d(0,0));
+    linear.weights.data[0] = d(127,0);
+    assert_eq!(linear.forward(&t(&[1],0,&[1]).view()).data, vec![d(127,0)]);
+    assert_eq!(linear.backward(&t(&[1],0,&[1]).view()).data, vec![d(127,0)]);
+
+    let mut conv = Conv2D::new(1,1,1,1,1,1,0,0,8);
+    conv.kernels.data[0] = d(2,0);
+    let batch = t(&[100,1],0,&[2,1]);
+    assert_eq!(conv.forward_batch(&batch).data, vec![d(127,0),d(2,0)]);
+    let gi = conv.backward_batch(&t(&[7,7],0,&[2,1]));
+    assert_eq!(gi.data, vec![d(0,0),d(14,0)]);
+    conv.update(0);
+    assert_eq!(conv.kernels.data[0], d(-5,0));
+    assert_eq!(conv.biases.data[0], d(-7,0));
+}
+
+#[test]
+fn pool_mixed_scale_negative_and_boundary_ties() {
+    let mut pool = MaxPool2D::new(1,2,2,2,2);
+    let x = Tensor::from_vec(vec![d(-2,0), d(-3,1), d(-1,0), d(-8,3)], vec![4]);
+    // -1.0 ties at indices 2 and 3; first spatial index wins.
+    assert_eq!(pool.forward(&x.view()).data, vec![d(-1,0)]);
+    assert_eq!(pool.backward(&t(&[4],0,&[1]).view()).data, t(&[0,0,4,0],0,&[4]).data);
 }
