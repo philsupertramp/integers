@@ -135,3 +135,64 @@ fn experimental_batch_norm_matches_fp64_and_zero_variance_cases() {
     let zero_g = batch2d.backward_batch(&t(&[128;4],S,&[2,2]));
     assert!(zero_g.data.iter().all(|x| x.v == 0));
 }
+
+#[test]
+fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_size() {
+    const S: u32 = 7;
+    let mut bn1 = Sequential::new_experimental_float();
+    bn1.add(BatchNorm1D::new(2,S));
+    let input1 = t(&[-128,0, 0,256, 128,512],S,&[3,2]);
+    let output1 = bn1.forward_batch(&input1);
+    assert_eq!(output1.shape,vec![3,2]);
+    let inputs = [[-1.0f64,0.0],[0.0,2.0],[1.0,4.0]];
+    for feature in 0..2 {
+        let mean: f64 = inputs.iter().map(|x| x[feature]).sum::<f64>()/3.0;
+        let variance = inputs.iter().map(|x| (x[feature]-mean).powi(2)).sum::<f64>()/3.0;
+        for sample in 0..3 {
+            near(output1.data[sample*2+feature],(inputs[sample][feature]-mean)/(variance+1e-5).sqrt(),0.51);
+        }
+    }
+    let grads1 = t(&[128,0, 0,128, -128,128],S,&[3,2]);
+    assert_eq!(bn1.backward_batch(&grads1).shape,vec![3,2]);
+    panics(|| { bn1.backward_batch(&t(&[128;4],S,&[2,2])); });
+
+    let mut bn2 = Sequential::new_experimental_float();
+    bn2.add(BatchNorm2D::new(2,1,2,S));
+    let input2 = t(&[-128,0,-256,128, 128,256,256,384],S,&[2,4]);
+    let output2 = bn2.forward_batch(&input2);
+    assert_eq!(output2.shape,vec![2,4]);
+    let decoded = [[-1.0f64,0.0,-2.0,1.0],[1.0,2.0,2.0,3.0]];
+    for channel in 0..2 {
+        let vals = [decoded[0][2*channel],decoded[0][2*channel+1],decoded[1][2*channel],decoded[1][2*channel+1]];
+        let mean = vals.iter().sum::<f64>()/4.0;
+        let var = vals.iter().map(|v| (v-mean).powi(2)).sum::<f64>()/4.0;
+        for sample in 0..2 {
+            for spatial in 0..2 {
+                let idx = sample*4+channel*2+spatial;
+                near(output2.data[idx],(decoded[sample][channel*2+spatial]-mean)/(var+1e-5).sqrt(),0.51);
+            }
+        }
+    }
+    let grads2 = t(&[128,0,0,128, 0,128,128,0],S,&[2,4]);
+    let backward = bn2.backward_batch(&grads2);
+    assert_eq!(backward.shape,vec![2,4]);
+    for channel in 0..2 {
+        let vals = [decoded[0][2*channel],decoded[0][2*channel+1],decoded[1][2*channel],decoded[1][2*channel+1]];
+        let gg = [
+            decode(grads2.data[channel*2]),decode(grads2.data[channel*2+1]),
+            decode(grads2.data[4+channel*2]),decode(grads2.data[4+channel*2+1])
+        ];
+        let mean = vals.iter().sum::<f64>()/4.0;
+        let var = vals.iter().map(|v| (v-mean).powi(2)).sum::<f64>()/4.0;
+        let inv_std = 1.0/(var+1e-5).sqrt();
+        let xhat = vals.map(|v| (v-mean)*inv_std);
+        let sg: f64 = gg.iter().sum();
+        let sgx: f64 = gg.iter().zip(xhat.iter()).map(|(g,x)| g*x).sum();
+        for sample in 0..2 { for spatial in 0..2 {
+            let i = sample*2+spatial;
+            let expected = inv_std*(gg[i]-sg/4.0-xhat[i]*sgx/4.0);
+            near(backward.data[sample*4+channel*2+spatial],expected,1.5);
+        }}
+    }
+    panics(|| bn2.backward_batch(&t(&[128;4],S,&[1,4])));
+}
