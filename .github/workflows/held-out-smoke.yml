@@ -38,3 +38,13 @@ jobs:
               assert len(row["learning_curve"]) == 2
               assert 0 <= row["test_accuracy_pct"] <= 100
           PY
+      - name: Full Iris baseline (3 seeds, 100 epochs, both arithmetic backends)
+        run: python3 experiments/run_baselines.py --dataset iris --epochs 100 --seeds 1337 2027 4242 --output-dir /tmp/integers-full
+      - name: Print measured Iris summary
+        run: cat /tmp/integers-full/iris/full/summary.md
+      - name: Preserve lightweight full Iris measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: iris-held-out-baselines
+          path: /tmp/integers-full/iris/full/
+          retention-days: 30
