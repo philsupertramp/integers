@@ -38,7 +38,21 @@ impl Dyadic {
     #[inline] pub fn new(v: i32, s: u32) -> Self { Self { v, s } }
 
     /// Decode to `f64`: `[[x]] = v · 2^{-s}`.
-    #[inline] pub fn to_f64(self) -> f64 { (self.v as f64) * 2f64.powi(-(self.s as i32)) }
+    /// Decode for diagnostics; very small values may underflow to zero in f64.
+    ///
+    /// Scaling in bounded chunks avoids wrapping exponents > i32::MAX and
+    /// avoids underflowing 2^(-s) before multiplying by the mantissa.
+    #[inline]
+    pub fn to_f64(self) -> f64 {
+        let mut value = self.v as f64;
+        let mut remaining = self.s;
+        while remaining > 0 && value != 0.0 {
+            let step = remaining.min(512);
+            value *= 2f64.powi(-(step as i32));
+            remaining -= step;
+        }
+        value
+    }
 
     /// Two representations are equivalent if they encode the same rational.
     ///
@@ -66,12 +80,13 @@ impl std::fmt::Display for Dyadic {
 
 /// `SR(v, k) = ⌊v · 2^{-k}⌋ + 𝕀((v mod 2^{k}) > U)`,  `U ~ 𝒰{0, 2^{k} − 1}`.
 ///
-/// An unbiased estimator of `v · 2^{-k}`: `E[SR(v, k)] = v / 2^{k}`.
-/// When `k = 0` it is the identity; when `k >= 32` all bits are shifted out.
+/// An unbiased estimator of `v · 2^{-k}` before any storage saturation:
+/// `E[SR(v, k)] = v / 2^{k}` under ideal uniform PRNG draws.
+/// For `k >= 32`, use the wide path rather than discarding rare outcomes.
 #[inline]
 pub fn stochastic_round(v: i32, k: u32) -> i32 {
     if k == 0  { return v; }
-    if k >= 32 { return 0; }
+    if k >= 32 { return stochastic_round_i64(v as i64, k); }
     // Use upper 32 bits of the 64-bit RNG output — better quality than lower.
     let mask      = (1u32 << k) - 1;
     let threshold = (rng_next() >> 32) as u32 & mask; // U ~ Uniform{0, 2^k − 1}
@@ -80,23 +95,45 @@ pub fn stochastic_round(v: i32, k: u32) -> i32 {
     floor + i32::from(remainder > threshold)
 }
 
+/// Draw a Bernoulli event with probability `magnitude / 2^bits`.
+///
+/// This is needed when the requested rounding shift is >= 64. Sampling
+/// leading zero bits in 64-bit chunks terminates quickly for enormous shifts,
+/// but retains the mathematically required (very rare) non-zero result.
+#[inline]
+fn bernoulli_power_of_two(magnitude: u64, bits: u32) -> bool {
+    debug_assert!(bits >= 64);
+    let mut extra_bits = bits - 64;
+    while extra_bits >= 64 {
+        if rng_next() != 0 { return false; }
+        extra_bits -= 64;
+    }
+    if extra_bits > 0 && (rng_next() & ((1u64 << extra_bits) - 1)) != 0 {
+        return false;
+    }
+    rng_next() < magnitude
+}
+
 /// Stochastic rounding for `i64` intermediates (used in [`mul`]).
+///
+/// The output is saturated to i32; an overflowed result cannot be unbiased
+/// relative to the original i64 value. The rounding itself is unbiased,
+/// including negative values and shifts at/above the word width.
 #[inline]
 pub fn stochastic_round_i64(v: i64, k: u32) -> i32 {
-    // A narrowing cast would wrap and change sign for wide products. The
-    // integer backend uses saturating i32 storage instead.
     let rounded = if k == 0 {
         v
     } else if k < 64 {
-        let mask      = (1u64 << k) - 1;
+        let mask = (1u64 << k) - 1;
         let threshold = rng_next() & mask;
-        let floor     = v >> k;
+        let floor = v >> k;
         let remainder = (v as u64) & mask;
         floor + i64::from(remainder > threshold)
+    } else if v == 0 {
+        0
+    } else if bernoulli_power_of_two(v.unsigned_abs(), k) {
+        v.signum()
     } else {
-        // Shifts of >= 64 are currently treated as underflow. They are outside
-        // the supported stochastic-precision range; handle explicitly so we
-        // never shift by the integer width.
         0
     };
     rounded.clamp(i32::MIN as i64, i32::MAX as i64) as i32
@@ -152,22 +189,46 @@ pub fn sub(x1: Dyadic, x2: Dyadic) -> Dyadic {
     Dyadic { v: align(x1, s).v.saturating_sub(align(x2, s).v), s }
 }
 
-/// `x_1 \otimes x_2 = (⌊v_1 \cdot v_2 / 2^q⌉, s_1 + s_2 − q)`.
+/// `x_1 \otimes x_2 = (SR(v_1 * v_2, q), s_1 + s_2 - q)`.
 ///
-/// Scales add automatically so no alignment is needed, but the raw product
-/// `v_1 \cdot v_2` is twice as wide.  `q` rescales it back.
+/// The exact exponent is calculated in u64 and must be representable as u32.
+/// Reject an unrepresentable negative exponent or exponent overflow rather
+/// than silently changing the decoded numeric value. Mantissa narrowing
+/// saturates to i32; stochastic rounding applies before narrowing.
 pub fn mul(x1: Dyadic, x2: Dyadic, q: u32) -> Dyadic {
+    let output_shift = (x1.s as u64 + x2.s as u64)
+        .checked_sub(q as u64)
+        .expect("mul: negative output scale");
+    let s = u32::try_from(output_shift).expect("mul: output scale overflow");
     let product = (x1.v as i64) * (x2.v as i64);
-    let s = x1.s.saturating_add(x2.s).saturating_sub(q);
     Dyadic { v: stochastic_round_i64(product, q), s }
 }
 
-/// `x_1 \oslash x_2 = (⌊v_1·2^p / v_2⌉, s_1 − s_2 + p)`.
+/// `x_1 / x_2 = (trunc(v_1 * 2^p / v_2), s_1 + p - s_2)`.
+///
+/// Division truncates toward zero (not stochastic or nearest rounding).
+/// The result saturates to i32 on quotient overflow. `p` is allowed up to
+/// u32::MAX provided the resulting nonnegative scale fits u32. Invalid
+/// scales and division by zero panic explicitly.
 pub fn div(x1: Dyadic, x2: Dyadic, p: u32) -> Dyadic {
     assert!(x2.v != 0, "div: division by zero");
-    let shifted = (x1.v as i64) << p;
-    let s = (x1.s + p).saturating_sub(x2.s);
-    Dyadic { v: (shifted / x2.v as i64) as i32, s }
+    let output_shift = (x1.s as u64 + p as u64)
+        .checked_sub(x2.s as u64)
+        .expect("div: negative output scale");
+    let s = u32::try_from(output_shift).expect("div: output scale overflow");
+
+    // |numerator| >= 2^63 for non-zero inputs at p >= 63, and
+    // |denominator| <= 2^31; the quotient cannot fit i32.
+    // Avoid a huge shift or overflowing a fixed-width intermediate.
+    let quotient = if x1.v == 0 {
+        0
+    } else if p >= 63 {
+        if (x1.v < 0) ^ (x2.v < 0) { i32::MIN } else { i32::MAX }
+    } else {
+        let shifted = (x1.v as i128) << p;
+        (shifted / x2.v as i128).clamp(i32::MIN as i128, i32::MAX as i128) as i32
+    };
+    Dyadic { v: quotient, s }
 }
 
 // ─── Clipping ────────────────────────────────────────────────────────────────
@@ -175,6 +236,7 @@ pub fn div(x1: Dyadic, x2: Dyadic, p: u32) -> Dyadic {
 /// Representable bounds for a signed `b`-bit integer.
 /// Returns `(−2^(b−1), 2^(b−1) − 1)`.
 pub fn signed_bounds(bits: u32) -> (i32, i32) {
+    assert!(bits > 0, "signed_bounds: bits must be positive");
     if bits >= 32 { return (i32::MIN, i32::MAX); }
     (-(1i32 << (bits - 1)), (1i32 << (bits - 1)) - 1)
 }
