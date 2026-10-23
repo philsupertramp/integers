@@ -26,7 +26,7 @@ factors). No Softmax/BatchNorm FP64 runtime path is enabled in integer mode.
 
 | Dataset | Source split | Training | Validation | Final test |
 |---|---|---|---|---|
-| Bundled Iris | 120 previously published development rows + 30 historical test rows | 96 | 24, stratified 8/class | all 30 reserved rows, evaluated once |
+| Bundled Iris | 130 previously published development rows + 20 historical test rows | 106 | 24, stratified 8/class | all 20 reserved rows, evaluated once |
 | Canonical MNIST IDX | 60,000 official training rows | 55,000 | 5,000, stratified 500/digit | all 10,000 official test images, evaluated once |
 
 Split seed is a fixed constant `0x0123456789ABCDEF`, *not* a training
@@ -44,7 +44,7 @@ the existing fixed byte-to-Q7 mapping from `mnist_nn/mnist_loader.rs`
 for all splits; this mapping has no fitted statistics. Inputs and targets
 for FP32 are exactly the decoded dyadic values supplied to the integer model.
 
-**Historical Iris caveat:** the bundled 30-row test split was examined in
+**Historical Iris caveat:** the bundled 20-row test split was examined in
 earlier work. It is reserved from all computations in this experiment but
 is not a genuinely *never-before-seen* test. The protocol is meaningful,
 but its reported accuracy cannot be advertised as a pristine external
@@ -79,7 +79,7 @@ MNIST uses the existing `load_mnist_auto` which prefers IDX over Parquet;
 the Python launcher **requires the canonical four IDX files** and hashes
 them. Don't claim a comparison from an alternate dataset variant. The
 standard runner checks the canonical train/test counts and dimensions.
-The Iris runner requires the exact 120/30 bundled row counts.
+The Iris runner requires the exact 130/20 bundled row counts.
 
 ## Machine-readable evidence
 
