@@ -242,7 +242,11 @@ impl Module for BatchNorm1D {
 
     /// Batch forward — computes proper batch statistics.  Always use this during training.
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
-        let n     = inputs.len();
+        assert_eq!(inputs.shape.len(), 2, "BatchNorm1D: expected [batch, features]");
+        let n = inputs.shape[0];
+        assert!(n > 0, "BatchNorm1D: empty batch");
+        assert_eq!(inputs.shape[1], self.num_features, "BatchNorm1D: feature count mismatch");
+        assert_eq!(inputs.data.len(), n * self.num_features, "BatchNorm1D: buffer length mismatch");
         let scale = (1u32 << self.shift) as f64;
         let m_ema = self.momentum as f64;
 
@@ -276,7 +280,7 @@ impl Module for BatchNorm1D {
                 let x_hat = (decoded[s][f] - mu) * inv_std;
                 x_hat_all[s][f] = x_hat;
                 let xhd = Dyadic::new((x_hat * scale).round() as i32, self.shift);
-                outputs[s + (f * self.num_features)] = add(mul(self.gamma.data[f], xhd, self.shift), self.beta.data[f]);
+                outputs[s * self.num_features + f] = add(mul(self.gamma.data[f], xhd, self.shift), self.beta.data[f]);
             }
         }
 
@@ -288,7 +292,8 @@ impl Module for BatchNorm1D {
 
     /// Batch backward — full batch-norm gradient.
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        let n     = grads.len();
+        assert_eq!(grads.shape, self.input_batch_cache.shape, "BatchNorm1D: gradients/forward batch mismatch");
+        let n = grads.shape[0];
         let scale = (1u32 << self.shift) as f64;
         let nf    = n as f64;
 
@@ -320,7 +325,7 @@ impl Module for BatchNorm1D {
                     * (dL_dy[s][f]
                        - sum_dL_dy / nf
                        - self.x_hat_cache[s][f] * sum_dL_dy_xhat / nf);
-                grad_inputs[s + (f * self.num_features)] = Dyadic::new((dx * scale).round() as i32, self.shift);
+                grad_inputs[s * self.num_features + f] = Dyadic::new((dx * scale).round() as i32, self.shift);
             }
         }
 
@@ -481,7 +486,11 @@ impl Module for BatchNorm2D {
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
-        let n     = inputs.len();
+        assert_eq!(inputs.shape.len(), 2, "BatchNorm2D: expected [batch, flattened C*H*W]");
+        let n = inputs.shape[0];
+        assert!(n > 0, "BatchNorm2D: empty batch");
+        assert_eq!(inputs.shape[1], self.channels * self.h * self.w, "BatchNorm2D: feature count mismatch");
+        assert_eq!(inputs.data.len(), n * inputs.shape[1], "BatchNorm2D: buffer length mismatch");
         let hw    = self.h * self.w;
         let scale = (1u32 << self.shift) as f64;
         let m_ema = self.momentum as f64;
@@ -490,9 +499,6 @@ impl Module for BatchNorm2D {
         let decoded: Vec<Vec<f64>> = inputs.iter()
             .map(|x| x.data.iter().map(|d| d.to_f64()).collect())
             .collect();
-
-        println!("Incoming SHAPE {:?}", inputs.shape);
-        println!("DECODED SHAPE: {} [{}]", decoded.len(), decoded[0].len());
 
         let mut inv_stds  = vec![0.0f64; self.channels];
         let mut x_hat_all = vec![vec![0.0f64; self.channels * hw]; n];
@@ -532,7 +538,7 @@ impl Module for BatchNorm2D {
                     x_hat_all[s][idx] = x_hat;
                     let xhd = Dyadic::new((x_hat * scale).round() as i32, self.shift);
                     // original: outputs[s][idx]
-                    outputs.data[s * hw + idx] = add(mul(self.gamma.data[c], xhd, self.shift), self.beta.data[c]);
+                    outputs.data[s * self.channels * hw + idx] = add(mul(self.gamma.data[c], xhd, self.shift), self.beta.data[c]);
                 }
             }
         }
@@ -544,7 +550,8 @@ impl Module for BatchNorm2D {
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        let n     = grads.len();
+        assert_eq!(grads.shape, self.input_batch_cache.shape, "BatchNorm2D: gradients/forward batch mismatch");
+        let n = grads.shape[0];
         let hw    = self.h * self.w;
         let scale = (1u32 << self.shift) as f64;
         let n_hw  = (n * hw) as f64;
@@ -588,7 +595,7 @@ impl Module for BatchNorm2D {
                         * (dL_dy[s][idx]
                            - sum_dL_dy / n_hw
                            - self.x_hat_cache[s][idx] * sum_dL_dy_xhat / n_hw);
-                    grad_inputs.data[s * hw + idx] = Dyadic::new((dx * scale).round() as i32, self.shift);
+                    grad_inputs.data[s * self.channels * hw + idx] = Dyadic::new((dx * scale).round() as i32, self.shift);
                 }
             }
         }
