@@ -23,6 +23,8 @@ jobs:
         run: cargo test --locked --test public_api_smoke
       - name: Independent layer and gradient oracles
         run: cargo test --locked --test layer_oracles
+      - name: Integer-only training boundary and FP64 diagnostics
+        run: cargo test --locked --test integer_boundary
       - name: Documentation tests
         run: cargo test --locked --doc
       - name: Check all default targets and examples
