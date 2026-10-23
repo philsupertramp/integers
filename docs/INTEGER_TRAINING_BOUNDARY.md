@@ -30,11 +30,11 @@ Status: draft PR #29 / issue #26, candidate branch `big-refactor`. The represent
 
 The explicitly known BatchNorm/Softmax floating-point paths were already documented in the project's blog series; this PR enforces the previously approved boundary rather than claiming to have discovered them.
 
-### Source enforcement
+### Runtime enforcement and review
 
-`scripts/check_integer_boundary.py` is a zero-dependency, **required CI check** run on PRs into `big-refactor`. It detects direct `f32`/`f64`, `to_f64`, `sqrt`, `exp`, `powi`, `round` and related float-like expressions within a defined set of reviewed Rust runtime functions *and their known helper functions*. It checks that every built-in `Module` implementation has an explicit classification, and it rejects unexpected new module implementations pending audit. `tests/integer_boundary.rs` runs runtime rejection tests including public `layers` injection and an actual Linear → ReLU → Dropout → Linear batch forward/backward/update, seeded with 0x260. This verifies the supported implementation paths, not arbitrary third-party code or external native dependencies.
+The enforcement mechanism is the Rust `TrainingArithmetic` classification and the fail-closed checks in `Sequential` itself, rather than a second source-text scanner. `tests/integer_boundary.rs` exercises the default rejection behavior, including mutations of the public `layers` collection, and a real integer-only Linear → ReLU → Dropout → Linear minibatch forward/backward/update with seed `0x260`. Newly added or custom `Module` implementations default to `Unverified` and require an explicit declaration and code review before admission to the standard integer backend. The per-operation inventory above is maintained through code review.
 
-Limitations of lexical source checks: they cannot perform full Rust call-graph or dynamic-dispatch verification, prove compiler output is float-free, or prevent an untrusted custom module from falsely declaring `IntegerOnly`. Custom modules require code review; a future AST/IR policy could strengthen this.
+A module that falsely declares `IntegerOnly` cannot be made safe by this runtime classification alone; no whole-program/compiler-level proof of float-free execution is claimed.
 
 ## Independent numerical diagnostics
 
