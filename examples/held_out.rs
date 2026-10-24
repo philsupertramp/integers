@@ -1,5 +1,6 @@
 //! Held-out, paired integer/FP32 dense MLP experiment for issue #15.
-//! NEVER evaluate the final test set until the fixed epoch budget is complete.
+//! A validation-only run never opens test data. A final run evaluates test
+//! exactly once after the fixed training budget.
 //! No FP arithmetic is performed in the integer Sequential training path.
 #[path = "../experiments/protocol.rs"]
 mod protocol;
@@ -76,8 +77,8 @@ impl Config {
         if !explicit_lr && cfg.task == Task::Iris { cfg.lr_shift = IRIS_LR_SHIFT; }
         if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 200 } else { 10 }; }
         assert!(cfg.seed != 0 && cfg.split_seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, split seed, batch, epochs, or lr shift");
-        assert!(!cfg.validation_only || (cfg.task == Task::Iris && !cfg.ci_sample),
-            "--validation-only is only supported for Iris");
+        assert!(!cfg.validation_only || !cfg.ci_sample,
+            "--validation-only and --ci-sample are mutually exclusive");
         assert!(!cfg.ci_sample || (cfg.task == Task::Mnist && !cfg.smoke),
             "--ci-sample is only supported for MNIST and cannot be combined with --smoke");
         cfg
@@ -159,10 +160,34 @@ fn load_data(cfg: &Config) -> ExperimentData {
             }
         }
         Task::Mnist => {
-            let (pool, test) = mnist_loader::load_mnist_auto(&cfg.data_dir, true)
-                .expect("MNIST IDX/Parquet loading failed");
-            assert_eq!((pool.len(), test.len()), (60000, 10000),
-                "full canonical MNIST split required; do not benchmark subsets");
+            let (pool, test) = if cfg.validation_only {
+                // Only canonical TRAINING IDX paths are constructed here.
+                // No format auto-probe, metadata lookup, file read, or
+                // allocation ever touches the official 10k test partition.
+                let pool = mnist_loader::load_mnist_idx(
+                    &cfg.data_dir.join("train-images-idx3-ubyte"),
+                    &cfg.data_dir.join("train-labels-idx1-ubyte"),
+                    true,
+                ).expect("canonical MNIST training IDX loading failed");
+                let empty_test = Dataset {
+                    inputs: Tensor::from_vec(Vec::new(), vec![0, 784]),
+                    labels: Vec::new(),
+                    targets: Tensor::from_vec(Vec::new(), vec![0, 10]),
+                    n_classes: 10,
+                    input_shift: SHIFT as i32,
+                };
+                (pool, empty_test)
+            } else {
+                // Historical CI sampled mode and the explicit final-test mode
+                // continue to require all four files. No test evaluation
+                // occurs until the final training budget is complete.
+                mnist_loader::load_mnist_auto(&cfg.data_dir, true)
+                    .expect("MNIST IDX/Parquet loading failed")
+            };
+            assert_eq!(pool.len(), 60000,
+                "full canonical MNIST training split required; do not benchmark subsets");
+            assert_eq!(test.len(), if cfg.validation_only { 0 } else { 10000 },
+                "MNIST test count mismatch");
             assert_eq!((pool.n_features(), pool.n_classes), (784, 10));
             let validation_per_class = if cfg.smoke { 1 } else if cfg.ci_sample { 20 } else { 500 };
             let (mut train_ids, validation_ids) = protocol::stratified_validation(
@@ -450,7 +475,7 @@ fn main() {
             metric.nonfinite_fp32_params);
         curve.push(metric);
     }
-    // Validation-only Iris HPO never reads or evaluates the test data.
+    // Validation-only Iris/MNIST never reads or evaluates test data.
     // CI sample MNIST never evaluates the official test data. Full runs evaluate it
     // exactly once, after the fixed epoch budget has completed.
     let test_correct = if cfg.ci_sample || cfg.validation_only { None } else {

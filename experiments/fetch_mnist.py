@@ -46,9 +46,13 @@ def validate_idx(data: bytes, count: int, expected_size: int, is_image: bool) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=Path("data/mnist"))
+    parser.add_argument("--train-only", action="store_true",
+                        help="Download/verify only the official 60k train partition for validation-only runs")
     args = parser.parse_args()
     args.data_dir.mkdir(parents=True, exist_ok=True)
     for name, (digest, count, size, is_image) in FILES.items():
+        if args.train_only and name.startswith("t10k-"):
+            continue
         target = args.data_dir / name
         if target.exists():
             existing = target.read_bytes()

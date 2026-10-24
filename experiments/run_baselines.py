@@ -36,11 +36,12 @@ def source_paths(dataset, data_dir, validation_only=False):
         # Iris validation HPO never reads or even hashes historical test data.
         return ([ROOT / "data/iris_train.tsv"] if validation_only else
                 [ROOT / "data/iris_train.tsv", ROOT / "data/iris_test.tsv"])
-    # Force canonical original IDX inputs, rather than silently changing format.
-    return [data_dir / name for name in (
-        "train-images-idx3-ubyte", "train-labels-idx1-ubyte",
-        "t10k-images-idx3-ubyte", "t10k-labels-idx1-ubyte",
-    )]
+    # Validation-only MNIST requires precisely the two official TRAINING IDX
+    # files: do not check existence of or hash the test inputs.
+    names = ("train-images-idx3-ubyte", "train-labels-idx1-ubyte")
+    if not validation_only:
+        names += ("t10k-images-idx3-ubyte", "t10k-labels-idx1-ubyte")
+    return [data_dir / name for name in names]
 
 
 def summarize(records, source, output_dir, metadata):
@@ -65,7 +66,7 @@ def summarize(records, source, output_dir, metadata):
     validation_metric = ci_sample or validation_only
     lines.extend([
         "",
-        ("## Iris validation-only results (test NOT loaded or evaluated)" if validation_only
+        ("## Validation-only results (test NOT loaded or evaluated)" if validation_only
          else "## CI sampled training diagnostics (official test NOT evaluated)" if ci_sample
          else "## Results (held-out test evaluated once per run, after fixed epochs)"),
         "",
@@ -93,7 +94,7 @@ def summarize(records, source, output_dir, metadata):
         ("fixed hyperparameters, an explicit unevaluated-test marker, and process-local wall time / peak RSS."
          if validation_metric else "fixed hyperparameters, final test result, and process-local wall time / peak RSS."),
         "Training accuracy is measured online (before parameter updates), while",
-        ("validation is measured after each epoch; CI sample NEVER evaluates the test."
+        ("validation is measured after each epoch; no test evaluation was performed."
          if validation_metric else "validation is measured after each epoch. Final test is evaluated only once."),
         "Validation is used for diagnostics; epochs and hyperparameters are specified",
         "in advance and never selected using test performance.",
@@ -106,9 +107,9 @@ def summarize(records, source, output_dir, metadata):
         "implementation maturity, not intrinsic integer-versus-float hardware efficiency.",
     ]
     if validation_only:
-        lines.extend(["", "**VALIDATION ONLY:** the historical Iris test file was not "
-                      "loaded, hashed, or evaluated. This score is used for "
-                      "selection, not an independent generalization estimate."])
+        lines.extend(["", "**VALIDATION ONLY:** the test partition was not "
+                      "opened, loaded, hashed, or evaluated. This score is used "
+                      "for selection, not an independent generalization estimate."])
     if records[0]["dataset"] == "iris" and not validation_only:
         lines.extend([
             "",
@@ -142,14 +143,14 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=ROOT / "reports/held_out")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--validation-only", action="store_true",
-                        help="Iris development-only: never read/evaluate historical test")
+                        help="Train/validate without ever opening or hashing test data (Iris/MNIST)")
     parser.add_argument("--ci-sample", action="store_true",
                         help="MNIST 640-train/200-validation CI diagnostic, never evaluate test")
     args = parser.parse_args()
     if args.lr_shift is None:
         args.lr_shift = 6 if args.dataset == "iris" else 7
-    if args.validation_only and args.dataset != "iris":
-        parser.error("--validation-only requires --dataset iris")
+    if args.validation_only and args.ci_sample:
+        parser.error("--validation-only and --ci-sample cannot be combined")
     if args.ci_sample and (args.dataset != "mnist" or args.smoke):
         parser.error("--ci-sample requires --dataset mnist and excludes --smoke")
     if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
@@ -210,8 +211,13 @@ def main():
             assert row["test_evaluated"] == (not args.ci_sample and not args.validation_only)
             if args.validation_only:
                 assert row["test_correct"] is None and row["test_accuracy_pct"] is None
-                assert row["train_size"] == (12 if args.smoke else 106)
-                assert row["validation_size"] == (3 if args.smoke else 24)
+                assert row["test_size"] == 0
+                if args.dataset == "iris":
+                    assert row["train_size"] == (12 if args.smoke else 106)
+                    assert row["validation_size"] == (3 if args.smoke else 24)
+                else:
+                    assert row["train_size"] == (40 if args.smoke else 55000)
+                    assert row["validation_size"] == (10 if args.smoke else 5000)
             if args.ci_sample:
                 assert row["train_size"] == 640 and row["validation_size"] == 200
                 assert row["test_correct"] is None and row["test_accuracy_pct"] is None
