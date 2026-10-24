@@ -64,7 +64,7 @@ jobs:
         run: |
           python3 experiments/run_baselines.py --dataset mnist --ci-sample \
             --epochs 20 --seeds 1337 2027 --batch-size 32 \
-            --lr-shift 12 --output-dir /tmp/integers-mnist-ci
+            --lr-shift 7 --output-dir /tmp/integers-mnist-ci
       - name: Validate diagnostic report and forbid test metrics
         run: |
           python3 - <<'PY'
@@ -85,7 +85,7 @@ jobs:
               assert row["test_correct"] is None and row["test_accuracy_pct"] is None
               assert (row["train_size"], row["validation_size"], row["test_size"]) == (640, 200, 10000)
               assert row["epochs"] == 20 and row["seed"] in (1337, 2027)
-              assert row["lr_shift"] == 12
+              assert row["lr_shift"] == 7
               assert len(row["learning_curve"]) == 20
               assert all(m["training_samples"] == 640 for m in row["learning_curve"])
               assert all(0 <= m["validation_accuracy_pct"] <= 100 for m in row["learning_curve"])

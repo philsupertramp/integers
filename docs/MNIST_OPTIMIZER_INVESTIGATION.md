@@ -31,3 +31,17 @@ For the `2^-12` measurements, mean elapsed time per seed was 28.32 s (integer) v
 ## CI policy after diagnosis
 
 Use `lr_shift=12` with the same two-seed, 20-epoch 640/200 diagnostic in ordinary PR CI, preserving the full learning curves without hard-coding an accuracy threshold before maintainer review. Avoid repeatedly paying for the historical failure (`2^-7`) and the deliberately slow (`2^-15`) ablations in every PR; their run and artifacts remain linked above. Use the standard Iris `2^-7` baseline unchanged, because its architecture and training cohort are different.
+
+
+## Resolution: per-sample means at the optimizer boundary (new implementation)
+
+The integer `Linear` and `Conv2D` modules now count individual gradient-contributing samples across single and batched backward calls, resetting counts on `zero_grad`. Their ordinary `update(lr_shift)` applies actual **sample-mean** gradients **before** momentum and SGD, including arbitrary final-batch sizes. No change to `Module` or `Sequential` signatures was needed.
+
+- For power-of-two batch counts, the dyadic mean is **exact** (increase scale exponent), with no premature per-example rounding.
+- For non-power-of-two sizes, integer-only division uses a wider `i128` intermediate, round-to-nearest ties-to-even and adaptive precision to fit the mantissa. The representational error is bounded by half a unit at the selected dyadic scale, excluding any gradient saturation during accumulation.
+- Momentum aligns its decayed velocity to the **finer** dyadic gradient scale so initial velocity (mantissa 0, exponent 0) cannot discard sub-unit means. Runtime forward, backward and optimizer updates remain integer-only.
+- Without accumulated examples, `update` is a no-op. `zero_grad` resets accumulated counts but retains velocity.
+- The paired FP32 reference now divides its summed gradients by the **actual current batch count** before updating velocity.
+- Legacy experimental BatchNorm layers, excluded from the ADR-002 integer path, retain their previous summed-gradient optimizer convention.
+
+The shared default `lr_shift=7` is restored for both Iris and MNIST **after** implementing true averaging. The earlier `lr_shift=12` experiment compensated a *summed* 32-sample batch; it is not the same algorithm as the corrected mean-gradient code with `lr_shift=12`. The historic ablation is preserved as evidence, not reinterpreted as a new measurement. Numerical and end-to-end training checks of corrected code are reported separately.

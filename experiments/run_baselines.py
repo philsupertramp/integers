@@ -136,7 +136,7 @@ def main():
                         help="MNIST 640-train/200-validation CI diagnostic, never evaluate test")
     args = parser.parse_args()
     if args.lr_shift is None:
-        args.lr_shift = 12 if args.dataset == 'mnist' else 7
+        args.lr_shift = 7
     if args.ci_sample and (args.dataset != "mnist" or args.smoke):
         parser.error("--ci-sample requires --dataset mnist and excludes --smoke")
     if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
