@@ -42,6 +42,12 @@ jobs:
               assert row["test_evaluated"] is False and row["test_size"] == 0
               assert row["test_accuracy_pct"] is None and row["test_correct"] is None
               assert len(row["learning_curve"]) == 2
+              for epoch in row["learning_curve"]:
+                  matrix = epoch["validation_confusion"]
+                  assert len(matrix) == 3 and all(len(line) == 3 for line in matrix)
+                  assert sum(map(sum, matrix)) == 3
+                  assert [sum(line[c] for line in matrix) for c in range(3)] == epoch["validation_predictions"]
+                  assert sum(matrix[c][c] for c in range(3)) == round(epoch["validation_accuracy_pct"] * 3 / 100)
               assert 0 <= row["learning_curve"][-1]["validation_accuracy_pct"] <= 100
           PY
       - name: Iris validation-only selected protocol (3 seeds, 200 epochs)
@@ -96,6 +102,26 @@ jobs:
               assert len(row["learning_curve"]) == 20
               assert all(m["training_samples"] == 640 for m in row["learning_curve"])
               assert all(0 <= m["validation_accuracy_pct"] <= 100 for m in row["learning_curve"])
+              for epoch in row["learning_curve"]:
+                  matrix = epoch["validation_confusion"]
+                  assert len(matrix) == 10 and all(len(line) == 10 for line in matrix)
+                  assert [sum(line) for line in matrix] == [20] * 10
+                  assert [sum(line[c] for line in matrix) for c in range(10)] == epoch["validation_predictions"]
+                  assert sum(matrix[c][c] for c in range(10)) == round(epoch["validation_accuracy_pct"] * 200 / 100)
+          PY
+      - name: Refuse accidental official MNIST test access without --final-test
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          commands = [
+              ["python3", "experiments/run_baselines.py", "--dataset", "mnist", "--epochs", "1"],
+              ["cargo", "run", "--locked", "--quiet", "--example", "held_out", "--",
+               "--dataset", "mnist", "--epochs", "1"],
+          ]
+          for command in commands:
+              result = subprocess.run(command, text=True, capture_output=True)
+              assert result.returncode != 0, command
+              assert "--final-test" in result.stderr, (command, result.stderr)
           PY
       - name: Verify MNIST validation-only with NO test files present
         run: |
@@ -132,6 +158,12 @@ jobs:
               assert len(row["learning_curve"]) == 2
               assert all(sum(epoch["validation_predictions"]) == 10
                          for epoch in row["learning_curve"])
+              for epoch in row["learning_curve"]:
+                  matrix = epoch["validation_confusion"]
+                  assert len(matrix) == 10 and all(len(line) == 10 for line in matrix)
+                  assert [sum(line) for line in matrix] == [1] * 10
+                  assert [sum(line[c] for line in matrix) for c in range(10)] == epoch["validation_predictions"]
+                  assert sum(matrix[c][c] for c in range(10)) == round(epoch["validation_accuracy_pct"] * 10 / 100)
           PY
       - name: Print MNIST validation-only comparison
         run: cat /tmp/integers-mnist-ci/mnist/ci-sample/summary.md
