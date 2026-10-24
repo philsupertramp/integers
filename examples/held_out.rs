@@ -19,6 +19,7 @@ use integers::{argmax, mse_grad};
 
 const SHIFT: u32 = 7;
 const LR_SHIFT: u32 = 7;
+const MNIST_LR_SHIFT: u32 = 12; // 32-sample summed gradients: +5 bits
 const MOM_SHIFT: u32 = 1;
 const GRAD_CLIP: i32 = 8192;
 const OUTPUT_BITS: u32 = 31;
@@ -42,6 +43,7 @@ impl Config {
             report: PathBuf::from("reports/held_out.json"), smoke: false, ci_sample: false,
         };
         let mut i = 0;
+        let mut explicit_lr_shift = false;
         while i < args.len() {
             let key = &args[i];
             if key == "--smoke" { cfg.smoke = true; i += 1; continue; }
@@ -57,12 +59,18 @@ impl Config {
                 "--seed" => cfg.seed = value.parse().expect("invalid seed"),
                 "--epochs" => cfg.epochs = value.parse().expect("invalid epochs"),
                 "--batch-size" => cfg.batch = value.parse().expect("invalid batch size"),
-                "--lr-shift" => cfg.lr_shift = value.parse().expect("invalid lr shift"),
+                "--lr-shift" => {
+                    cfg.lr_shift = value.parse().expect("invalid lr shift");
+                    explicit_lr_shift = true;
+                },
                 "--data-dir" => cfg.data_dir = PathBuf::from(value),
                 "--report" => cfg.report = PathBuf::from(value),
                 _ => panic!("unknown option: {key}"),
             }
             i += 2;
+        }
+        if !explicit_lr_shift && cfg.task == Task::Mnist {
+            cfg.lr_shift = MNIST_LR_SHIFT;
         }
         if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 100 } else { 10 }; }
         assert!(cfg.seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, batch, epochs, or lr shift");

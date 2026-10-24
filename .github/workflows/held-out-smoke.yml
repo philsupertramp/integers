@@ -64,7 +64,7 @@ jobs:
         run: |
           python3 experiments/run_baselines.py --dataset mnist --ci-sample \
             --epochs 20 --seeds 1337 2027 --batch-size 32 \
-            --output-dir /tmp/integers-mnist-ci
+            --lr-shift 12 --output-dir /tmp/integers-mnist-ci
       - name: Validate diagnostic report and forbid test metrics
         run: |
           python3 - <<'PY'
@@ -85,6 +85,7 @@ jobs:
               assert row["test_correct"] is None and row["test_accuracy_pct"] is None
               assert (row["train_size"], row["validation_size"], row["test_size"]) == (640, 200, 10000)
               assert row["epochs"] == 20 and row["seed"] in (1337, 2027)
+              assert row["lr_shift"] == 12
               assert len(row["learning_curve"]) == 20
               assert all(m["training_samples"] == 640 for m in row["learning_curve"])
               assert all(0 <= m["validation_accuracy_pct"] <= 100 for m in row["learning_curve"])
@@ -98,50 +99,3 @@ jobs:
           path: /tmp/integers-mnist-ci/mnist/ci-sample/
           retention-days: 14
 
-  mnist-step-ablation:
-    name: MNIST effective SGD step (lr_shift=${{ matrix.lr_shift }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        lr_shift: [12, 15]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify MNIST IDX source
-        run: python3 experiments/fetch_mnist.py --data-dir data/mnist
-      - name: Evaluate reduced update scale (validation only)
-        run: |
-          python3 experiments/run_baselines.py --dataset mnist --ci-sample \
-            --epochs 20 --seeds 1337 2027 --batch-size 32 \
-            --lr-shift ${{ matrix.lr_shift }} \
-            --output-dir /tmp/integers-mnist-step
-      - name: Print entire validation-only comparison
-        run: cat /tmp/integers-mnist-step/mnist/ci-sample/summary.md
-      - name: Validate learning curves and arithmetic diagnostics
-        run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          root = Path("/tmp/integers-mnist-step/mnist/ci-sample")
-          rows = sorted(root.glob("*-seed-*.json"))
-          assert len(rows) == 4
-          for path in rows:
-              row = json.loads(path.read_text())
-              assert row["ci_sample"] is True
-              assert row["test_evaluated"] is False
-              assert row["test_correct"] is None and row["test_accuracy_pct"] is None
-              assert row["lr_shift"] in (12, 15)
-              assert len(row["learning_curve"]) == 20
-              for e in row["learning_curve"]:
-                  assert sum(e["validation_predictions"]) == 200
-                  assert e["nonfinite_outputs"] >= 0
-                  assert e["extreme_outputs"] >= 0
-          PY
-      - name: Archive per-epoch diagnostic traces
-        uses: actions/upload-artifact@v4
-        with:
-          name: mnist-step-${{ matrix.lr_shift }}
-          path: /tmp/integers-mnist-step/mnist/ci-sample/
-          retention-days: 14

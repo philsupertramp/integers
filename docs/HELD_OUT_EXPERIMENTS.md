@@ -100,7 +100,8 @@ but **never evaluated** in this mode. Reports explicitly set
 `ci_sample: true`, `test_evaluated: false`, and
 `test_accuracy_pct: null`.
 
-The job runs 20 epochs with seeds 1337 and 2027, batch size 32, with both integer and
+The job runs 20 epochs with seeds 1337 and 2027, batch size 32 and effective
+SGD learning rate `2^-12`, with both integer and
 scalar FP32 on **real MNIST** and records validation curves and wall/RSS.
 It has a **12-minute job timeout** and uploads only small reports as
 `mnist-ci-sample` (14-day retention). The CI cohort is intended to catch
@@ -112,7 +113,7 @@ To reproduce locally:
 ```sh
 python3 experiments/fetch_mnist.py --data-dir data/mnist
 python3 experiments/run_baselines.py --dataset mnist --ci-sample \
-    --epochs 20 --seeds 1337 2027 --batch-size 32
+    --epochs 20 --seeds 1337 2027 --batch-size 32 --lr-shift 12
 ```
 
 The full-protocol `--dataset mnist` **without** `--ci-sample` still uses
@@ -159,3 +160,5 @@ verifies the protocol and report shapes, and never claims convergence.
 The canonical full 55k/5k/10k MNIST experiment requires adequate resources
 and is deliberately **not** triggered in pull-request CI; only the bounded
 validation-only sample described above runs there.
+
+See [MNIST optimizer investigation](MNIST_OPTIMIZER_INVESTIGATION.md) for the controlled 7/12/15 learning-rate ablation; the historical (2^{-7}) configuration stays documented as an observed failure, not a CI convergence baseline.

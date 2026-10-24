@@ -128,13 +128,15 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=[1337, 2027, 4242])
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr-shift", type=int, default=7,
+    parser.add_argument("--lr-shift", type=int, default=None,
                         help="effective SGD learning rate = 2**(-lr_shift)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "reports/held_out")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--ci-sample", action="store_true",
                         help="MNIST 640-train/200-validation CI diagnostic, never evaluate test")
     args = parser.parse_args()
+    if args.lr_shift is None:
+        args.lr_shift = 12 if args.dataset == 'mnist' else 7
     if args.ci_sample and (args.dataset != "mnist" or args.smoke):
         parser.error("--ci-sample requires --dataset mnist and excludes --smoke")
     if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
