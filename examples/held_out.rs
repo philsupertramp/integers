@@ -82,7 +82,7 @@ impl Config {
             "--validation-only and --ci-sample are mutually exclusive");
         assert!(!cfg.final_test || (!cfg.validation_only && !cfg.ci_sample && !cfg.smoke),
             "--final-test cannot be combined with validation-only, CI sample or smoke");
-        assert!(cfg.task != Task::Mnist || cfg.validation_only || cfg.ci_sample || cfg.smoke || cfg.final_test,
+        assert!(cfg.task != Task::Mnist || cfg.validation_only || cfg.ci_sample || cfg.final_test,
             "MNIST test access requires explicit --final-test; use --validation-only during development");
         assert!(!cfg.ci_sample || (cfg.task == Task::Mnist && !cfg.smoke),
             "--ci-sample is only supported for MNIST and cannot be combined with --smoke");
