@@ -81,6 +81,46 @@ them. Don't claim a comparison from an alternate dataset variant. The
 standard runner checks the canonical train/test counts and dimensions.
 The Iris runner requires the exact 130/20 bundled row counts.
 
+## Bounded MNIST in pull-request CI
+
+The `mnist-sample` job in `.github/workflows/held-out-smoke.yml`
+downloads the official **60,000/10,000 canonical IDX** files from the
+[CVDF MNIST mirror](https://github.com/cvdfoundation/mnist) using
+`experiments/fetch_mnist.py`. Each compressed download is checked against
+a pinned SHA-256 digest before decompression, and IDX headers and lengths
+are validated. No PyTorch or additional Python packages are required, and
+no dataset files are committed or uploaded as artifacts.
+
+To keep CI bounded and avoid tuning against the official test split, the
+`--ci-sample` mode runs **640 training images (64/digit) and 200 validation
+images (20/digit)**, selected deterministically from the original 60,000-row
+training pool. Its validation split is strictly disjoint from the 640-image
+training cohort. The official 10,000-image test data is verified and loaded
+but **never evaluated** in this mode. Reports explicitly set
+`ci_sample: true`, `test_evaluated: false`, and
+`test_accuracy_pct: null`.
+
+The job runs 2 epochs, seed 1337, batch size 32, with both integer and
+scalar FP32 on **real MNIST** and records validation curves and wall/RSS.
+It has a **12-minute job timeout** and uploads only small reports as
+`mnist-ci-sample` (14-day retention). The CI cohort is intended to catch
+runtime failures, gross regressions and reproducibility drift, not to
+prove model convergence or hardware efficiency. Validation accuracy is
+reported diagnostically, with **no unmeasured minimum acceptance threshold**.
+To reproduce locally:
+
+```sh
+python3 experiments/fetch_mnist.py --data-dir data/mnist
+python3 experiments/run_baselines.py --dataset mnist --ci-sample \
+    --epochs 2 --seeds 1337 --batch-size 32
+```
+
+The full-protocol `--dataset mnist` **without** `--ci-sample` still uses
+55,000 training and 5,000 validation examples, reserves all 10,000 official
+test examples until *after* all fixed epochs, and is a distinct scientific
+baseline. CI sampled validation results must never be mixed into the full
+held-out results or used to set ADR-004 success thresholds.
+
 ## Machine-readable evidence
 
 `reports/held_out/{iris,mnist}/{smoke,full}/` contains:
@@ -116,5 +156,6 @@ proof that integer instructions are inherently faster or slower.
 
 The CI smoke workflow executes two tiny Iris epochs with both backends,
 verifies the protocol and report shapes, and never claims convergence.
-Full MNIST training requires local dataset access and adequate resources
-and is deliberately **not** triggered in default CI.
+The canonical full 55k/5k/10k MNIST experiment requires adequate resources
+and is deliberately **not** triggered in pull-request CI; only the bounded
+validation-only sample described above runs there.
