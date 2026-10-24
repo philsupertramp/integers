@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="560" viewBox="0 0 1040 560" role="img" aria-labelledby="title desc">
+<title id="title">MNIST validation accuracy over ten epochs for integer and FP32</title>
+<desc id="desc">On 55,000 training and 5,000 validation examples, integer rises from 87.16% to 93.53%, FP32 rises from 87.55% to 95.13%. Lines show means across three seeds, and shading shows minimum to maximum of the three seeds.</desc>
+<rect width="1040" height="560" fill="#FFFFFF"/>
+<text x="80" y="41" font-family="Arial,sans-serif" font-size="26" font-weight="700" fill="#17212d">MNIST full validation · 3-seed learning curves</text>
+<text x="80" y="70" font-family="Arial,sans-serif" font-size="16" fill="#536574">55k train · 5k validation · 10 epochs · test not evaluated</text>
+<line x1="80" x2="940" y1="448.3" y2="448.3" stroke="#e9edf2"/>
+<text x="65" y="453.3" text-anchor="end" font-family="Arial" font-size="14" fill="#52606d">86%</text>
+<line x1="80" x2="940" y1="385.0" y2="385.0" stroke="#e9edf2"/>
+<text x="65" y="390" text-anchor="end" font-family="Arial" font-size="14" fill="#52606d">88%</text>
+<line x1="80" x2="940" y1="321.7" y2="321.7" stroke="#e9edf2"/>
+<text x="65" y="326.7" text-anchor="end" font-family="Arial" font-size="14" fill="#52606d">90%</text>
+<line x1="80" x2="940" y1="258.3" y2="258.3" stroke="#e9edf2"/>
+<text x="65" y="263.3" text-anchor="end" font-family="Arial" font-size="14" fill="#52606d">92%</text>
+<line x1="80" x2="940" y1="195.0" y2="195.0" stroke="#e9edf2"/>
+<text x="65" y="200" text-anchor="end" font-family="Arial" font-size="14" fill="#52606d">94%</text>
+<line x1="80" x2="940" y1="131.7" y2="131.7" stroke="#e9edf2"/>
+<text x="65" y="136.7" text-anchor="end" font-family="Arial" font-size="14" fill="#52606d">96%</text>
+<text x="80.0" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">1</text>
+<text x="175.6" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">2</text>
+<text x="271.1" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">3</text>
+<text x="366.7" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">4</text>
+<text x="462.2" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">5</text>
+<text x="557.8" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">6</text>
+<text x="653.3" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">7</text>
+<text x="748.9" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">8</text>
+<text x="844.4" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">9</text>
+<text x="940.0" y="511" text-anchor="middle" font-family="Arial" font-size="14" fill="#52606d">10</text>
+<text x="510" y="535" font-family="Arial" font-size="14" fill="#52606d" text-anchor="middle">Epoch</text>
+<path d="M80.00,394.50 L175.56,324.83 L271.11,290.63 L366.67,272.90 L462.22,262.77 L557.78,242.50 L653.33,229.83 L748.89,214.63 L844.44,208.30 L940.00,208.93 L940.00,211.47 L844.44,221.60 L748.89,250.10 L653.33,251.37 L557.78,255.17 L462.22,272.90 L366.67,286.83 L271.11,309.63 L175.56,328.00 L80.00,442.00 Z" fill="#c2543d" fill-opacity="0.13"/>
+<path d="M80.00,411.60 L175.56,326.73 L271.11,299.50 L366.67,280.29 L462.22,266.36 L557.78,248.83 L653.33,239.54 L748.89,231.52 L844.44,215.90 L940.00,209.78" fill="none" stroke="#c2543d" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="80.0" cy="411.6" r="3.2" fill="#c2543d"/>
+<circle cx="175.6" cy="326.7" r="3.2" fill="#c2543d"/>
+<circle cx="271.1" cy="299.5" r="3.2" fill="#c2543d"/>
+<circle cx="366.7" cy="280.3" r="3.2" fill="#c2543d"/>
+<circle cx="462.2" cy="266.4" r="3.2" fill="#c2543d"/>
+<circle cx="557.8" cy="248.8" r="3.2" fill="#c2543d"/>
+<circle cx="653.3" cy="239.5" r="3.2" fill="#c2543d"/>
+<circle cx="748.9" cy="231.5" r="3.2" fill="#c2543d"/>
+<circle cx="844.4" cy="215.9" r="3.2" fill="#c2543d"/>
+<circle cx="940.0" cy="209.8" r="3.2" fill="#c2543d"/>
+<text x="951" y="209.8" font-family="Arial" font-size="16" font-weight="600" fill="#c2543d">93.53%</text>
+<path d="M80.00,388.80 L175.56,310.90 L271.11,281.77 L366.67,248.83 L462.22,225.40 L557.78,213.37 L653.33,191.83 L748.89,174.73 L844.44,160.17 L940.00,153.83 L940.00,166.50 L844.44,177.90 L748.89,208.30 L653.33,207.03 L557.78,239.33 L462.22,258.33 L366.67,277.97 L271.11,305.20 L175.56,323.57 L80.00,409.07 Z" fill="#2771ba" fill-opacity="0.13"/>
+<path d="M80.00,399.36 L175.56,317.66 L271.11,292.96 L366.67,261.92 L462.22,245.03 L557.78,226.46 L653.33,201.76 L748.89,189.51 L844.44,167.77 L940.00,159.11" fill="none" stroke="#2771ba" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="80.0" cy="399.4" r="3.2" fill="#2771ba"/>
+<circle cx="175.6" cy="317.7" r="3.2" fill="#2771ba"/>
+<circle cx="271.1" cy="293.0" r="3.2" fill="#2771ba"/>
+<circle cx="366.7" cy="261.9" r="3.2" fill="#2771ba"/>
+<circle cx="462.2" cy="245.0" r="3.2" fill="#2771ba"/>
+<circle cx="557.8" cy="226.5" r="3.2" fill="#2771ba"/>
+<circle cx="653.3" cy="201.8" r="3.2" fill="#2771ba"/>
+<circle cx="748.9" cy="189.5" r="3.2" fill="#2771ba"/>
+<circle cx="844.4" cy="167.8" r="3.2" fill="#2771ba"/>
+<circle cx="940.0" cy="159.1" r="3.2" fill="#2771ba"/>
+<text x="951" y="159.1" font-family="Arial" font-size="16" font-weight="600" fill="#2771ba">95.13%</text>
+<text x="80" y="558" font-family="Arial" font-size="12" fill="#687783">Source: user-run reports at 9b79a145 · mean line / three-seed range shaded</text>
+</svg>

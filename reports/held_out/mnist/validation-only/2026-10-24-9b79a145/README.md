@@ -6,6 +6,8 @@ The source training IDX checksums, platform, Rust version and timestamp are in [
 
 Protocol: full 60,000-image official *training* source, seeded stratified **55,000 training / 5,000 validation**, dense MLP `784→128→128→10`, batch size **32**, fixed **10 epochs**, effective batch-mean SGD LR `2^-7`, momentum shift 1, identical initial weights and data order for paired integer/FP32 runs.
 
+![Validation accuracy, with 3-seed ranges](validation_accuracy.svg)
+
 ## Validation results
 
 - **Integer:** 93.53% mean, range 93.48%–93.56%; mean wall 12.08 min/run.
@@ -43,4 +45,4 @@ Protocol: full 60,000-image official *training* source, seeded stratified **55,0
 
 The next predeclared study may extend the same LR shift 7/batch 32 setup to 20 epochs with per-class confusion matrices. This is a **separate validation-only run** without any official test files. It should be used to understand learning-curve saturation and error patterns before freezing final evaluation parameters. Avoid tuning to or opening the official test set during experimentation. ADR-004 pass/fail thresholds remain a maintainer decision after enough evidence.
 
-See [issue #15](https://github.com/philsupertramp/integers/issues/15), [draft PR #34](https://github.com/philsupertramp/integers/pull/34), and [experiment protocol](../../../../../../docs/HELD_OUT_EXPERIMENTS.md).
+See [issue #15](https://github.com/philsupertramp/integers/issues/15), [draft PR #34](https://github.com/philsupertramp/integers/pull/34), and [experiment protocol](../../../../../docs/HELD_OUT_EXPERIMENTS.md).
