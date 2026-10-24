@@ -1,4 +1,4 @@
-use crate::nn::{Module, TrainingArithmetic, apply_updates};
+use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
 use crate::dyadic::{
     add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
     Tensor, TensorView
@@ -29,6 +29,7 @@ pub struct Linear {
     grad_b: Tensor,
     vel_w:  Tensor,
     vel_b:  Tensor,
+    grad_samples: usize,
 
     q_min: i32,
     q_max: i32,
@@ -69,6 +70,7 @@ impl Linear {
             grad_b: Tensor::zeros(vec![out_features]),
             vel_w: Tensor::zeros(vec![n_w]),
             vel_b: Tensor::zeros(vec![out_features]),
+            grad_samples: 0,
             q_min: q_min,
             q_max: q_max,
         }
@@ -123,6 +125,7 @@ impl Linear {
             }
             self.grad_b.data[j] = add(self.grad_b.data[j], gj);
         }
+        self.grad_samples = self.grad_samples.checked_add(1).expect("Linear: sample counter overflow");
         Tensor::from_vec(gi, vec![self.in_features])
     }
 }
@@ -185,11 +188,13 @@ impl Module for Linear {
     }
 
     fn update(&mut self, lr: u32) {
-        apply_updates(&mut self.weights.data, &self.grad_w, &mut self.vel_w.data, lr, self.momentum_shift);
-        apply_updates(&mut self.biases.data,  &self.grad_b, &mut self.vel_b.data, lr, self.momentum_shift);
+        if self.grad_samples == 0 { return; }
+        apply_updates_mean(&mut self.weights.data, &self.grad_w, &mut self.vel_w.data, lr, self.momentum_shift, self.grad_samples);
+        apply_updates_mean(&mut self.biases.data,  &self.grad_b, &mut self.vel_b.data, lr, self.momentum_shift, self.grad_samples);
     }
 
     fn zero_grad(&mut self) {
+        self.grad_samples = 0;
         self.grad_w.data.iter_mut().for_each(|g| g.v = 0);
         self.grad_b.data.iter_mut().for_each(|g| g.v = 0);
     }
