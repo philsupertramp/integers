@@ -84,8 +84,9 @@ def summarize(records, source, output_dir, metadata):
         )
     lines += [
         "",
-        "Each seed/backend JSON contains its **full per-epoch learning curve**, split sizes,"
-        "fixed hyperparameters, test result, and process-local wall time / peak RSS.",
+        "Each seed/backend JSON contains its **full per-epoch learning curve**, split sizes,",
+        ("fixed hyperparameters, an explicit unevaluated-test marker, and process-local wall time / peak RSS."
+         if ci_sample else "fixed hyperparameters, final test result, and process-local wall time / peak RSS."),
         "Training accuracy is measured online (before parameter updates), while",
         ("validation is measured after each epoch; CI sample NEVER evaluates the test."
          if ci_sample else "validation is measured after each epoch. Final test is evaluated only once."),
