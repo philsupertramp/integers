@@ -84,11 +84,8 @@ python3 experiments/run_baselines.py --dataset mnist --validation-only \
 python3 experiments/run_baselines.py --dataset mnist --validation-only \
     --smoke --epochs 2 --seeds 1337
 
-# Development follow-up: separate validation-only 20-epoch diagnostic. This
-# re-trains each run from scratch; it does not resume from epoch 10.
-# python3 experiments/run_baselines.py --dataset mnist --validation-only \
-#     --epochs 20 --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242 \
-#     --output-dir reports/mnist-20epoch-diagnostic
+# The 20-epoch validation-only diagnostic is complete and archived.
+# Final protocol (below) was frozen using validation evidence only.
 
 # Only once the learning-rate/epoch protocol is frozen, explicitly download
 # the additional test inputs (omit --train-only) and run the final test once.
@@ -96,7 +93,8 @@ python3 experiments/run_baselines.py --dataset mnist --validation-only \
 # access; the explicit --final-test switch is required at both CLI layers.
 # python3 experiments/fetch_mnist.py --data-dir data/mnist
 # python3 experiments/run_baselines.py --dataset mnist --final-test \
-#     --epochs <LOCKED_EPOCHS> --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242
+#     --epochs 20 --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242 \
+#     --output-dir reports/mnist-final-locked-2026-10-24
 ```
 
 Iris's validation-selected defaults are **batch size 32, LR shift 6,
@@ -238,11 +236,20 @@ the *scalar, non-BLAS FP32 reference* on this machine; this says nothing
 general about integer hardware throughput. The 10 epochs used a fixed
 non-tuned configuration and neither prove saturation nor final generalization.
 
-**Next strictly validation-only diagnostic:** 20 epochs, same LR shift,
-batch and three seeds, with new per-epoch class confusion matrices.
-This is a separate fresh run, not checkpoint resumption. The outcome will
-help determine whether to test another training budget or learning-rate
-schedule before fixing the eventual one-shot final-test configuration.
+**The twenty-epoch validation-only diagnostic is complete.** All six original
+20-epoch model reports (including per-epoch confusion matrices) are archived in
+[the follow-up experiment directory](../reports/held_out/mnist/validation-only/2026-10-24-20epoch-0dcf0a3a/README.md).
+The integer backend reached **94.76% [94.60–94.86]** mean validation and the
+scalar FP32 reference **96.67% [96.52–96.90]**. The FP32 advantage therefore
+increased to **1.91 percentage points** at epoch 20. Recurring errors include
+integer predictions of 9 for digits 4 and 7. These are validation diagnostics,
+not official test measurements or proof of a single arithmetic cause.
+
+**Next: the one-shot locked MNIST 10k-image test.** The frozen protocol uses
+**20 fixed epochs, batch size 32, LR shift 7 and model seeds
+1337/2027/4242**. See [the predeclared official MNIST test
+protocol](MNIST_FINAL_PROTOCOL.md) for exact commands and safeguards. The
+official test split has not yet been evaluated.
 
 ## Accuracy/latency/memory decisions
 
