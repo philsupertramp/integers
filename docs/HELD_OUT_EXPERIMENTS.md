@@ -100,7 +100,7 @@ but **never evaluated** in this mode. Reports explicitly set
 `ci_sample: true`, `test_evaluated: false`, and
 `test_accuracy_pct: null`.
 
-The job runs 2 epochs, seed 1337, batch size 32, with both integer and
+The job runs 20 epochs with seeds 1337 and 2027, batch size 32, with both integer and
 scalar FP32 on **real MNIST** and records validation curves and wall/RSS.
 It has a **12-minute job timeout** and uploads only small reports as
 `mnist-ci-sample` (14-day retention). The CI cohort is intended to catch
@@ -112,7 +112,7 @@ To reproduce locally:
 ```sh
 python3 experiments/fetch_mnist.py --data-dir data/mnist
 python3 experiments/run_baselines.py --dataset mnist --ci-sample \
-    --epochs 2 --seeds 1337 --batch-size 32
+    --epochs 20 --seeds 1337 2027 --batch-size 32
 ```
 
 The full-protocol `--dataset mnist` **without** `--ci-sample` still uses
