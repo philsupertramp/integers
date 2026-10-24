@@ -454,6 +454,7 @@ struct Epoch {
     epoch: usize, train_accuracy: f64, validation_accuracy: f64,
     training_samples: usize, elapsed_ms: u128, training_ms: u128, validation_ms: u128,
     validation_predictions: Vec<usize>, validation_confusion: Vec<Vec<usize>>,
+    validation_per_class_recall_json: String,
     validation_nonfinite: usize,
     validation_extremes: usize, validation_max_abs: f64,
     nonfinite_fp32_params: Option<usize>,
@@ -529,6 +530,11 @@ fn main() {
             Backend::Fp32 => accuracy_fp32(&mut fp32, &data.pool, &data.validation_ids),
         };
         let validation_ms = validation_start.elapsed().as_millis();
+        let recall_json = format!("[{}]", val.confusion.iter().enumerate().map(|(class, row)| {
+            let total: usize = row.iter().sum();
+            if total == 0 { "null".to_string() }
+            else { format!("{:.8}", row[class] as f64 / total as f64) }
+        }).collect::<Vec<_>>().join(","));
         let metric = Epoch {
             epoch: epoch + 1,
             train_accuracy: pct(correct, data.train_ids.len()),
@@ -537,6 +543,7 @@ fn main() {
             elapsed_ms: epoch_start.elapsed().as_millis(), training_ms, validation_ms,
             validation_predictions: val.predicted_counts,
             validation_confusion: val.confusion,
+            validation_per_class_recall_json: recall_json,
             validation_nonfinite: val.nonfinite_outputs,
             validation_extremes: val.extreme_outputs,
             validation_max_abs: val.max_abs_output,
@@ -572,9 +579,9 @@ fn main() {
     }
 
     let epochs: Vec<String> = curve.iter().map(|m| format!(
-        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"training_ms\":{},\"validation_ms\":{},\"validation_predictions\":{:?},\"validation_confusion\":{:?},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
+        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"training_ms\":{},\"validation_ms\":{},\"validation_predictions\":{:?},\"validation_confusion\":{:?},\"validation_per_class_recall\":{},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
         m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms, m.training_ms, m.validation_ms,
-        m.validation_predictions, m.validation_confusion, m.validation_nonfinite, m.validation_extremes, m.validation_max_abs,
+        m.validation_predictions, m.validation_confusion, m.validation_per_class_recall_json, m.validation_nonfinite, m.validation_extremes, m.validation_max_abs,
         m.nonfinite_fp32_params.map_or("null".to_string(), |n| n.to_string()),
     )).collect();
     let rss = peak_rss_kb().map_or("null".to_owned(), |n| n.to_string());
