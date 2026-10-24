@@ -245,18 +245,29 @@ increased to **1.91 percentage points** at epoch 20. Recurring errors include
 integer predictions of 9 for digits 4 and 7. These are validation diagnostics,
 not official test measurements or proof of a single arithmetic cause.
 
-**Next: the one-shot locked MNIST 10k-image test.** The frozen protocol uses
-**20 fixed epochs, batch size 32, LR shift 7 and model seeds
-1337/2027/4242**. See [the predeclared official MNIST test
-protocol](MNIST_FINAL_PROTOCOL.md) for exact commands and safeguards. The
-official test split has not yet been evaluated.
+**The one-shot locked official 10,000-image MNIST test is complete.**
+With 20 fixed epochs, batch 32, LR shift 7 and model seeds
+1337/2027/4242, the integer backend achieved **95.41% [95.23–95.67]**
+mean actual test accuracy and scalar FP32 **96.87% [96.78–96.97]**,
+a **1.45 percentage-point** gap. Mean wall time per seed was **1387.95 s**
+integer vs **341.14 s** scalar FP32; whole-process peak RSS **434.06 MiB**
+vs **434.10 MiB**, respectively. Original unmodified reports and canonical
+four-file data-source digests are archived in [the full official test
+evidence](../reports/held_out/mnist/full/2026-10-24-locked-fa405dee/README.md).
+These are **official test** numbers, unlike the preceding validation metrics.
+The unoptimized reference runtime is not a hardware efficiency comparison.
+The [frozen evaluation protocol](MNIST_FINAL_PROTOCOL.md) was recorded
+**before** test access and was not changed in response to results.
 
 ## Accuracy/latency/memory decisions
 
-**ADR-004 remains pending.** The first full-data runs are baseline
-measurements, not automatic pass/fail judgements. Propose numeric thresholds
-only after reading measured multi-seed curves and accounting for hardware,
-training budget and implementation maturity. The FP32 reference is written
+**ADR-004 remains pending maintainer approval.** The full three-seed
+held-out MNIST data have now been measured and archived. [The proposed
+ADR-004 criteria](ADR_004_PROPOSAL.md) distinguish prospective accuracy/
+correctness gates from measured baseline and non-gating hardware performance
+indicators. These suggested thresholds were formed **after** seeing the
+held-out test: they cannot retroactively become pre-registered scientific
+success criteria. The FP32 reference is written
 for auditability, not optimized BLAS; do not read a speed difference as
 proof that integer instructions are inherently faster or slower.
 

@@ -1,6 +1,6 @@
 # Official MNIST held-out evaluation — fixed 20 epochs, October 24 2026
 
-**Status: the previously predeclared [final-test protocol](../../../../docs/MNIST_FINAL_PROTOCOL.md) has been executed.** These are actual scores on **all 10,000 official test images**, not validation or smoke results. The six submitted original per-model reports, the original `manifest.json`, and the original `summary.md` have been archived unchanged. **No test-driven hyperparameter changes, extra training, or model-selection steps have been applied to these submitted results.**
+**Status: the previously predeclared [final-test protocol](../../../../../docs/MNIST_FINAL_PROTOCOL.md) has been executed.** These are actual scores on **all 10,000 official test images**, not validation or smoke results. The six submitted original per-model reports, the original `manifest.json`, and the original `summary.md` have been archived unchanged. **No test-driven hyperparameter changes, extra training, or model-selection steps have been applied to these submitted results.**
 
 The local user executed the candidate at commit `fa405deeab3d7e456f50a407930f2a7b46673eb4` with `rustc 1.95.0 (59807616e 2026-04-14)` on `Linux-6.12.95-1-MANJARO-x86_64-with-glibc2.43`; the protocol had been frozen in the repository *before* this final run. Both canonical source training IDX hashes match [the earlier 20-epoch validation-only experiment](../../validation-only/2026-10-24-20epoch-0dcf0a3a/manifest.json). The original manifest additionally records SHA-256 of the two official test IDX files.
 

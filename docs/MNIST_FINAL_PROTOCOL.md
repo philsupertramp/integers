@@ -1,6 +1,6 @@
 # Locked MNIST final-test protocol — issue #15
 
-**Frozen on 2026-10-24 using only training and validation data. The official MNIST 10,000-image test partition has never been evaluated for these experiments.** Do not adjust the protocol in response to any official test score.
+**Frozen on 2026-10-24 using only training and validation data. At the time of this freeze, the official MNIST 10,000-image test partition had not been evaluated.** The actual test was subsequently executed on the frozen parameters. Do not adjust the protocol in response to any official test score.
 
 ## Evidence before freeze
 
@@ -58,3 +58,16 @@ The only files to return are:
 ## Release status
 
 This is a predeclared *measurement protocol*, **not** an ADR-004 numerical quality gate. Issue #15 remains open until all three-seed official held-out results are recorded and evaluated. Propose quantitative acceptance thresholds to the maintainer only after reviewing those results. Do not merge PR #9 to master as part of this issue.
+
+
+## Post-run audit — recorded after the one-shot evaluation
+
+The official test was completed locally on 2026-10-24 using candidate commit `fa405deeab3d7e456f50a407930f2a7b46673eb4`, with the same 20 epochs, LR shift 7, batch 32 and three fixed model seeds. This appendix is **post-measurement** and does not retroactively modify the pre-registered parameters above.
+
+- **Integer:** **95.41%** mean, [95.23–95.67]% across three seeds; **1387.95 seconds** mean wall time, **434.06 MiB** whole-process peak RSS.
+- **Unoptimized scalar FP32:** **96.87%** mean, [96.78–96.97]%; **341.14 seconds** mean wall time, **434.10 MiB** whole-process peak RSS.
+- **Mean FP32 advantage:** **1.45 percentage points**. Reported integer/FP32 runtime ratio **4.07×** on one x86_64 Manjaro machine, without any claim of intrinsic speed advantage.
+- All six original JSONs, 20-epoch training-derived validation curves, the complete original manifest with **four canonical IDX SHA-256 values**, and the original summary were archived [here](../reports/held_out/mnist/full/2026-10-24-locked-fa405dee/README.md). No new hyperparameters were selected using the official test result.
+- The final test has now been **consumed** for this experiment. Any future modification motivated by the official test needs new independent data for a fresh generalization claim; comparisons on the already-seen MNIST benchmark remain useful as regression diagnostics but not pristine hold-out experiments.
+
+Proposal, not approved policy: [ADR-004 candidate metrics](ADR_004_PROPOSAL.md). Approval and the decision on merging draft PR #34 into `big-refactor` remain with the maintainer. PR #9 remains unmerged.
