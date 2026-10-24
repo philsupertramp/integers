@@ -19,7 +19,6 @@ use integers::{argmax, mse_grad};
 
 const SHIFT: u32 = 7;
 const LR_SHIFT: u32 = 7;
-const MNIST_LR_SHIFT: u32 = 12; // 32-sample summed gradients: +5 bits
 const MOM_SHIFT: u32 = 1;
 const GRAD_CLIP: i32 = 8192;
 const OUTPUT_BITS: u32 = 31;
@@ -43,7 +42,6 @@ impl Config {
             report: PathBuf::from("reports/held_out.json"), smoke: false, ci_sample: false,
         };
         let mut i = 0;
-        let mut explicit_lr_shift = false;
         while i < args.len() {
             let key = &args[i];
             if key == "--smoke" { cfg.smoke = true; i += 1; continue; }
@@ -59,18 +57,12 @@ impl Config {
                 "--seed" => cfg.seed = value.parse().expect("invalid seed"),
                 "--epochs" => cfg.epochs = value.parse().expect("invalid epochs"),
                 "--batch-size" => cfg.batch = value.parse().expect("invalid batch size"),
-                "--lr-shift" => {
-                    cfg.lr_shift = value.parse().expect("invalid lr shift");
-                    explicit_lr_shift = true;
-                },
+                "--lr-shift" => cfg.lr_shift = value.parse().expect("invalid lr shift"),
                 "--data-dir" => cfg.data_dir = PathBuf::from(value),
                 "--report" => cfg.report = PathBuf::from(value),
                 _ => panic!("unknown option: {key}"),
             }
             i += 2;
-        }
-        if !explicit_lr_shift && cfg.task == Task::Mnist {
-            cfg.lr_shift = MNIST_LR_SHIFT;
         }
         if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 100 } else { 10 }; }
         assert!(cfg.seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, batch, epochs, or lr shift");
@@ -205,17 +197,20 @@ impl DenseFp32 {
         self.grad_w.fill(0.0);
         self.grad_b.fill(0.0);
     }
-    fn update(&mut self, lr_shift: u32) {
+    fn update(&mut self, lr_shift: u32, samples: usize) {
+        assert!(samples > 0, "FP32 update requires positive sample count");
+        let inv_samples = 1.0f32 / samples as f32;
+        // Apply the mean of summed per-example gradients BEFORE momentum.
         // Same architecture, starting weights, batch order, learning-rate and
         // momentum convention; different arithmetic (continuous FP32 vs dyadic).
         let lr = 2f32.powi(-(lr_shift as i32));
         let decay = 2f32.powi(-(MOM_SHIFT as i32));
         for i in 0..self.weights.len() {
-            self.vel_w[i] = decay * self.vel_w[i] + self.grad_w[i];
+            self.vel_w[i] = decay * self.vel_w[i] + self.grad_w[i] * inv_samples;
             self.weights[i] -= lr * self.vel_w[i];
         }
         for i in 0..self.biases.len() {
-            self.vel_b[i] = decay * self.vel_b[i] + self.grad_b[i];
+            self.vel_b[i] = decay * self.vel_b[i] + self.grad_b[i] * inv_samples;
             self.biases[i] -= lr * self.vel_b[i];
         }
     }
@@ -245,7 +240,9 @@ impl FloatMlp {
             .max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0
     }
     fn zero_grad(&mut self) { for l in &mut self.layers { l.zero_grad(); } }
-    fn update(&mut self, lr_shift: u32) { for l in &mut self.layers { l.update(lr_shift); } }
+    fn update(&mut self, lr_shift: u32, samples: usize) {
+        for layer in &mut self.layers { layer.update(lr_shift, samples); }
+    }
     fn accumulate(&mut self, input: &[f32], target: &[f32]) -> usize {
         let activations = self.activations(input);
         let result = activations.last().unwrap();
@@ -410,7 +407,7 @@ fn main() {
                         let t = float_target(&data.pool, idx);
                         if fp32.accumulate(&x, &t) == data.pool.labels[idx] as usize { correct += 1; }
                     }
-                    fp32.update(cfg.lr_shift);
+                    fp32.update(cfg.lr_shift, ids.len());
                 }
             }
         }
