@@ -452,7 +452,7 @@ fn pct(correct: usize, size: usize) -> f64 { 100.0 * correct as f64 / size as f6
 
 struct Epoch {
     epoch: usize, train_accuracy: f64, validation_accuracy: f64,
-    training_samples: usize, elapsed_ms: u128,
+    training_samples: usize, elapsed_ms: u128, training_ms: u128, validation_ms: u128,
     validation_predictions: Vec<usize>, validation_confusion: Vec<Vec<usize>>,
     validation_nonfinite: usize,
     validation_extremes: usize, validation_max_abs: f64,
@@ -522,16 +522,19 @@ fn main() {
                 }
             }
         }
+        let training_ms = epoch_start.elapsed().as_millis();
+        let validation_start = Instant::now();
         let val = match cfg.backend {
             Backend::Integer => accuracy_integer(&mut integer, &data.pool, &data.validation_ids),
             Backend::Fp32 => accuracy_fp32(&mut fp32, &data.pool, &data.validation_ids),
         };
+        let validation_ms = validation_start.elapsed().as_millis();
         let metric = Epoch {
             epoch: epoch + 1,
             train_accuracy: pct(correct, data.train_ids.len()),
             validation_accuracy: pct(val.correct, data.validation_ids.len()),
             training_samples: order.len(),
-            elapsed_ms: epoch_start.elapsed().as_millis(),
+            elapsed_ms: epoch_start.elapsed().as_millis(), training_ms, validation_ms,
             validation_predictions: val.predicted_counts,
             validation_confusion: val.confusion,
             validation_nonfinite: val.nonfinite_outputs,
@@ -569,8 +572,8 @@ fn main() {
     }
 
     let epochs: Vec<String> = curve.iter().map(|m| format!(
-        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"validation_predictions\":{:?},\"validation_confusion\":{:?},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
-        m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms,
+        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"training_ms\":{},\"validation_ms\":{},\"validation_predictions\":{:?},\"validation_confusion\":{:?},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
+        m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms, m.training_ms, m.validation_ms,
         m.validation_predictions, m.validation_confusion, m.validation_nonfinite, m.validation_extremes, m.validation_max_abs,
         m.nonfinite_fp32_params.map_or("null".to_string(), |n| n.to_string()),
     )).collect();
