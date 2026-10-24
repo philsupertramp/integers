@@ -1,4 +1,4 @@
-use crate::nn::{Module, TrainingArithmetic, apply_updates};
+use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
 use crate::dyadic::{
     add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
     Tensor, TensorView
@@ -189,8 +189,8 @@ impl Module for Linear {
 
     fn update(&mut self, lr: u32) {
         if self.grad_samples == 0 { return; }
-        apply_updates(&mut self.weights.data, &self.grad_w, &mut self.vel_w.data, lr, self.momentum_shift, self.grad_samples);
-        apply_updates(&mut self.biases.data,  &self.grad_b, &mut self.vel_b.data, lr, self.momentum_shift, self.grad_samples);
+        apply_updates_mean(&mut self.weights.data, &self.grad_w, &mut self.vel_w.data, lr, self.momentum_shift, self.grad_samples);
+        apply_updates_mean(&mut self.biases.data,  &self.grad_b, &mut self.vel_b.data, lr, self.momentum_shift, self.grad_samples);
     }
 
     fn zero_grad(&mut self) {

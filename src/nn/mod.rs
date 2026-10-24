@@ -299,7 +299,22 @@ fn mean_gradient(g: Dyadic, samples: usize) -> Dyadic {
     }
 }
 
+// Compatibility path for experimental floating-point BatchNorm modules:
+// preserves their existing SUM-gradient optimizer behavior. Not used by
+// the ADR-002 integer-only trainable layers.
 fn apply_updates(
+    params: &mut [Dyadic], grads: &Tensor, vels: &mut [Dyadic],
+    lr_shift: u32, momentum: Option<u32>,
+) {
+    match momentum {
+        None => params.iter_mut().zip(grads.data.iter())
+            .for_each(|(w, &g)| *w = sgd_step(*w, g, lr_shift)),
+        Some(m) => params.iter_mut().zip(grads.data.iter()).zip(vels.iter_mut())
+            .for_each(|((w, &g), v)| *w = momentum_step(*w, g, v, lr_shift, m)),
+    }
+}
+
+fn apply_updates_mean(
     params: &mut [Dyadic], grads: &Tensor, vels: &mut [Dyadic],
     lr_shift: u32, momentum: Option<u32>, samples: usize,
 ) {
