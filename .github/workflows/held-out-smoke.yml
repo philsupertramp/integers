@@ -17,7 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Deterministic split and sampling unit tests
         run: cargo test --locked --test experiment_protocol
-      - name: Prove summed-batch gradient scaling
+      - name: Verify true mean-gradient scaling and momentum
         run: cargo test --locked --test batch_gradient_scaling
       - name: Prohibit access to historical Iris test file in CI
         run: rm data/iris_test.tsv

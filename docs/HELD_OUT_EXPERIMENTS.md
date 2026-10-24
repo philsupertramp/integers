@@ -18,9 +18,9 @@ reference with the **same dense architecture and identical initialization**,
 permutations, batch size, initial targets, SGD learning rate and momentum
 convention. The FP32 model uses continuous arithmetic rather than dyadic
 rounding, saturation and STE; the two optimizers therefore need not produce
-identical trajectories. Both use the unnormalized batch-accumulated squared
-error derivative `output - target` (equivalent objective up to constant
-factors). No Softmax/BatchNorm FP64 runtime path is enabled in integer mode.
+identical trajectories. Both use the per-sample squared-error derivative `output - target`
+and apply the **sample mean of accumulated parameter gradients** before
+momentum and SGD, including short final mini-batches. No Softmax/BatchNorm FP64 runtime path is enabled in integer mode.
 
 ## Data splits and quantization
 
@@ -59,8 +59,14 @@ the same checked-out commit:
 # No downloads; 4 small runs, reproducible fixture-smoke behavior.
 python3 experiments/run_baselines.py --dataset iris --smoke --epochs 2 --seeds 1337 2027
 
-# 3 repeated seeds, separate fresh process per seed/backend.
-python3 experiments/run_baselines.py --dataset iris --epochs 100 --seeds 1337 2027 4242
+# HPO-selected Iris validation-only confirmation: NEVER loads test TSV.
+python3 experiments/run_baselines.py --dataset iris --validation-only \
+    --epochs 200 --batch-size 32 --lr-shift 6 --seeds 1337 2027 4242
+
+# Explicit final historical Iris test run (not routine CI): only after
+# settings have been fixed and the test caveat has been documented.
+# python3 experiments/run_baselines.py --dataset iris \
+#     --epochs 200 --batch-size 32 --lr-shift 6 --seeds 1337 2027 4242
 
 # Download canonical MNIST IDX files under data/mnist (see data/mnist README).
 # The runner REQUIRES 60,000 train + 10,000 test rows; it does not
@@ -68,6 +74,10 @@ python3 experiments/run_baselines.py --dataset iris --epochs 100 --seeds 1337 20
 python3 experiments/run_baselines.py --dataset mnist --epochs 10 --seeds 1337 2027 4242
 ```
 
+Iris's validation-selected defaults are **batch size 32, LR shift 6,
+and 200 epochs** ([HPO report](IRIS_HPO.md)). MNIST retains LR shift 7.
+The explicit `--validation-only` flag also works with the tiny Iris smoke
+profile and never opens or hashes the historical test TSV.
 An explicit `--batch-size 32` is the default for both tasks. No early
 stopping, validation-guided checkpoint selection or test-guided tuning is
 performed: all epochs are specified **before** a run. If hyperparameters are
@@ -79,7 +89,9 @@ MNIST uses the existing `load_mnist_auto` which prefers IDX over Parquet;
 the Python launcher **requires the canonical four IDX files** and hashes
 them. Don't claim a comparison from an alternate dataset variant. The
 standard runner checks the canonical train/test counts and dimensions.
-The Iris runner requires the exact 130/20 bundled row counts.
+The Iris runner requires all 130 development rows, and in full-test mode
+the separate 20 historical test rows. Validation-only mode does not read
+the test file at all.
 
 ## Bounded MNIST in pull-request CI
 
@@ -124,7 +136,8 @@ held-out results or used to set ADR-004 success thresholds.
 
 ## Machine-readable evidence
 
-`reports/held_out/{iris,mnist}/{smoke,full}/` contains:
+`reports/held_out/{iris,mnist}/{smoke,full,validation-only,ci-sample}/` contains
+(the available profiles depend on the dataset):
 - `integer-seed-<n>.json` and `fp32-seed-<n>.json`: full epoch-by-epoch
   training and validation accuracies, sample counts, elapsed time,
   hyperparameters, validation size, test accuracy, and peak RSS (Linux only).
@@ -133,7 +146,7 @@ held-out results or used to set ADR-004 success thresholds.
 - `summary.md`: repeated-seed means and min/max (accuracy, wall time, peak
   RSS) with the known comparability limitations.
 
-Wall time includes training and one final evaluation, but **not** build time
+Wall time includes training and a final evaluation **only for full-test runs**, but **not** build time
 or dataset-loading/preparation time. `peak_rss_kb` is Linux
 `/proc/self/status` VmHWM for the **entire child process**, including the
 dataset in RAM; when unavailable the report records JSON `null`.
@@ -155,8 +168,12 @@ training budget and implementation maturity. The FP32 reference is written
 for auditability, not optimized BLAS; do not read a speed difference as
 proof that integer instructions are inherently faster or slower.
 
-The CI smoke workflow executes two tiny Iris epochs with both backends,
-verifies the protocol and report shapes, and never claims convergence.
+The CI smoke workflow now **removes Iris's historical test TSV from its
+checkout** and executes a two-epoch `--validation-only` fixture with both
+backends, followed by a fixed 200-epoch validation-only confirmation of the
+HPO-selected configuration. It never uses the historical test scores for
+selection or a CI acceptance threshold. The actual hyperparameter grid is
+run by the separate one-off workflow; see [Iris HPO](IRIS_HPO.md).
 The canonical full 55k/5k/10k MNIST experiment requires adequate resources
 and is deliberately **not** triggered in pull-request CI; only the bounded
 validation-only sample described above runs there.
