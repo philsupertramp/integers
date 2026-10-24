@@ -128,6 +128,8 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=[1337, 2027, 4242])
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr-shift", type=int, default=7,
+                        help="effective SGD learning rate = 2**(-lr_shift)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "reports/held_out")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--ci-sample", action="store_true",
@@ -137,6 +139,8 @@ def main():
         parser.error("--ci-sample requires --dataset mnist and excludes --smoke")
     if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
         parser.error("seeds must be unique positive nonzero integers")
+    if not 0 <= args.lr_shift <= 30:
+        parser.error("--lr-shift must be between 0 and 30")
     if args.batch_size <= 0 or (args.epochs is not None and args.epochs <= 0):
         parser.error("batch size and epochs must be positive")
     if args.dataset == "mnist" and args.data_dir != ROOT / "data/mnist":
@@ -156,6 +160,7 @@ def main():
         "cargo": command_output("cargo", "--version"),
         "platform": platform.platform(),
         "machine": platform.machine(),
+        "lr_shift": args.lr_shift,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
     records = []
@@ -168,6 +173,7 @@ def main():
                 "--example", "held_out", "--",
                 "--dataset", args.dataset, "--backend", backend,
                 "--seed", str(seed), "--batch-size", str(args.batch_size),
+                "--lr-shift", str(args.lr_shift),
                 "--data-dir", str(args.data_dir), "--report", str(path),
             ]
             if args.epochs is not None:
@@ -180,6 +186,7 @@ def main():
             subprocess.run(cmd, cwd=ROOT, check=True)
             row = json.loads(path.read_text())
             assert row["seed"] == seed and row["backend"] == backend
+            assert row["lr_shift"] == args.lr_shift
             assert row["test_size"] == (20 if args.dataset == "iris" else 10000)
             assert row["ci_sample"] == args.ci_sample
             assert row["test_evaluated"] == (not args.ci_sample)
@@ -187,6 +194,8 @@ def main():
                 assert row["train_size"] == 640 and row["validation_size"] == 200
                 assert row["test_correct"] is None and row["test_accuracy_pct"] is None
             assert len(row["learning_curve"]) == row["epochs"]
+            assert all(sum(epoch["validation_predictions"]) == row["validation_size"]
+                       for epoch in row["learning_curve"])
             records.append(row)
     summarize(records, source, output_dir, metadata)
     print(f"Complete: {output_dir / 'summary.md'}")
