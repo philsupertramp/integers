@@ -19,14 +19,16 @@ jobs:
         run: cargo test --locked --test experiment_protocol
       - name: Prove summed-batch gradient scaling
         run: cargo test --locked --test batch_gradient_scaling
-      - name: Paired integer / FP32 Iris fixture smoke
-        run: python3 experiments/run_baselines.py --dataset iris --smoke --epochs 2 --seeds 1337 2027 --output-dir /tmp/integers-smoke
+      - name: Prohibit access to historical Iris test file in CI
+        run: rm data/iris_test.tsv
+      - name: Paired integer / FP32 Iris validation-only fixture smoke
+        run: python3 experiments/run_baselines.py --dataset iris --smoke --validation-only --epochs 2 --seeds 1337 2027 --output-dir /tmp/integers-smoke
       - name: Validate report structure and test isolation
         run: |
           python3 - <<'PY'
           import json
           from pathlib import Path
-          root = Path("/tmp/integers-smoke/iris/smoke")
+          root = Path("/tmp/integers-smoke/iris/validation-only")
           reports = list(root.glob("*-seed-*.json"))
           assert len(reports) == 4
           assert (root / "manifest.json").exists()
@@ -36,19 +38,24 @@ jobs:
               assert row["smoke"] is True
               assert row["train_size"] == 12
               assert row["validation_size"] == 3
-              assert row["test_size"] == 20
+              assert row["validation_only"] is True
+              assert row["test_evaluated"] is False and row["test_size"] == 0
+              assert row["test_accuracy_pct"] is None and row["test_correct"] is None
               assert len(row["learning_curve"]) == 2
-              assert 0 <= row["test_accuracy_pct"] <= 100
+              assert 0 <= row["learning_curve"][-1]["validation_accuracy_pct"] <= 100
           PY
-      - name: Full Iris baseline (3 seeds, 100 epochs, both arithmetic backends)
-        run: python3 experiments/run_baselines.py --dataset iris --epochs 100 --seeds 1337 2027 4242 --output-dir /tmp/integers-full
-      - name: Print measured Iris summary
-        run: cat /tmp/integers-full/iris/full/summary.md
-      - name: Preserve lightweight full Iris measurements
+      - name: Iris validation-only selected protocol (3 seeds, 200 epochs)
+        run: |
+          python3 experiments/run_baselines.py --dataset iris --validation-only \
+            --epochs 200 --batch-size 32 --lr-shift 6 --seeds 1337 2027 4242 \
+            --output-dir /tmp/integers-iris-validation
+      - name: Print Iris validation-only summary
+        run: cat /tmp/integers-iris-validation/iris/validation-only/summary.md
+      - name: Preserve lightweight Iris validation-only measurements
         uses: actions/upload-artifact@v4
         with:
-          name: iris-held-out-baselines
-          path: /tmp/integers-full/iris/full/
+          name: iris-validation-selected
+          path: /tmp/integers-iris-validation/iris/validation-only/
           retention-days: 30
 
   mnist-sample:
