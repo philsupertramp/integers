@@ -35,7 +35,7 @@ jobs:
               assert row["train_size"] == 12
               assert row["validation_size"] == 3
               assert row["test_size"] == 20
-              assert len(row["learning_curve"]) == 20
+              assert len(row["learning_curve"]) == 2
               assert 0 <= row["test_accuracy_pct"] <= 100
           PY
       - name: Full Iris baseline (3 seeds, 100 epochs, both arithmetic backends)
@@ -83,7 +83,7 @@ jobs:
               assert row["test_correct"] is None and row["test_accuracy_pct"] is None
               assert (row["train_size"], row["validation_size"], row["test_size"]) == (640, 200, 10000)
               assert row["epochs"] == 20 and row["seed"] in (1337, 2027)
-              assert len(row["learning_curve"]) == 2
+              assert len(row["learning_curve"]) == 20
               assert all(m["training_samples"] == 640 for m in row["learning_curve"])
               assert all(0 <= m["validation_accuracy_pct"] <= 100 for m in row["learning_curve"])
           PY
