@@ -6,6 +6,8 @@
 mod protocol;
 #[path = "mnist_nn/mnist_loader.rs"]
 mod mnist_loader;
+#[path = "../experiments/cnn_reference.rs"]
+mod cnn_reference;
 
 use std::env;
 use std::fs;
@@ -31,16 +33,19 @@ const SPLIT_SEED: u64 = 0x0123_4567_89AB_CDEF;
 enum Backend { Integer, Fp32 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Task { Iris, Mnist }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Architecture { Dense, Cnn }
 struct Config {
-    task: Task, backend: Backend, seed: u64, epochs: usize, batch: usize, lr_shift: u32,
-    data_dir: PathBuf, report: PathBuf, smoke: bool, ci_sample: bool,
+    task: Task, backend: Backend, architecture: Architecture, seed: u64, epochs: usize, batch: usize, lr_shift: u32,
+    train_limit: Option<usize>, validation_limit: Option<usize>, data_dir: PathBuf, report: PathBuf, smoke: bool, ci_sample: bool,
     validation_only: bool, final_test: bool, split_seed: u64,
 }
 impl Config {
     fn parse() -> Self {
         let args: Vec<String> = env::args().skip(1).collect();
         let mut cfg = Self {
-            task: Task::Iris, backend: Backend::Integer, seed: 1337, epochs: 0,
+            task: Task::Iris, backend: Backend::Integer, architecture: Architecture::Dense, seed: 1337, epochs: 0,
+            train_limit: None, validation_limit: None,
             batch: 32, lr_shift: LR_SHIFT, data_dir: PathBuf::from("data/mnist"),
             report: PathBuf::from("reports/held_out.json"), smoke: false, ci_sample: false,
             validation_only: false, final_test: false, split_seed: SPLIT_SEED,
@@ -58,6 +63,11 @@ impl Config {
                 "--dataset" => cfg.task = match value.as_str() {
                     "iris" => Task::Iris, "mnist" => Task::Mnist, _ => panic!("unknown dataset: {value}"),
                 },
+                "--architecture" => cfg.architecture = match value.as_str() {
+                    "dense" => Architecture::Dense, "cnn" => Architecture::Cnn, _ => panic!("unknown architecture: {value}"),
+                },
+                "--train-limit" => cfg.train_limit = Some(value.parse().expect("invalid training sample limit")),
+                "--validation-limit" => cfg.validation_limit = Some(value.parse().expect("invalid validation sample limit")),
                 "--backend" => cfg.backend = match value.as_str() {
                     "integer" => Backend::Integer, "fp32" => Backend::Fp32, _ => panic!("unknown backend: {value}"),
                 },
@@ -75,6 +85,9 @@ impl Config {
             }
             i += 2;
         }
+        assert!(cfg.architecture != Architecture::Cnn || cfg.task == Task::Mnist, "CNN requires MNIST");
+        assert!(cfg.train_limit.map_or(true, |v| v > 0) && cfg.validation_limit.map_or(true, |v| v > 0), "sample limits must be positive");
+        assert!((cfg.train_limit.is_none() && cfg.validation_limit.is_none()) || (cfg.validation_only && !cfg.ci_sample), "sample limits require validation-only mode");
         if !explicit_lr && cfg.task == Task::Iris { cfg.lr_shift = IRIS_LR_SHIFT; }
         if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 200 } else { 10 }; }
         assert!(cfg.seed != 0 && cfg.split_seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, split seed, batch, epochs, or lr shift");
@@ -336,6 +349,42 @@ fn build_models(seed: u64, dims: &[usize]) -> (Sequential, FloatMlp) {
     (integer, FloatMlp { layers: float_layers })
 }
 
+
+enum Fp32Model { Dense(FloatMlp), Cnn(cnn_reference::CnnFp32) }
+impl Fp32Model {
+    fn forward_outputs(&mut self, input: &[f32]) -> Vec<f32> {
+        match self {
+            Self::Dense(model) => model.activations(input).pop().expect("nonempty MLP"),
+            Self::Cnn(model) => model.forward(input),
+        }
+    }
+    fn accumulate(&mut self, input: &[f32], target: &[f32]) -> usize {
+        match self {
+            Self::Dense(model) => model.accumulate(input, target),
+            Self::Cnn(model) => model.accumulate(input, target),
+        }
+    }
+    fn zero_grad(&mut self) {
+        match self { Self::Dense(model) => model.zero_grad(), Self::Cnn(model) => model.zero_grad() }
+    }
+    fn update(&mut self, lr_shift: u32, samples: usize) {
+        match self {
+            Self::Dense(model) => model.update(lr_shift, samples),
+            Self::Cnn(model) => model.update(lr_shift, samples),
+        }
+    }
+    fn nonfinite_parameters(&self) -> usize {
+        match self {
+            Self::Dense(model) => model.layers.iter().map(|layer| {
+                layer.weights.iter().chain(layer.biases.iter())
+                    .chain(layer.vel_w.iter()).chain(layer.vel_b.iter())
+                    .filter(|x| !x.is_finite()).count()
+            }).sum(),
+            Self::Cnn(model) => model.nonfinite_parameters(),
+        }
+    }
+}
+
 fn float_row(ds: &Dataset, i: usize) -> Vec<f32> {
     ds.get_input(i).data.iter().copied().map(decoded).collect()
 }
@@ -371,37 +420,27 @@ fn accuracy_integer(model: &mut Sequential, ds: &Dataset, ids: &[usize]) -> Eval
     }
     stats
 }
-fn accuracy_fp32(model: &FloatMlp, ds: &Dataset, ids: &[usize]) -> Evaluation {
+fn accuracy_fp32(model: &mut Fp32Model, ds: &Dataset, ids: &[usize]) -> Evaluation {
     let mut stats = Evaluation {
         correct: 0, predicted_counts: vec![0; ds.n_classes],
         confusion: vec![vec![0; ds.n_classes]; ds.n_classes],
         nonfinite_outputs: 0, extreme_outputs: 0, max_abs_output: 0.0,
     };
     for &i in ids {
-        let outputs = model.activations(&float_row(ds, i));
-        let values = outputs.last().expect("nonempty MLP");
+        let values = model.forward_outputs(&float_row(ds, i));
         let predicted = values.iter().enumerate()
             .max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         stats.predicted_counts[predicted] += 1;
         stats.confusion[ds.labels[i] as usize][predicted] += 1;
         stats.correct += usize::from(predicted == ds.labels[i] as usize);
-        for &value in values {
-            if value.is_finite() {
-                stats.max_abs_output = stats.max_abs_output.max(value.abs() as f64);
-            } else {
-                stats.nonfinite_outputs += 1;
-            }
+        for &value in &values {
+            if value.is_finite() { stats.max_abs_output = stats.max_abs_output.max(value.abs() as f64); }
+            else { stats.nonfinite_outputs += 1; }
         }
     }
     stats
 }
-fn fp32_parameter_nonfinite(model: &FloatMlp) -> usize {
-    model.layers.iter().map(|layer| {
-        layer.weights.iter().chain(layer.biases.iter())
-            .chain(layer.vel_w.iter()).chain(layer.vel_b.iter())
-            .filter(|x| !x.is_finite()).count()
-    }).sum()
-}
+fn fp32_parameter_nonfinite(model: &Fp32Model) -> usize { model.nonfinite_parameters() }
 
 fn peak_rss_kb() -> Option<u64> {
     // Linux ru_maxrss is process-local. On non-Linux, do not invent values.
@@ -421,12 +460,32 @@ struct Epoch {
 }
 fn main() {
     let cfg = Config::parse();
-    let data = load_data(&cfg);
-    let dims = match cfg.task {
-        Task::Iris => vec![4, 8, 8, 3],
-        Task::Mnist => vec![784, 128, 128, 10],
+    let mut data = load_data(&cfg);
+    // Validation-only subsampling is performed *after* the canonical stratified
+    // split, with its own deterministic selection schedule. Never touch test.
+    if let Some(n) = cfg.train_limit {
+        data.train_ids = protocol::epoch_order(&data.train_ids, cfg.split_seed ^ 0xC035, 0)
+            .into_iter().take(n).collect();
+    }
+    if let Some(n) = cfg.validation_limit {
+        data.validation_ids = protocol::epoch_order(&data.validation_ids, cfg.split_seed ^ 0xCAFE, 0)
+            .into_iter().take(n).collect();
+    }
+    let dims = match (cfg.task, cfg.architecture) {
+        (Task::Iris, _) => vec![4, 8, 8, 3],
+        (Task::Mnist, Architecture::Dense) => vec![784, 128, 128, 10],
+        (Task::Mnist, Architecture::Cnn) => vec![784, 2704, 676, 968, 200, 64, 10],
     };
-    let (mut integer, mut fp32) = build_models(cfg.seed, &dims);
+    let (mut integer, mut fp32) = match cfg.architecture {
+        Architecture::Dense => {
+            let (model, reference) = build_models(cfg.seed, &dims);
+            (model, Fp32Model::Dense(reference))
+        }
+        Architecture::Cnn => {
+            let (model, reference) = cnn_reference::build_models(cfg.seed);
+            (model, Fp32Model::Cnn(reference))
+        }
+    };
     let mut curve = Vec::new();
     let start = Instant::now();
     for epoch in 0..cfg.epochs {
@@ -465,7 +524,7 @@ fn main() {
         }
         let val = match cfg.backend {
             Backend::Integer => accuracy_integer(&mut integer, &data.pool, &data.validation_ids),
-            Backend::Fp32 => accuracy_fp32(&fp32, &data.pool, &data.validation_ids),
+            Backend::Fp32 => accuracy_fp32(&mut fp32, &data.pool, &data.validation_ids),
         };
         let metric = Epoch {
             epoch: epoch + 1,
@@ -495,12 +554,13 @@ fn main() {
         let test_ids: Vec<usize> = (0..data.test.len()).collect();
         Some(match cfg.backend {
             Backend::Integer => accuracy_integer(&mut integer, &data.test, &test_ids).correct,
-            Backend::Fp32 => accuracy_fp32(&fp32, &data.test, &test_ids).correct,
+            Backend::Fp32 => accuracy_fp32(&mut fp32, &data.test, &test_ids).correct,
         })
     };
     let total_ms = start.elapsed().as_millis();
     let backend = if cfg.backend == Backend::Integer { "integer" } else { "fp32" };
     let task = if cfg.task == Task::Iris { "iris" } else { "mnist" };
+    let architecture_kind = if cfg.architecture == Architecture::Dense { "dense_mlp" } else { "mnist_cnn_v1" };
     if let Some(correct) = test_correct {
         println!("FINAL {task} {backend} seed={} test={}/{} ({:.2}%) duration_ms={total_ms}",
             cfg.seed, correct, data.test.len(), pct(correct, data.test.len()));
@@ -518,8 +578,10 @@ fn main() {
     let test_correct_json = test_correct.map_or("null".to_owned(), |n| n.to_string());
     let test_accuracy_json = test_correct.map_or("null".to_owned(), |n| format!("{:.6}", pct(n, data.test.len())));
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
-        cfg.smoke, cfg.ci_sample, cfg.seed, cfg.split_seed, cfg.epochs, cfg.batch,
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        cfg.smoke, cfg.ci_sample, cfg.seed, cfg.split_seed, cfg.epochs, cfg.batch, architecture_kind,
+        cfg.train_limit.map_or("null".to_string(), |n| n.to_string()),
+        cfg.validation_limit.map_or("null".to_string(), |n| n.to_string()),
         dims, SHIFT, OUTPUT_BITS, cfg.lr_shift, MOM_SHIFT, GRAD_CLIP,
         data.train_ids.len(), data.validation_ids.len(), data.test.len(),
         cfg.validation_only, test_correct.is_some(), test_correct_json, test_accuracy_json, total_ms, rss,
