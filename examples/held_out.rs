@@ -30,7 +30,7 @@ enum Backend { Integer, Fp32 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Task { Iris, Mnist }
 struct Config {
-    task: Task, backend: Backend, seed: u64, epochs: usize, batch: usize,
+    task: Task, backend: Backend, seed: u64, epochs: usize, batch: usize, lr_shift: u32,
     data_dir: PathBuf, report: PathBuf, smoke: bool, ci_sample: bool,
 }
 impl Config {
@@ -38,7 +38,7 @@ impl Config {
         let args: Vec<String> = env::args().skip(1).collect();
         let mut cfg = Self {
             task: Task::Iris, backend: Backend::Integer, seed: 1337, epochs: 0,
-            batch: 32, data_dir: PathBuf::from("data/mnist"),
+            batch: 32, lr_shift: LR_SHIFT, data_dir: PathBuf::from("data/mnist"),
             report: PathBuf::from("reports/held_out.json"), smoke: false, ci_sample: false,
         };
         let mut i = 0;
@@ -57,6 +57,7 @@ impl Config {
                 "--seed" => cfg.seed = value.parse().expect("invalid seed"),
                 "--epochs" => cfg.epochs = value.parse().expect("invalid epochs"),
                 "--batch-size" => cfg.batch = value.parse().expect("invalid batch size"),
+                "--lr-shift" => cfg.lr_shift = value.parse().expect("invalid lr shift"),
                 "--data-dir" => cfg.data_dir = PathBuf::from(value),
                 "--report" => cfg.report = PathBuf::from(value),
                 _ => panic!("unknown option: {key}"),
@@ -64,7 +65,7 @@ impl Config {
             i += 2;
         }
         if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 100 } else { 10 }; }
-        assert!(cfg.seed != 0 && cfg.batch > 0 && cfg.epochs > 0, "seed, batch and epochs must be positive");
+        assert!(cfg.seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, batch, epochs, or lr shift");
         assert!(!cfg.ci_sample || (cfg.task == Task::Mnist && !cfg.smoke),
             "--ci-sample is only supported for MNIST and cannot be combined with --smoke");
         cfg
@@ -196,10 +197,10 @@ impl DenseFp32 {
         self.grad_w.fill(0.0);
         self.grad_b.fill(0.0);
     }
-    fn update(&mut self) {
+    fn update(&mut self, lr_shift: u32) {
         // Same architecture, starting weights, batch order, learning-rate and
         // momentum convention; different arithmetic (continuous FP32 vs dyadic).
-        let lr = 2f32.powi(-(LR_SHIFT as i32));
+        let lr = 2f32.powi(-(lr_shift as i32));
         let decay = 2f32.powi(-(MOM_SHIFT as i32));
         for i in 0..self.weights.len() {
             self.vel_w[i] = decay * self.vel_w[i] + self.grad_w[i];
@@ -236,7 +237,7 @@ impl FloatMlp {
             .max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0
     }
     fn zero_grad(&mut self) { for l in &mut self.layers { l.zero_grad(); } }
-    fn update(&mut self) { for l in &mut self.layers { l.update(); } }
+    fn update(&mut self, lr_shift: u32) { for l in &mut self.layers { l.update(lr_shift); } }
     fn accumulate(&mut self, input: &[f32], target: &[f32]) -> usize {
         let activations = self.activations(input);
         let result = activations.last().unwrap();
@@ -341,7 +342,7 @@ fn main() {
                         Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec())
                     }).collect();
                     integer.backward_batch(&gradient);
-                    integer.update(LR_SHIFT);
+                    integer.update(cfg.lr_shift);
                 }
                 integer.set_training(false);
             }
@@ -353,7 +354,7 @@ fn main() {
                         let t = float_target(&data.pool, idx);
                         if fp32.accumulate(&x, &t) == data.pool.labels[idx] as usize { correct += 1; }
                     }
-                    fp32.update();
+                    fp32.update(cfg.lr_shift);
                 }
             }
         }
@@ -401,7 +402,7 @@ fn main() {
     let payload = format!(
         "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke, cfg.ci_sample, cfg.seed, SPLIT_SEED, cfg.epochs, cfg.batch,
-        dims, SHIFT, OUTPUT_BITS, LR_SHIFT, MOM_SHIFT, GRAD_CLIP,
+        dims, SHIFT, OUTPUT_BITS, cfg.lr_shift, MOM_SHIFT, GRAD_CLIP,
         data.train_ids.len(), data.validation_ids.len(), data.test.len(),
         test_correct.is_some(), test_correct_json, test_accuracy_json, total_ms, rss,
         epochs.join(","),
