@@ -26,7 +26,7 @@ The 20-epoch budget was selected from a predeclared validation-only diagnostic, 
 | Model seeds | **1337, 2027, 4242** |
 | Data | Canonical official MNIST IDX, 60,000 train-source images and **10,000 official test images** |
 | Validation | 55,000 train / 5,000 stratified validation from the training partition; fixed split seed `81985529216486895` |
-| Test access | Only after epoch 20 completes, **once per backend/seed**; no test-driven tuning |
+| Test evaluation | Only after epoch 20 completes, **once per backend/seed**; no test-driven tuning. In final mode the test IDX is loaded during setup, but no predictions or metrics are computed until training ends |
 | Measurements | Per-epoch train/validation curves and confusion matrices; one final 10k test accuracy per backend/seed, wall time, peak RSS, source checksums, commit/toolchain/platform |
 
 The scalar FP32 reference is intentionally unoptimized, so the runtime ratio is **not** evidence of a hardware architectural advantage or disadvantage.
