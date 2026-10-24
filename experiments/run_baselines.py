@@ -48,7 +48,8 @@ def summarize(records, source, output_dir, metadata):
     lines = [
         "# Held-out experiment report",
         "",
-        f"Dataset: **{records[0]['dataset']}**; smoke mode: **{records[0]['smoke']}**.",
+        f"Dataset: **{records[0]['dataset']}**; smoke mode: **{records[0]['smoke']}**; "
+        f"CI sample: **{records[0].get('ci_sample', False)}**.",
         f"Commit: `{metadata['git_commit']}`; Rust: `{metadata['rustc']}`.",
         f"Target: `{metadata['platform']}`; generated at `{metadata['timestamp_utc']}`.",
         "",
@@ -57,11 +58,14 @@ def summarize(records, source, output_dir, metadata):
     ]
     for path, digest in source.items():
         lines.append(f"- `{path}`: `{digest}`")
+    ci_sample = records[0].get("ci_sample", False)
     lines.extend([
         "",
-        "## Results (held-out test evaluated once per run, after fixed epochs)",
+        ("## CI sampled training diagnostics (official test NOT evaluated)" if ci_sample
+         else "## Results (held-out test evaluated once per run, after fixed epochs)"),
         "",
-        "| Backend | Seeds | Test accuracy mean [min, max] | Wall time mean [min, max], s | Peak RSS mean [min, max], MiB |",
+        ("| Backend | Seeds | Final validation accuracy mean [min, max] | Wall time mean [min, max], s | Peak RSS mean [min, max], MiB |" if ci_sample
+         else "| Backend | Seeds | Test accuracy mean [min, max] | Wall time mean [min, max], s | Peak RSS mean [min, max], MiB |"),
         "| --- | --- | --- | --- | --- |",
     ])
     for backend, runs in sorted(grouped.items()):
@@ -70,18 +74,21 @@ def summarize(records, source, output_dir, metadata):
                 return "not available"
             values = [value / factor for value in values]
             return f"{statistics.mean(values):.2f} [{min(values):.2f}, {max(values):.2f}]"
+        measured_accuracy = ([row["learning_curve"][-1]["validation_accuracy_pct"] for row in runs]
+                             if ci_sample else [row["test_accuracy_pct"] for row in runs])
         lines.append(
             f"| {backend} | {', '.join(str(row['seed']) for row in runs)} | "
-            f"{triplet([row['test_accuracy_pct'] for row in runs])}% | "
+            f"{triplet(measured_accuracy)}% | "
             f"{triplet([row['wall_ms'] for row in runs], 1000)} | "
             f"{triplet([row['peak_rss_kb'] for row in runs], 1024)} |"
         )
     lines += [
         "",
-        "Each seed/backend JSON contains its **full per-epoch learning curve**, split sizes,",
+        "Each seed/backend JSON contains its **full per-epoch learning curve**, split sizes,"
         "fixed hyperparameters, test result, and process-local wall time / peak RSS.",
         "Training accuracy is measured online (before parameter updates), while",
-        "validation is measured after each epoch. Final test is evaluated only once.",
+        ("validation is measured after each epoch; CI sample NEVER evaluates the test."
+         if ci_sample else "validation is measured after each epoch. Final test is evaluated only once."),
         "Validation is used for diagnostics; epochs and hyperparameters are specified",
         "in advance and never selected using test performance.",
         "",
@@ -99,6 +106,11 @@ def summarize(records, source, output_dir, metadata):
             "historical experiments. It is excluded from *this* run's training,",
             "preprocessing and selection, but cannot be called an unseen pristine test set.",
         ])
+    if ci_sample:
+        lines.extend(["", "**CI SAMPLE ONLY:** 640 train examples (64/class), 200 validation "
+                      "examples (20/class), and NO test evaluation. This is a "
+                      "bounded runtime/regression diagnostic, not evidence of full-MNIST "
+                      "generalization, convergence, or accepted pass/fail thresholds."])
     if records[0]["smoke"]:
         lines.extend(["", "**SMOKE ONLY:** fixture-scale execution is not benchmark evidence."])
     output_dir.joinpath("summary.md").write_text("\n".join(lines) + "\n")
@@ -117,7 +129,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "reports/held_out")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--ci-sample", action="store_true",
+                        help="MNIST 640-train/200-validation CI diagnostic, never evaluate test")
     args = parser.parse_args()
+    if args.ci_sample and (args.dataset != "mnist" or args.smoke):
+        parser.error("--ci-sample requires --dataset mnist and excludes --smoke")
     if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
         parser.error("seeds must be unique positive nonzero integers")
     if args.batch_size <= 0 or (args.epochs is not None and args.epochs <= 0):
@@ -130,7 +146,8 @@ def main():
             parser.error(f"missing source: {path} (get MNIST IDX files first)")
     source = {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path):
               file_sha256(path) for path in paths}
-    output_dir = args.output_dir.resolve() / args.dataset / ("smoke" if args.smoke else "full")
+    profile = "ci-sample" if args.ci_sample else "smoke" if args.smoke else "full"
+    output_dir = args.output_dir.resolve() / args.dataset / profile
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "git_commit": command_output("git", "rev-parse", "HEAD"),
@@ -156,11 +173,18 @@ def main():
                 cmd.extend(["--epochs", str(args.epochs)])
             if args.smoke:
                 cmd.append("--smoke")
+            if args.ci_sample:
+                cmd.append("--ci-sample")
             print("$", " ".join(cmd), flush=True)
             subprocess.run(cmd, cwd=ROOT, check=True)
             row = json.loads(path.read_text())
             assert row["seed"] == seed and row["backend"] == backend
             assert row["test_size"] == (20 if args.dataset == "iris" else 10000)
+            assert row["ci_sample"] == args.ci_sample
+            assert row["test_evaluated"] == (not args.ci_sample)
+            if args.ci_sample:
+                assert row["train_size"] == 640 and row["validation_size"] == 200
+                assert row["test_correct"] is None and row["test_accuracy_pct"] is None
             assert len(row["learning_curve"]) == row["epochs"]
             records.append(row)
     summarize(records, source, output_dir, metadata)
