@@ -32,6 +32,7 @@ enum Task { Iris, Mnist }
 struct Config {
     task: Task, backend: Backend, seed: u64, epochs: usize, batch: usize, lr_shift: u32,
     data_dir: PathBuf, report: PathBuf, smoke: bool, ci_sample: bool,
+    validation_only: bool, split_seed: u64,
 }
 impl Config {
     fn parse() -> Self {
@@ -40,12 +41,14 @@ impl Config {
             task: Task::Iris, backend: Backend::Integer, seed: 1337, epochs: 0,
             batch: 32, lr_shift: LR_SHIFT, data_dir: PathBuf::from("data/mnist"),
             report: PathBuf::from("reports/held_out.json"), smoke: false, ci_sample: false,
+            validation_only: false, split_seed: SPLIT_SEED,
         };
         let mut i = 0;
         while i < args.len() {
             let key = &args[i];
             if key == "--smoke" { cfg.smoke = true; i += 1; continue; }
             if key == "--ci-sample" { cfg.ci_sample = true; i += 1; continue; }
+            if key == "--validation-only" { cfg.validation_only = true; i += 1; continue; }
             let value = args.get(i + 1).unwrap_or_else(|| panic!("missing value for {key}"));
             match key.as_str() {
                 "--dataset" => cfg.task = match value.as_str() {
@@ -58,6 +61,7 @@ impl Config {
                 "--epochs" => cfg.epochs = value.parse().expect("invalid epochs"),
                 "--batch-size" => cfg.batch = value.parse().expect("invalid batch size"),
                 "--lr-shift" => cfg.lr_shift = value.parse().expect("invalid lr shift"),
+                "--split-seed" => cfg.split_seed = value.parse().expect("invalid split seed"),
                 "--data-dir" => cfg.data_dir = PathBuf::from(value),
                 "--report" => cfg.report = PathBuf::from(value),
                 _ => panic!("unknown option: {key}"),
@@ -65,7 +69,9 @@ impl Config {
             i += 2;
         }
         if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 100 } else { 10 }; }
-        assert!(cfg.seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, batch, epochs, or lr shift");
+        assert!(cfg.seed != 0 && cfg.split_seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, split seed, batch, epochs, or lr shift");
+        assert!(!cfg.validation_only || (cfg.task == Task::Iris && !cfg.smoke && !cfg.ci_sample),
+            "--validation-only is for full-size Iris training/validation, not smoke or MNIST");
         assert!(!cfg.ci_sample || (cfg.task == Task::Mnist && !cfg.smoke),
             "--ci-sample is only supported for MNIST and cannot be combined with --smoke");
         cfg
@@ -119,11 +125,14 @@ fn load_data(cfg: &Config) -> ExperimentData {
             // IMPORTANT: the 20 were already evaluated in historical blogs;
             // this is a held-out protocol, not a pristine never-seen dataset.
             let pool = iris_rows(Path::new("data/iris_train.tsv"));
-            let test = iris_rows(Path::new("data/iris_test.tsv"));
-            assert_eq!((pool.len(), test.len()), (130, 20), "expected bundled Iris split");
+            // HPO must not even READ the historically reused test file.
+            let test = if cfg.validation_only { Vec::new() }
+                else { iris_rows(Path::new("data/iris_test.tsv")) };
+            assert_eq!(pool.len(), 130, "expected bundled Iris development split");
+            if !cfg.validation_only { assert_eq!(test.len(), 20, "expected Iris test split"); }
             let labels: Vec<u8> = pool.iter().map(|r| r.1).collect();
             let (mut train_ids, validation_ids) =
-                protocol::stratified_validation(&labels, if cfg.smoke { 1 } else { 8 }, SPLIT_SEED);
+                protocol::stratified_validation(&labels, if cfg.smoke { 1 } else { 8 }, cfg.split_seed);
             if cfg.smoke {
                 let mut seen = [0; 3];
                 train_ids.retain(|&idx| {
@@ -151,7 +160,7 @@ fn load_data(cfg: &Config) -> ExperimentData {
             assert_eq!((pool.n_features(), pool.n_classes), (784, 10));
             let validation_per_class = if cfg.smoke { 1 } else if cfg.ci_sample { 20 } else { 500 };
             let (mut train_ids, validation_ids) = protocol::stratified_validation(
-                &pool.labels, validation_per_class, SPLIT_SEED,
+                &pool.labels, validation_per_class, cfg.split_seed,
             );
             if cfg.ci_sample || cfg.smoke {
                 // The CI profile samples 64 examples per class from the ENTIRE
@@ -159,7 +168,7 @@ fn load_data(cfg: &Config) -> ExperimentData {
                 // No validation or test row can be selected for training.
                 let max_per_class = if cfg.ci_sample { 64 } else { 4 };
                 let mut seen = [0; 10];
-                let randomized = protocol::epoch_order(&train_ids, SPLIT_SEED ^ 0xC1C1_0000, 0);
+                let randomized = protocol::epoch_order(&train_ids, cfg.split_seed ^ 0xC1C1_0000, 0);
                 train_ids = randomized.into_iter().filter(|&idx| {
                     let c = pool.labels[idx] as usize;
                     if seen[c] == max_per_class { return false; }
@@ -435,9 +444,10 @@ fn main() {
             metric.nonfinite_fp32_params);
         curve.push(metric);
     }
-    // CI sample NEVER evaluates the official test data. Full runs evaluate it
+    // Validation-only Iris HPO never reads or evaluates the test data.
+    // CI sample MNIST never evaluates the official test data. Full runs evaluate it
     // exactly once, after the fixed epoch budget has completed.
-    let test_correct = if cfg.ci_sample { None } else {
+    let test_correct = if cfg.ci_sample || cfg.validation_only { None } else {
         let test_ids: Vec<usize> = (0..data.test.len()).collect();
         Some(match cfg.backend {
             Backend::Integer => accuracy_integer(&mut integer, &data.test, &test_ids).correct,
@@ -451,7 +461,7 @@ fn main() {
         println!("FINAL {task} {backend} seed={} test={}/{} ({:.2}%) duration_ms={total_ms}",
             cfg.seed, correct, data.test.len(), pct(correct, data.test.len()));
     } else {
-        println!("CI SAMPLE {task} {backend} seed={} test=NOT_EVALUATED duration_ms={total_ms}", cfg.seed);
+        println!("VALIDATION ONLY {task} {backend} seed={} test=NOT_EVALUATED duration_ms={total_ms}", cfg.seed);
     }
 
     let epochs: Vec<String> = curve.iter().map(|m| format!(
@@ -464,11 +474,11 @@ fn main() {
     let test_correct_json = test_correct.map_or("null".to_owned(), |n| n.to_string());
     let test_accuracy_json = test_correct.map_or("null".to_owned(), |n| format!("{:.6}", pct(n, data.test.len())));
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
-        cfg.smoke, cfg.ci_sample, cfg.seed, SPLIT_SEED, cfg.epochs, cfg.batch,
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        cfg.smoke, cfg.ci_sample, cfg.seed, cfg.split_seed, cfg.epochs, cfg.batch,
         dims, SHIFT, OUTPUT_BITS, cfg.lr_shift, MOM_SHIFT, GRAD_CLIP,
         data.train_ids.len(), data.validation_ids.len(), data.test.len(),
-        test_correct.is_some(), test_correct_json, test_accuracy_json, total_ms, rss,
+        cfg.validation_only, test_correct.is_some(), test_correct_json, test_accuracy_json, total_ms, rss,
         epochs.join(","),
     );
     if let Some(parent) = cfg.report.parent() { fs::create_dir_all(parent).expect("create report directory"); }
