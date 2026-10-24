@@ -261,13 +261,16 @@ The [frozen evaluation protocol](MNIST_FINAL_PROTOCOL.md) was recorded
 
 ## Accuracy/latency/memory decisions
 
-**ADR-004 remains pending maintainer approval.** The full three-seed
-held-out MNIST data have now been measured and archived. [The proposed
-ADR-004 criteria](ADR_004_PROPOSAL.md) distinguish prospective accuracy/
-correctness gates from measured baseline and non-gating hardware performance
-indicators. These suggested thresholds were formed **after** seeing the
-held-out test: they cannot retroactively become pre-registered scientific
-success criteria. The FP32 reference is written
+**ADR-004 was approved by the maintainer on 2026-10-24.** The complete
+three-seed held-out MNIST data were measured and archived *before* that
+approval. [The approved ADR-004 criteria](ADR_004.md) set prospective
+reference-workload regression targets: integer mean and worst seeded MNIST
+accuracy ≥94.0%, with the integer mean no more than 2.0 percentage
+points below matched scalar FP32. Runtime/peak RSS remain report-only
+until comparable hardware-specific evidence exists. These thresholds
+were formed **after seeing the held-out test**: approval does not make
+that experiment pre-registered, and the official test may not be used
+for further model selection. The FP32 reference is written
 for auditability, not optimized BLAS; do not read a speed difference as
 proof that integer instructions are inherently faster or slower.
 
