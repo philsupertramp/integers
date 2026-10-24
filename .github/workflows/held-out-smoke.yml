@@ -48,3 +48,50 @@ jobs:
           name: iris-held-out-baselines
           path: /tmp/integers-full/iris/full/
           retention-days: 30
+
+  mnist-sample:
+    name: Bounded MNIST validation benchmark (integer + FP32)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Download and SHA-256 verify canonical MNIST IDX
+        run: python3 experiments/fetch_mnist.py --data-dir data/mnist
+      - name: Run both backends on balanced MNIST CI cohort
+        run: |
+          python3 experiments/run_baselines.py --dataset mnist --ci-sample \
+            --epochs 2 --seeds 1337 --batch-size 32 \
+            --output-dir /tmp/integers-mnist-ci
+      - name: Validate diagnostic report and forbid test metrics
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/tmp/integers-mnist-ci/mnist/ci-sample")
+          reports = sorted(root.glob("*-seed-*.json"))
+          assert len(reports) == 2
+          assert (root / "summary.md").exists()
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert len(manifest["sources_sha256"]) == 4
+          assert "test NOT evaluated" in (root / "summary.md").read_text()
+          for path in reports:
+              row = json.loads(path.read_text())
+              assert row["dataset"] == "mnist"
+              assert row["ci_sample"] is True and row["smoke"] is False
+              assert row["test_evaluated"] is False
+              assert row["test_correct"] is None and row["test_accuracy_pct"] is None
+              assert (row["train_size"], row["validation_size"], row["test_size"]) == (640, 200, 10000)
+              assert row["epochs"] == 2 and row["seed"] == 1337
+              assert len(row["learning_curve"]) == 2
+              assert all(m["training_samples"] == 640 for m in row["learning_curve"])
+              assert all(0 <= m["validation_accuracy_pct"] <= 100 for m in row["learning_curve"])
+          PY
+      - name: Print MNIST validation-only comparison
+        run: cat /tmp/integers-mnist-ci/mnist/ci-sample/summary.md
+      - name: Preserve small MNIST diagnostics (no datasets or checkpoints)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnist-ci-sample
+          path: /tmp/integers-mnist-ci/mnist/ci-sample/
+          retention-days: 14
