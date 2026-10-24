@@ -19,6 +19,7 @@ use integers::{argmax, mse_grad};
 
 const SHIFT: u32 = 7;
 const LR_SHIFT: u32 = 7;
+const IRIS_LR_SHIFT: u32 = 6; // selected from validation-only 3-split HPO
 const MOM_SHIFT: u32 = 1;
 const GRAD_CLIP: i32 = 8192;
 const OUTPUT_BITS: u32 = 31;
@@ -44,6 +45,7 @@ impl Config {
             validation_only: false, split_seed: SPLIT_SEED,
         };
         let mut i = 0;
+        let mut explicit_lr = false;
         while i < args.len() {
             let key = &args[i];
             if key == "--smoke" { cfg.smoke = true; i += 1; continue; }
@@ -60,7 +62,10 @@ impl Config {
                 "--seed" => cfg.seed = value.parse().expect("invalid seed"),
                 "--epochs" => cfg.epochs = value.parse().expect("invalid epochs"),
                 "--batch-size" => cfg.batch = value.parse().expect("invalid batch size"),
-                "--lr-shift" => cfg.lr_shift = value.parse().expect("invalid lr shift"),
+                "--lr-shift" => {
+                    cfg.lr_shift = value.parse().expect("invalid lr shift");
+                    explicit_lr = true;
+                },
                 "--split-seed" => cfg.split_seed = value.parse().expect("invalid split seed"),
                 "--data-dir" => cfg.data_dir = PathBuf::from(value),
                 "--report" => cfg.report = PathBuf::from(value),
@@ -68,10 +73,11 @@ impl Config {
             }
             i += 2;
         }
-        if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 100 } else { 10 }; }
+        if !explicit_lr && cfg.task == Task::Iris { cfg.lr_shift = IRIS_LR_SHIFT; }
+        if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 200 } else { 10 }; }
         assert!(cfg.seed != 0 && cfg.split_seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, split seed, batch, epochs, or lr shift");
-        assert!(!cfg.validation_only || (cfg.task == Task::Iris && !cfg.smoke && !cfg.ci_sample),
-            "--validation-only is for full-size Iris training/validation, not smoke or MNIST");
+        assert!(!cfg.validation_only || (cfg.task == Task::Iris && !cfg.ci_sample),
+            "--validation-only is only supported for Iris");
         assert!(!cfg.ci_sample || (cfg.task == Task::Mnist && !cfg.smoke),
             "--ci-sample is only supported for MNIST and cannot be combined with --smoke");
         cfg
