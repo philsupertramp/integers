@@ -35,7 +35,7 @@ jobs:
               assert row["train_size"] == 12
               assert row["validation_size"] == 3
               assert row["test_size"] == 20
-              assert len(row["learning_curve"]) == 2
+              assert len(row["learning_curve"]) == 20
               assert 0 <= row["test_accuracy_pct"] <= 100
           PY
       - name: Full Iris baseline (3 seeds, 100 epochs, both arithmetic backends)
@@ -61,7 +61,7 @@ jobs:
       - name: Run both backends on balanced MNIST CI cohort
         run: |
           python3 experiments/run_baselines.py --dataset mnist --ci-sample \
-            --epochs 2 --seeds 1337 --batch-size 32 \
+            --epochs 20 --seeds 1337 2027 --batch-size 32 \
             --output-dir /tmp/integers-mnist-ci
       - name: Validate diagnostic report and forbid test metrics
         run: |
@@ -70,7 +70,7 @@ jobs:
           from pathlib import Path
           root = Path("/tmp/integers-mnist-ci/mnist/ci-sample")
           reports = sorted(root.glob("*-seed-*.json"))
-          assert len(reports) == 2
+          assert len(reports) == 4
           assert (root / "summary.md").exists()
           manifest = json.loads((root / "manifest.json").read_text())
           assert len(manifest["sources_sha256"]) == 4
@@ -82,7 +82,7 @@ jobs:
               assert row["test_evaluated"] is False
               assert row["test_correct"] is None and row["test_accuracy_pct"] is None
               assert (row["train_size"], row["validation_size"], row["test_size"]) == (640, 200, 10000)
-              assert row["epochs"] == 2 and row["seed"] == 1337
+              assert row["epochs"] == 20 and row["seed"] in (1337, 2027)
               assert len(row["learning_curve"]) == 2
               assert all(m["training_samples"] == 640 for m in row["learning_curve"])
               assert all(0 <= m["validation_accuracy_pct"] <= 100 for m in row["learning_curve"])
