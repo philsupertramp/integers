@@ -123,3 +123,41 @@ fn fixed_cnn_topology_produces_ten_logits_and_784_input_gradients() {
     assert_eq!(dx.shape,vec![784]);
     assert!(dx.data.iter().all(|x|x.v == 0));
 }
+
+#[test]
+fn multichannel_mixed_scales_and_clipped_ste_are_distinct() {
+    // Channel-first fixture with equal decoded values at different scales.
+    let mut conv = Conv2D::new(2,1,1,1,2,2,1,2,31);
+    conv.kernels.data = vec![Dyadic::new(2,1),Dyadic::new(4,2)];
+    conv.biases.data[0] = Dyadic::new(0,1);
+    let input = Tensor::from_vec([
+        vec![Dyadic::new(2,1);4],
+        vec![Dyadic::new(4,2);4],
+    ].concat(), vec![8]);
+    let output = conv.forward(&input.view());
+    assert_eq!(output.data, vec![Dyadic::new(8,2);4]); // each pixel decodes to 2
+    let gradients = Tensor::from_vec(vec![Dyadic::new(4,2);4],vec![4]);
+    let dx = conv.backward(&gradients.view());
+    assert_eq!(dx.data, vec![Dyadic::new(4,2);8]); // each input gradient = 1
+
+    let mut clipped = Conv2D::new(1,1,1,1,1,1,0,0,3);
+    clipped.kernels.data[0] = d(4);
+    clipped.biases.data[0] = d(0);
+    let x = Tensor::from_vec(vec![d(2)],vec![1]);
+    let y = clipped.forward(&x.view());
+    assert_eq!(y.data,vec![d(3)]); // clipped from 8 to max 3
+    clipped.backward(&Tensor::from_vec(vec![d(1)],vec![1]).view());
+    clipped.update(0);
+    assert_eq!(clipped.kernels.data[0],d(4)); // no backward gradient across real clip
+    assert_eq!(clipped.biases.data[0],d(0));
+
+    let mut boundary = Conv2D::new(1,1,1,1,1,1,0,0,3);
+    boundary.kernels.data[0] = d(3);
+    boundary.biases.data[0] = d(0);
+    let x = Tensor::from_vec(vec![d(1)],vec![1]);
+    assert_eq!(boundary.forward(&x.view()).data,vec![d(3)]);
+    boundary.backward(&Tensor::from_vec(vec![d(1)],vec![1]).view());
+    boundary.update(0);
+    assert_eq!(boundary.kernels.data[0],d(2)); // boundary but NOT clipped
+    assert_eq!(boundary.biases.data[0],d(-1));
+}

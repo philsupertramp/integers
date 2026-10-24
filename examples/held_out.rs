@@ -428,8 +428,14 @@ fn accuracy_fp32(model: &mut Fp32Model, ds: &Dataset, ids: &[usize]) -> Evaluati
     };
     for &i in ids {
         let values = model.forward_outputs(&float_row(ds, i));
-        let predicted = values.iter().enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let predicted = if let Fp32Model::Cnn(_) = model {
+            let mut best = 0;
+            for j in 1..values.len() { if values[j] > values[best] { best = j; } }
+            best
+        } else {
+            // Preserve the previously measured dense reference convention.
+            values.iter().enumerate().max_by(|a,b| a.1.total_cmp(b.1)).unwrap().0
+        };
         stats.predicted_counts[predicted] += 1;
         stats.confusion[ds.labels[i] as usize][predicted] += 1;
         stats.correct += usize::from(predicted == ds.labels[i] as usize);
@@ -551,10 +557,10 @@ fn main() {
                 Some(fp32_parameter_nonfinite(&fp32))
             } else { None },
         };
-        println!("epoch={} train={:.2}% val={:.2}% wall_ms={} predictions={:?} nonfinite_outputs={} extreme_outputs={} nonfinite_fp32_parameters={:?}",
+        println!("epoch={} train={:.2}% val={:.2}% wall_ms={} training_ms={} validation_ms={} predictions={:?} nonfinite_outputs={} extreme_outputs={} nonfinite_fp32_parameters={:?}",
             metric.epoch, metric.train_accuracy, metric.validation_accuracy, metric.elapsed_ms,
-            metric.validation_predictions, metric.validation_nonfinite, metric.validation_extremes,
-            metric.nonfinite_fp32_params);
+            metric.training_ms, metric.validation_ms, metric.validation_predictions,
+            metric.validation_nonfinite, metric.validation_extremes, metric.nonfinite_fp32_params);
         curve.push(metric);
     }
     // Validation-only Iris/MNIST never reads or evaluates test data.

@@ -60,11 +60,13 @@ Note: the train-only fetch option and its checksum behavior must be verified aga
 
 ## Feasibility and acceptance evidence
 
+The first measured feasibility run on the GitHub-hosted x86_64 Ubuntu runner ([CI 40127767359](https://github.com/philsupertramp/integers/actions/runs/40127767359), commit `c8cd44eb`) completed one epoch with **128 training and 128 validation images**, seed 1337, batch 32, release build, no test IDX files. Integer online training accuracy was 10.94%, validation 8.59%, whole epoch 275 ms, peak RSS 410.85 MiB and extreme output count zero. Scalar FP32 online training accuracy was 12.50%, validation 12.50%, whole epoch 55 ms, RSS 410.95 MiB and zero nonfinite parameters. These numbers do not show convergence; integer elapsed time was about 5× the scalar FP32 reference for this tiny cohort. The report artifact is attached to that run. A 128+128-sample timing cannot safely predict throughput at 55k+5k or with different batch/cache conditions; the runner now also records training and validation time separately for an improved subsequent estimate.
+
 No CNN-specific full 55k/5k three-seed accuracy, numerical anomaly frequency, runtime or peak-RSS comparison has been established by the existing dense experiment. Do not extrapolate dense timings to CNN. To estimate expense, measure both backends on a representative post-split 128-example cohort, measure validation overhead separately, and extrapolate the **training-only component** to 55,000 examples per epoch; validation remains 5,000 per epoch. Multiply by ten epochs, three seeds and both backends, retaining an uncertainty margin for allocation, cache effects and hardware differences. Reports must include measured samples, profile, wall-time and VmHWM, not fabricated full-run estimates.
 
 ### Issue #35 acceptance snapshot (to be updated after CI)
 
-- Implemented: integer CNN path through default ADR-002 backend, paired independently implemented scalar FP32 reference, architecture switch and shared #15 split/provenance/reporting, deterministic offline composition tests and batch/cache regressions.
+- Implemented: integer CNN path through default ADR-002 backend, paired independently implemented scalar FP32 reference, architecture switch and shared #15 split/provenance/reporting, deterministic offline composition tests and batch/cache regressions. The small real-MNIST, validation-only feasibility gate passed on CI 40127767359.
 - Verification pending: successful `cargo test --locked`, all-target checks and feature checks on the PR head.
 - Not established: full three-seed CNN learning curves, full-data benchmark accuracy and parity, observed convergence, hardware efficiency, full feasibility extrapolation and detailed per-operation saturation/overflow telemetry.
 - Validation-only guarantees apply to the explicitly isolated mode, not historical `--ci-sample` which uses the #15 four-file setup.

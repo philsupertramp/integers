@@ -222,8 +222,11 @@ impl CnnFp32 {
     pub fn accumulate(&mut self, input: &[f32], target: &[f32]) -> usize {
         assert_eq!(target.len(), 10, "MNIST one-hot target");
         let y = self.forward(input);
-        let prediction = y.iter().enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        // Integer argmax chooses the first maximum on ties.
+        let mut prediction = 0;
+        for i in 1..y.len() {
+            if y[i] > y[prediction] { prediction = i; }
+        }
         // d/dy [0.5 sum_j (y_j - t_j)^2] = y - t.
         let mut grad: Vec<f32> = y.iter().zip(target).map(|(&v, &t)| v - t).collect();
         for (op, x) in self.ops.iter_mut().zip(&self.inputs).rev() {

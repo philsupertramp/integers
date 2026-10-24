@@ -147,6 +147,36 @@ def summarize(records, source, output_dir, metadata):
     }, indent=2) + "\n")
 
 
+
+def cnn_accuracy_svg(records, output_dir):
+    """Dependency-free SVG validation learning curves, one line per paired run."""
+    width, height, left, top, right, bottom = 860, 430, 55, 25, 180, 45
+    plot_w, plot_h = width - left - right, height - top - bottom
+    epochs = max(len(row["learning_curve"]) for row in records)
+    colors = ("#275dad", "#d05f28", "#36966c", "#9356b4", "#a18326", "#5482a0")
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+             '<rect width="100%" height="100%" fill="white"/>',
+             '<text x="55" y="16" font-size="14">MNIST CNN validation accuracy (%)</text>']
+    for tick in range(0,101,20):
+        y = top + plot_h * (100-tick)/100
+        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left+plot_w}" y2="{y:.1f}" stroke="#e4e4e4"/>')
+        parts.append(f'<text x="7" y="{y+4:.1f}" font-size="12">{tick}%</text>')
+    for n, row in enumerate(records):
+        xs = [(left + plot_w * i/max(1,epochs-1)) for i in range(len(row["learning_curve"]))]
+        ys = [top + plot_h * (100-m["validation_accuracy_pct"])/100 for m in row["learning_curve"]]
+        points = " ".join(f"{x:.1f},{y:.1f}" for x,y in zip(xs,ys))
+        color = colors[n % len(colors)]
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{points}"/>')
+        for x,y in zip(xs,ys):
+            parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.5" fill="{color}"/>')
+        label = f'{row["backend"]} seed {row["seed"]}'
+        ly = 50 + 23*n
+        parts.append(f'<line x1="{left+plot_w+9}" y1="{ly}" x2="{left+plot_w+28}" y2="{ly}" stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{left+plot_w+35}" y="{ly+4}" font-size="12">{label}</text>')
+    parts.append(f'<text x="{left+plot_w/2:.1f}" y="{height-10}" font-size="12">Epoch (1…{epochs})</text>')
+    parts.append('</svg>')
+    (output_dir / "validation_accuracy.svg").write_text("\n".join(parts) + "\n")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=("iris", "mnist"), default="iris")
@@ -281,6 +311,8 @@ def main():
                        for epoch in row["learning_curve"])
             records.append(row)
     summarize(records, source, output_dir, metadata)
+    if args.architecture == "cnn":
+        cnn_accuracy_svg(records, output_dir)
     print(f"Complete: {output_dir / 'summary.md'}")
 
 
