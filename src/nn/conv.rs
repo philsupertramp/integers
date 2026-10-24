@@ -33,6 +33,7 @@ pub struct Conv2D {
     grad_b: Tensor,
     vel_k:  Tensor,
     vel_b:  Tensor,
+    grad_samples: usize,
 
     q_min: i32,
     q_max: i32,
@@ -76,6 +77,7 @@ impl Conv2D {
             grad_b: Tensor::zeros(vec![out_channels]),
             vel_k:  Tensor::zeros(vec![n_k]),
             vel_b:  Tensor::zeros(vec![out_channels]),
+            grad_samples: 0,
             q_min: q_min,
             q_max: q_max,
         }
@@ -153,6 +155,7 @@ impl Conv2D {
                 }
             }
         }
+        self.grad_samples = self.grad_samples.checked_add(1).expect("Conv2D: sample counter overflow");
         Tensor::from_vec(gi, vec![self.in_channels * self.in_h * self.in_w])
     }
 }
@@ -216,11 +219,13 @@ impl Module for Conv2D {
     }
 
     fn update(&mut self, lr: u32) {
-        apply_updates(&mut self.kernels.data, &self.grad_k, &mut self.vel_k.data, lr, self.momentum_shift);
-        apply_updates(&mut self.biases.data,  &self.grad_b, &mut self.vel_b.data, lr, self.momentum_shift);
+        if self.grad_samples == 0 { return; }
+        apply_updates(&mut self.kernels.data, &self.grad_k, &mut self.vel_k.data, lr, self.momentum_shift, self.grad_samples);
+        apply_updates(&mut self.biases.data,  &self.grad_b, &mut self.vel_b.data, lr, self.momentum_shift, self.grad_samples);
     }
 
     fn zero_grad(&mut self) {
+        self.grad_samples = 0;
         self.grad_k.data.iter_mut().for_each(|g| g.v = 0);
         self.grad_b.data.iter_mut().for_each(|g| g.v = 0);
     }
