@@ -25,6 +25,8 @@ jobs:
         run: cargo test --locked --test layer_oracles
       - name: Integer-only training boundary and FP64 diagnostics
         run: cargo test --locked --test integer_boundary
+      - name: Integrated CNN composition and independent FP32 oracle tests
+        run: cargo test --locked --test cnn_integration
       - name: Documentation tests
         run: cargo test --locked --doc
       - name: Check all default targets and examples
