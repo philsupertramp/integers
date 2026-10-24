@@ -31,9 +31,11 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def source_paths(dataset, data_dir):
+def source_paths(dataset, data_dir, validation_only=False):
     if dataset == "iris":
-        return [ROOT / "data/iris_train.tsv", ROOT / "data/iris_test.tsv"]
+        # Iris validation HPO never reads or even hashes historical test data.
+        return ([ROOT / "data/iris_train.tsv"] if validation_only else
+                [ROOT / "data/iris_train.tsv", ROOT / "data/iris_test.tsv"])
     # Force canonical original IDX inputs, rather than silently changing format.
     return [data_dir / name for name in (
         "train-images-idx3-ubyte", "train-labels-idx1-ubyte",
@@ -59,12 +61,15 @@ def summarize(records, source, output_dir, metadata):
     for path, digest in source.items():
         lines.append(f"- `{path}`: `{digest}`")
     ci_sample = records[0].get("ci_sample", False)
+    validation_only = records[0].get("validation_only", False)
+    validation_metric = ci_sample or validation_only
     lines.extend([
         "",
-        ("## CI sampled training diagnostics (official test NOT evaluated)" if ci_sample
+        ("## Iris validation-only results (test NOT loaded or evaluated)" if validation_only
+         else "## CI sampled training diagnostics (official test NOT evaluated)" if ci_sample
          else "## Results (held-out test evaluated once per run, after fixed epochs)"),
         "",
-        ("| Backend | Seeds | Final validation accuracy mean [min, max] | Wall time mean [min, max], s | Peak RSS mean [min, max], MiB |" if ci_sample
+        ("| Backend | Seeds | Final validation accuracy mean [min, max] | Wall time mean [min, max], s | Peak RSS mean [min, max], MiB |" if validation_metric
          else "| Backend | Seeds | Test accuracy mean [min, max] | Wall time mean [min, max], s | Peak RSS mean [min, max], MiB |"),
         "| --- | --- | --- | --- | --- |",
     ])
@@ -75,7 +80,7 @@ def summarize(records, source, output_dir, metadata):
             values = [value / factor for value in values]
             return f"{statistics.mean(values):.2f} [{min(values):.2f}, {max(values):.2f}]"
         measured_accuracy = ([row["learning_curve"][-1]["validation_accuracy_pct"] for row in runs]
-                             if ci_sample else [row["test_accuracy_pct"] for row in runs])
+                             if validation_metric else [row["test_accuracy_pct"] for row in runs])
         lines.append(
             f"| {backend} | {', '.join(str(row['seed']) for row in runs)} | "
             f"{triplet(measured_accuracy)}% | "
@@ -86,10 +91,10 @@ def summarize(records, source, output_dir, metadata):
         "",
         "Each seed/backend JSON contains its **full per-epoch learning curve**, split sizes,",
         ("fixed hyperparameters, an explicit unevaluated-test marker, and process-local wall time / peak RSS."
-         if ci_sample else "fixed hyperparameters, final test result, and process-local wall time / peak RSS."),
+         if validation_metric else "fixed hyperparameters, final test result, and process-local wall time / peak RSS."),
         "Training accuracy is measured online (before parameter updates), while",
         ("validation is measured after each epoch; CI sample NEVER evaluates the test."
-         if ci_sample else "validation is measured after each epoch. Final test is evaluated only once."),
+         if validation_metric else "validation is measured after each epoch. Final test is evaluated only once."),
         "Validation is used for diagnostics; epochs and hyperparameters are specified",
         "in advance and never selected using test performance.",
         "",
@@ -100,7 +105,11 @@ def summarize(records, source, output_dir, metadata):
         "dyadic quantization, stochastic rounding, and STE. Latency reflects kernels and",
         "implementation maturity, not intrinsic integer-versus-float hardware efficiency.",
     ]
-    if records[0]["dataset"] == "iris":
+    if validation_only:
+        lines.extend(["", "**VALIDATION ONLY:** the historical Iris test file was not "
+                      "loaded, hashed, or evaluated. This score is used for "
+                      "selection, not an independent generalization estimate."])
+    if records[0]["dataset"] == "iris" and not validation_only:
         lines.extend([
             "",
             "**Iris caveat:** the repository's 20-row reserved test split has appeared in",
@@ -132,11 +141,15 @@ def main():
                         help="effective SGD learning rate = 2**(-lr_shift)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "reports/held_out")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--validation-only", action="store_true",
+                        help="Iris development-only: never read/evaluate historical test")
     parser.add_argument("--ci-sample", action="store_true",
                         help="MNIST 640-train/200-validation CI diagnostic, never evaluate test")
     args = parser.parse_args()
     if args.lr_shift is None:
-        args.lr_shift = 7
+        args.lr_shift = 6 if args.dataset == "iris" else 7
+    if args.validation_only and args.dataset != "iris":
+        parser.error("--validation-only requires --dataset iris")
     if args.ci_sample and (args.dataset != "mnist" or args.smoke):
         parser.error("--ci-sample requires --dataset mnist and excludes --smoke")
     if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
@@ -147,13 +160,13 @@ def main():
         parser.error("batch size and epochs must be positive")
     if args.dataset == "mnist" and args.data_dir != ROOT / "data/mnist":
         args.data_dir = args.data_dir.resolve()
-    paths = source_paths(args.dataset, args.data_dir)
+    paths = source_paths(args.dataset, args.data_dir, args.validation_only)
     for path in paths:
         if not path.is_file():
             parser.error(f"missing source: {path} (get MNIST IDX files first)")
     source = {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path):
               file_sha256(path) for path in paths}
-    profile = "ci-sample" if args.ci_sample else "smoke" if args.smoke else "full"
+    profile = "validation-only" if args.validation_only else "ci-sample" if args.ci_sample else "smoke" if args.smoke else "full"
     output_dir = args.output_dir.resolve() / args.dataset / profile
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
@@ -184,14 +197,21 @@ def main():
                 cmd.append("--smoke")
             if args.ci_sample:
                 cmd.append("--ci-sample")
+            if args.validation_only:
+                cmd.append("--validation-only")
             print("$", " ".join(cmd), flush=True)
             subprocess.run(cmd, cwd=ROOT, check=True)
             row = json.loads(path.read_text())
             assert row["seed"] == seed and row["backend"] == backend
             assert row["lr_shift"] == args.lr_shift
-            assert row["test_size"] == (20 if args.dataset == "iris" else 10000)
+            assert row["test_size"] == (0 if args.validation_only else 20 if args.dataset == "iris" else 10000)
             assert row["ci_sample"] == args.ci_sample
-            assert row["test_evaluated"] == (not args.ci_sample)
+            assert row["validation_only"] == args.validation_only
+            assert row["test_evaluated"] == (not args.ci_sample and not args.validation_only)
+            if args.validation_only:
+                assert row["test_correct"] is None and row["test_accuracy_pct"] is None
+                assert row["train_size"] == (12 if args.smoke else 106)
+                assert row["validation_size"] == (3 if args.smoke else 24)
             if args.ci_sample:
                 assert row["train_size"] == 640 and row["validation_size"] == 200
                 assert row["test_correct"] is None and row["test_accuracy_pct"] is None
