@@ -144,6 +144,8 @@ def main():
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--validation-only", action="store_true",
                         help="Train/validate without ever opening or hashing test data (Iris/MNIST)")
+    parser.add_argument("--final-test", action="store_true",
+                        help="Explicit one-shot MNIST held-out test after freezing configuration")
     parser.add_argument("--ci-sample", action="store_true",
                         help="MNIST 640-train/200-validation CI diagnostic, never evaluate test")
     args = parser.parse_args()
@@ -151,6 +153,10 @@ def main():
         args.lr_shift = 6 if args.dataset == "iris" else 7
     if args.validation_only and args.ci_sample:
         parser.error("--validation-only and --ci-sample cannot be combined")
+    if args.final_test and (args.validation_only or args.ci_sample or args.smoke):
+        parser.error("--final-test cannot be combined with --validation-only, --ci-sample or --smoke")
+    if args.dataset == "mnist" and not (args.validation_only or args.ci_sample or args.final_test):
+        parser.error("MNIST test access requires explicit --final-test; use --validation-only for exploration")
     if args.ci_sample and (args.dataset != "mnist" or args.smoke):
         parser.error("--ci-sample requires --dataset mnist and excludes --smoke")
     if len(set(args.seeds)) != len(args.seeds) or any(s <= 0 for s in args.seeds):
@@ -200,6 +206,8 @@ def main():
                 cmd.append("--ci-sample")
             if args.validation_only:
                 cmd.append("--validation-only")
+            if args.final_test:
+                cmd.append("--final-test")
             print("$", " ".join(cmd), flush=True)
             subprocess.run(cmd, cwd=ROOT, check=True)
             row = json.loads(path.read_text())
