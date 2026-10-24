@@ -1,8 +1,11 @@
 # Issue #15 — reproducible held-out training protocol
 
-**Status:** experimental candidate benchmark machinery. No full training results have
-been measured or accepted by this change. This is not a declaration that the
-integer backend converges on full MNIST, beats FP32, or is hardware-efficient.
+**Status:** experimental candidate benchmark machinery. A full-size **MNIST
+55k-train/5k-validation baseline has been measured across three model seeds**,
+but the official 10k-image test remains untouched. These are *validation*
+results, not independent held-out accuracy, accepted ADR-004 thresholds,
+full benchmark completion, or a claim of superior hardware efficiency.
+See [the archived baseline with all six original JSON learning curves](../reports/held_out/mnist/validation-only/2026-10-24-9b79a145/README.md).
 
 ## Why a separate entrypoint?
 
@@ -81,11 +84,19 @@ python3 experiments/run_baselines.py --dataset mnist --validation-only \
 python3 experiments/run_baselines.py --dataset mnist --validation-only \
     --smoke --epochs 2 --seeds 1337
 
+# Development follow-up: separate validation-only 20-epoch diagnostic. This
+# re-trains each run from scratch; it does not resume from epoch 10.
+# python3 experiments/run_baselines.py --dataset mnist --validation-only \
+#     --epochs 20 --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242 \
+#     --output-dir reports/mnist-20epoch-diagnostic
+
 # Only once the learning-rate/epoch protocol is frozen, explicitly download
 # the additional test inputs (omit --train-only) and run the final test once.
+# Omitting --validation-only is intentionally insufficient for MNIST test
+# access; the explicit --final-test switch is required at both CLI layers.
 # python3 experiments/fetch_mnist.py --data-dir data/mnist
-# python3 experiments/run_baselines.py --dataset mnist \
-#     --epochs 10 --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242
+# python3 experiments/run_baselines.py --dataset mnist --final-test \
+#     --epochs <LOCKED_EPOCHS> --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242
 ```
 
 Iris's validation-selected defaults are **batch size 32, LR shift 6,
@@ -113,11 +124,15 @@ training-partition examples. It records `test_size: 0`,
 `test_evaluated: false`, and null final-test scores. Nothing in this
 mode can produce an official held-out MNIST test accuracy.
 
-The **explicit final-test mode** (without `--validation-only`) uses
-`load_mnist_auto`, prefers IDX to Parquet, and the Python launcher
-requires/hashes all four canonical IDX files. Never claim a benchmark
-from a silently substituted dataset variant. Both modes enforce the
-expected canonical training sizes; only the final mode loads the 10k test.
+The **explicit final-test mode** uses `--final-test` for MNIST. This is
+a deliberate second opt-in: omitting `--validation-only` does **not** grant
+test access. Both the Rust executable and the Python launcher reject normal
+MNIST runs without the flag. `--final-test` is incompatible with smoke,
+`--ci-sample` and `--validation-only`. The final run uses `load_mnist_auto`,
+prefers IDX to Parquet, and the Python launcher requires/hashes all four
+canonical IDX files. Never claim a benchmark from a silently substituted
+dataset variant. Both modes enforce the expected canonical training sizes;
+only the explicit final mode loads the 10k test.
 
 The Iris runner requires all 130 development rows, and in full-test mode
 the separate 20 historical test rows. Validation-only mode does not read
@@ -176,6 +191,11 @@ held-out results or used to set ADR-004 success thresholds.
   hyperparameters, validation size, test accuracy, and peak RSS (Linux only).
 - `manifest.json`: exact source SHA-256 hashes, git commit, Rust/cargo
   versions, hardware/OS descriptor and execution timestamp.
+- New experiment reports also include **`validation_confusion`** for each
+  epoch: a square count matrix indexed `[true_class][predicted_class]`.
+  Validation class-wise recall and error types can now be derived without
+  ever loading test data. The original 10-epoch baseline predates this field
+  and contains only predicted class totals, not confusion matrices.
 - `summary.md`: repeated-seed means and min/max (accuracy, wall time, peak
   RSS) with the known comparability limitations.
 
@@ -191,6 +211,38 @@ A failed run must not be silently omitted when calculating mean/range:
 the launcher stops on failure. Report missing runs rather than filling them
 with guesses. Review and commit only lightweight reports and manifests,
 never downloaded data or model checkpoints.
+
+## Full-size MNIST validation baseline — measured October 24, 2026
+
+Original measurements are stored at
+[`reports/held_out/mnist/validation-only/2026-10-24-9b79a145/`](../reports/held_out/mnist/validation-only/2026-10-24-9b79a145/README.md),
+including every unmodified per-seed JSON learning curve, source hashes,
+`summary.md`, and a viewable SVG plot. Source commit:
+`9b79a1450b51ab4cb2befb264bf8c1a8a4a75108`, Manjaro Linux x86_64,
+Rust 1.95.0, integer-only and independently implemented FP32 dense
+`784→128→128→10`, batch 32, learning-rate shift 7, fixed 10 epochs,
+model seeds 1337/2027/4242; 55,000 train/5,000 validation.
+
+| Quantity | Integer | Scalar FP32 reference |
+|---|---:|---:|
+| Mean final validation accuracy | **93.53%** | **95.13%** |
+| Across-seed min–max | 93.48–93.56% | 94.90–95.30% |
+| Mean ten-epoch wall time per seed | 724.95 s | 182.86 s |
+| Mean peak whole-process RSS | 410.65 MiB | 410.60 MiB |
+
+Both learned reliably without recorded non-finite or extreme outputs.
+The FP32 advantage **increased** across the run (roughly 0.39 pp at epoch
+1 to 1.60 pp at epoch 10), so the gap has **not** been shown to disappear
+with training. The integer implementation was about **3.96× slower** than
+the *scalar, non-BLAS FP32 reference* on this machine; this says nothing
+general about integer hardware throughput. The 10 epochs used a fixed
+non-tuned configuration and neither prove saturation nor final generalization.
+
+**Next strictly validation-only diagnostic:** 20 epochs, same LR shift,
+batch and three seeds, with new per-epoch class confusion matrices.
+This is a separate fresh run, not checkpoint resumption. The outcome will
+help determine whether to test another training budget or learning-rate
+schedule before fixing the eventual one-shot final-test configuration.
 
 ## Accuracy/latency/memory decisions
 
