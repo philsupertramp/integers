@@ -293,13 +293,58 @@ fn float_target(ds: &Dataset, i: usize) -> Vec<f32> {
     ds.get_target(i).data.iter().copied().map(decoded).collect()
 }
 
-fn accuracy_integer(model: &mut Sequential, ds: &Dataset, ids: &[usize]) -> usize {
-    ids.iter().filter(|&&i| {
-        argmax(&model.forward(&ds.get_input(i).view()).data) == ds.labels[i] as usize
-    }).count()
+struct Evaluation {
+    correct: usize,
+    predicted_counts: Vec<usize>,
+    nonfinite_outputs: usize,
+    extreme_outputs: usize,
+    max_abs_output: f64,
 }
-fn accuracy_fp32(model: &FloatMlp, ds: &Dataset, ids: &[usize]) -> usize {
-    ids.iter().filter(|&&i| model.predict(&float_row(ds, i)) == ds.labels[i] as usize).count()
+fn accuracy_integer(model: &mut Sequential, ds: &Dataset, ids: &[usize]) -> Evaluation {
+    let mut stats = Evaluation {
+        correct: 0, predicted_counts: vec![0; ds.n_classes],
+        nonfinite_outputs: 0, extreme_outputs: 0, max_abs_output: 0.0,
+    };
+    for &i in ids {
+        let output = model.forward(&ds.get_input(i).view());
+        let predicted = argmax(&output.data);
+        stats.predicted_counts[predicted] += 1;
+        stats.correct += usize::from(predicted == ds.labels[i] as usize);
+        for &value in &output.data {
+            stats.max_abs_output = stats.max_abs_output.max(value.to_f64().abs());
+            stats.extreme_outputs += usize::from(value.v == i32::MIN || value.v == i32::MAX);
+        }
+    }
+    stats
+}
+fn accuracy_fp32(model: &FloatMlp, ds: &Dataset, ids: &[usize]) -> Evaluation {
+    let mut stats = Evaluation {
+        correct: 0, predicted_counts: vec![0; ds.n_classes],
+        nonfinite_outputs: 0, extreme_outputs: 0, max_abs_output: 0.0,
+    };
+    for &i in ids {
+        let outputs = model.activations(&float_row(ds, i));
+        let values = outputs.last().expect("nonempty MLP");
+        let predicted = values.iter().enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        stats.predicted_counts[predicted] += 1;
+        stats.correct += usize::from(predicted == ds.labels[i] as usize);
+        for &value in values {
+            if value.is_finite() {
+                stats.max_abs_output = stats.max_abs_output.max(value.abs() as f64);
+            } else {
+                stats.nonfinite_outputs += 1;
+            }
+        }
+    }
+    stats
+}
+fn fp32_parameter_nonfinite(model: &FloatMlp) -> usize {
+    model.layers.iter().map(|layer| {
+        layer.weights.iter().chain(layer.biases.iter())
+            .chain(layer.vel_w.iter()).chain(layer.vel_b.iter())
+            .filter(|x| !x.is_finite()).count()
+    }).sum()
 }
 
 fn peak_rss_kb() -> Option<u64> {
@@ -313,6 +358,9 @@ fn pct(correct: usize, size: usize) -> f64 { 100.0 * correct as f64 / size as f6
 struct Epoch {
     epoch: usize, train_accuracy: f64, validation_accuracy: f64,
     training_samples: usize, elapsed_ms: u128,
+    validation_predictions: Vec<usize>, validation_nonfinite: usize,
+    validation_extremes: usize, validation_max_abs: f64,
+    nonfinite_fp32_params: Option<usize>,
 }
 fn main() {
     let cfg = Config::parse();
@@ -358,19 +406,28 @@ fn main() {
                 }
             }
         }
-        let val_correct = match cfg.backend {
+        let val = match cfg.backend {
             Backend::Integer => accuracy_integer(&mut integer, &data.pool, &data.validation_ids),
             Backend::Fp32 => accuracy_fp32(&fp32, &data.pool, &data.validation_ids),
         };
         let metric = Epoch {
             epoch: epoch + 1,
             train_accuracy: pct(correct, data.train_ids.len()),
-            validation_accuracy: pct(val_correct, data.validation_ids.len()),
+            validation_accuracy: pct(val.correct, data.validation_ids.len()),
             training_samples: order.len(),
             elapsed_ms: epoch_start.elapsed().as_millis(),
+            validation_predictions: val.predicted_counts,
+            validation_nonfinite: val.nonfinite_outputs,
+            validation_extremes: val.extreme_outputs,
+            validation_max_abs: val.max_abs_output,
+            nonfinite_fp32_params: if cfg.backend == Backend::Fp32 {
+                Some(fp32_parameter_nonfinite(&fp32))
+            } else { None },
         };
-        println!("epoch={} train={:.2}% val={:.2}% wall_ms={}",
-            metric.epoch, metric.train_accuracy, metric.validation_accuracy, metric.elapsed_ms);
+        println!("epoch={} train={:.2}% val={:.2}% wall_ms={} predictions={:?} nonfinite_outputs={} extreme_outputs={} nonfinite_fp32_parameters={:?}",
+            metric.epoch, metric.train_accuracy, metric.validation_accuracy, metric.elapsed_ms,
+            metric.validation_predictions, metric.validation_nonfinite, metric.validation_extremes,
+            metric.nonfinite_fp32_params);
         curve.push(metric);
     }
     // CI sample NEVER evaluates the official test data. Full runs evaluate it
@@ -378,8 +435,8 @@ fn main() {
     let test_correct = if cfg.ci_sample { None } else {
         let test_ids: Vec<usize> = (0..data.test.len()).collect();
         Some(match cfg.backend {
-            Backend::Integer => accuracy_integer(&mut integer, &data.test, &test_ids),
-            Backend::Fp32 => accuracy_fp32(&fp32, &data.test, &test_ids),
+            Backend::Integer => accuracy_integer(&mut integer, &data.test, &test_ids).correct,
+            Backend::Fp32 => accuracy_fp32(&fp32, &data.test, &test_ids).correct,
         })
     };
     let total_ms = start.elapsed().as_millis();
@@ -393,8 +450,10 @@ fn main() {
     }
 
     let epochs: Vec<String> = curve.iter().map(|m| format!(
-        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{}}}",
+        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"validation_predictions\":{:?},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
         m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms,
+        m.validation_predictions, m.validation_nonfinite, m.validation_extremes, m.validation_max_abs,
+        m.nonfinite_fp32_params.map_or("null".to_string(), |n| n.to_string()),
     )).collect();
     let rss = peak_rss_kb().map_or("null".to_owned(), |n| n.to_string());
     let test_correct_json = test_correct.map_or("null".to_owned(), |n| n.to_string());
