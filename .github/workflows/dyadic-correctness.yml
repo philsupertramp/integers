@@ -27,6 +27,8 @@ jobs:
         run: cargo test --locked --test integer_boundary
       - name: Integrated CNN composition and independent FP32 oracle tests
         run: cargo test --locked --test cnn_integration
+      - name: Complete locked test suite (issue 35 gate)
+        run: cargo test --locked
       - name: Documentation tests
         run: cargo test --locked --doc
       - name: Check all default targets and examples
