@@ -31,7 +31,7 @@ enum Backend { Integer, Fp32 }
 enum Task { Iris, Mnist }
 struct Config {
     task: Task, backend: Backend, seed: u64, epochs: usize, batch: usize,
-    data_dir: PathBuf, report: PathBuf, smoke: bool,
+    data_dir: PathBuf, report: PathBuf, smoke: bool, ci_sample: bool,
 }
 impl Config {
     fn parse() -> Self {
@@ -39,12 +39,13 @@ impl Config {
         let mut cfg = Self {
             task: Task::Iris, backend: Backend::Integer, seed: 1337, epochs: 0,
             batch: 32, data_dir: PathBuf::from("data/mnist"),
-            report: PathBuf::from("reports/held_out.json"), smoke: false,
+            report: PathBuf::from("reports/held_out.json"), smoke: false, ci_sample: false,
         };
         let mut i = 0;
         while i < args.len() {
             let key = &args[i];
             if key == "--smoke" { cfg.smoke = true; i += 1; continue; }
+            if key == "--ci-sample" { cfg.ci_sample = true; i += 1; continue; }
             let value = args.get(i + 1).unwrap_or_else(|| panic!("missing value for {key}"));
             match key.as_str() {
                 "--dataset" => cfg.task = match value.as_str() {
@@ -64,6 +65,8 @@ impl Config {
         }
         if cfg.epochs == 0 { cfg.epochs = if cfg.smoke { 2 } else if cfg.task == Task::Iris { 100 } else { 10 }; }
         assert!(cfg.seed != 0 && cfg.batch > 0 && cfg.epochs > 0, "seed, batch and epochs must be positive");
+        assert!(!cfg.ci_sample || (cfg.task == Task::Mnist && !cfg.smoke),
+            "--ci-sample is only supported for MNIST and cannot be combined with --smoke");
         cfg
     }
 }
@@ -112,7 +115,7 @@ fn load_data(cfg: &Config) -> ExperimentData {
     match cfg.task {
         Task::Iris => {
             // Historical repository split (130 development + 20 reserved).
-            // IMPORTANT: the 30 were already evaluated in historical blogs;
+            // IMPORTANT: the 20 were already evaluated in historical blogs;
             // this is a held-out protocol, not a pristine never-seen dataset.
             let pool = iris_rows(Path::new("data/iris_train.tsv"));
             let test = iris_rows(Path::new("data/iris_test.tsv"));
@@ -145,16 +148,26 @@ fn load_data(cfg: &Config) -> ExperimentData {
             assert_eq!((pool.len(), test.len()), (60000, 10000),
                 "full canonical MNIST split required; do not benchmark subsets");
             assert_eq!((pool.n_features(), pool.n_classes), (784, 10));
+            let validation_per_class = if cfg.smoke { 1 } else if cfg.ci_sample { 20 } else { 500 };
             let (mut train_ids, validation_ids) = protocol::stratified_validation(
-                &pool.labels, if cfg.smoke { 1 } else { 500 }, SPLIT_SEED,
+                &pool.labels, validation_per_class, SPLIT_SEED,
             );
-            if cfg.smoke {
+            if cfg.ci_sample || cfg.smoke {
+                // The CI profile samples 64 examples per class from the ENTIRE
+                // remaining training pool with an independent fixed RNG stream.
+                // No validation or test row can be selected for training.
+                let max_per_class = if cfg.ci_sample { 64 } else { 4 };
                 let mut seen = [0; 10];
-                train_ids.retain(|&idx| {
+                let randomized = protocol::epoch_order(&train_ids, SPLIT_SEED ^ 0xC1C1_0000, 0);
+                train_ids = randomized.into_iter().filter(|&idx| {
                     let c = pool.labels[idx] as usize;
+                    if seen[c] == max_per_class { return false; }
                     seen[c] += 1;
-                    seen[c] <= 4
-                });
+                    true
+                }).collect();
+                assert!(seen.iter().all(|&count| count == max_per_class),
+                    "insufficient per-class MNIST rows for sampled run");
+                train_ids.sort_unstable();
             }
             ExperimentData { pool, test, train_ids, validation_ids }
         }
@@ -359,29 +372,38 @@ fn main() {
             metric.epoch, metric.train_accuracy, metric.validation_accuracy, metric.elapsed_ms);
         curve.push(metric);
     }
-    // This is intentionally the FIRST and ONLY read of the reserved test set.
-    let test_ids: Vec<usize> = (0..data.test.len()).collect();
-    let test_correct = match cfg.backend {
-        Backend::Integer => accuracy_integer(&mut integer, &data.test, &test_ids),
-        Backend::Fp32 => accuracy_fp32(&fp32, &data.test, &test_ids),
+    // CI sample NEVER evaluates the official test data. Full runs evaluate it
+    // exactly once, after the fixed epoch budget has completed.
+    let test_correct = if cfg.ci_sample { None } else {
+        let test_ids: Vec<usize> = (0..data.test.len()).collect();
+        Some(match cfg.backend {
+            Backend::Integer => accuracy_integer(&mut integer, &data.test, &test_ids),
+            Backend::Fp32 => accuracy_fp32(&fp32, &data.test, &test_ids),
+        })
     };
     let total_ms = start.elapsed().as_millis();
     let backend = if cfg.backend == Backend::Integer { "integer" } else { "fp32" };
     let task = if cfg.task == Task::Iris { "iris" } else { "mnist" };
-    println!("FINAL {task} {backend} seed={} test={}/{} ({:.2}%) duration_ms={total_ms}",
-        cfg.seed, test_correct, data.test.len(), pct(test_correct, data.test.len()));
+    if let Some(correct) = test_correct {
+        println!("FINAL {task} {backend} seed={} test={}/{} ({:.2}%) duration_ms={total_ms}",
+            cfg.seed, correct, data.test.len(), pct(correct, data.test.len()));
+    } else {
+        println!("CI SAMPLE {task} {backend} seed={} test=NOT_EVALUATED duration_ms={total_ms}", cfg.seed);
+    }
 
     let epochs: Vec<String> = curve.iter().map(|m| format!(
         "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{}}}",
         m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms,
     )).collect();
     let rss = peak_rss_kb().map_or("null".to_owned(), |n| n.to_string());
+    let test_correct_json = test_correct.map_or("null".to_owned(), |n| n.to_string());
+    let test_accuracy_json = test_correct.map_or("null".to_owned(), |n| format!("{:.6}", pct(n, data.test.len())));
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"test_correct\": {}, \"test_accuracy_pct\": {:.6}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
-        cfg.smoke, cfg.seed, SPLIT_SEED, cfg.epochs, cfg.batch,
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        cfg.smoke, cfg.ci_sample, cfg.seed, SPLIT_SEED, cfg.epochs, cfg.batch,
         dims, SHIFT, OUTPUT_BITS, LR_SHIFT, MOM_SHIFT, GRAD_CLIP,
         data.train_ids.len(), data.validation_ids.len(), data.test.len(),
-        test_correct, pct(test_correct, data.test.len()), total_ms, rss,
+        test_correct.is_some(), test_correct_json, test_accuracy_json, total_ms, rss,
         epochs.join(","),
     );
     if let Some(parent) = cfg.report.parent() { fs::create_dir_all(parent).expect("create report directory"); }
