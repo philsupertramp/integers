@@ -34,7 +34,7 @@ enum Task { Iris, Mnist }
 struct Config {
     task: Task, backend: Backend, seed: u64, epochs: usize, batch: usize, lr_shift: u32,
     data_dir: PathBuf, report: PathBuf, smoke: bool, ci_sample: bool,
-    validation_only: bool, split_seed: u64,
+    validation_only: bool, final_test: bool, split_seed: u64,
 }
 impl Config {
     fn parse() -> Self {
@@ -43,7 +43,7 @@ impl Config {
             task: Task::Iris, backend: Backend::Integer, seed: 1337, epochs: 0,
             batch: 32, lr_shift: LR_SHIFT, data_dir: PathBuf::from("data/mnist"),
             report: PathBuf::from("reports/held_out.json"), smoke: false, ci_sample: false,
-            validation_only: false, split_seed: SPLIT_SEED,
+            validation_only: false, final_test: false, split_seed: SPLIT_SEED,
         };
         let mut i = 0;
         let mut explicit_lr = false;
@@ -52,6 +52,7 @@ impl Config {
             if key == "--smoke" { cfg.smoke = true; i += 1; continue; }
             if key == "--ci-sample" { cfg.ci_sample = true; i += 1; continue; }
             if key == "--validation-only" { cfg.validation_only = true; i += 1; continue; }
+            if key == "--final-test" { cfg.final_test = true; i += 1; continue; }
             let value = args.get(i + 1).unwrap_or_else(|| panic!("missing value for {key}"));
             match key.as_str() {
                 "--dataset" => cfg.task = match value.as_str() {
@@ -79,6 +80,10 @@ impl Config {
         assert!(cfg.seed != 0 && cfg.split_seed != 0 && cfg.batch > 0 && cfg.epochs > 0 && cfg.lr_shift <= 30, "invalid seed, split seed, batch, epochs, or lr shift");
         assert!(!cfg.validation_only || !cfg.ci_sample,
             "--validation-only and --ci-sample are mutually exclusive");
+        assert!(!cfg.final_test || (!cfg.validation_only && !cfg.ci_sample && !cfg.smoke),
+            "--final-test cannot be combined with validation-only, CI sample or smoke");
+        assert!(cfg.task != Task::Mnist || cfg.validation_only || cfg.ci_sample || cfg.smoke || cfg.final_test,
+            "MNIST test access requires explicit --final-test; use --validation-only during development");
         assert!(!cfg.ci_sample || (cfg.task == Task::Mnist && !cfg.smoke),
             "--ci-sample is only supported for MNIST and cannot be combined with --smoke");
         cfg
@@ -341,6 +346,8 @@ fn float_target(ds: &Dataset, i: usize) -> Vec<f32> {
 struct Evaluation {
     correct: usize,
     predicted_counts: Vec<usize>,
+    // Rows are true classes; columns are predicted classes.
+    confusion: Vec<Vec<usize>>,
     nonfinite_outputs: usize,
     extreme_outputs: usize,
     max_abs_output: f64,
@@ -348,12 +355,14 @@ struct Evaluation {
 fn accuracy_integer(model: &mut Sequential, ds: &Dataset, ids: &[usize]) -> Evaluation {
     let mut stats = Evaluation {
         correct: 0, predicted_counts: vec![0; ds.n_classes],
+        confusion: vec![vec![0; ds.n_classes]; ds.n_classes],
         nonfinite_outputs: 0, extreme_outputs: 0, max_abs_output: 0.0,
     };
     for &i in ids {
         let output = model.forward(&ds.get_input(i).view());
         let predicted = argmax(&output.data);
         stats.predicted_counts[predicted] += 1;
+        stats.confusion[ds.labels[i] as usize][predicted] += 1;
         stats.correct += usize::from(predicted == ds.labels[i] as usize);
         for &value in &output.data {
             stats.max_abs_output = stats.max_abs_output.max(value.to_f64().abs());
@@ -365,6 +374,7 @@ fn accuracy_integer(model: &mut Sequential, ds: &Dataset, ids: &[usize]) -> Eval
 fn accuracy_fp32(model: &FloatMlp, ds: &Dataset, ids: &[usize]) -> Evaluation {
     let mut stats = Evaluation {
         correct: 0, predicted_counts: vec![0; ds.n_classes],
+        confusion: vec![vec![0; ds.n_classes]; ds.n_classes],
         nonfinite_outputs: 0, extreme_outputs: 0, max_abs_output: 0.0,
     };
     for &i in ids {
@@ -373,6 +383,7 @@ fn accuracy_fp32(model: &FloatMlp, ds: &Dataset, ids: &[usize]) -> Evaluation {
         let predicted = values.iter().enumerate()
             .max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
         stats.predicted_counts[predicted] += 1;
+        stats.confusion[ds.labels[i] as usize][predicted] += 1;
         stats.correct += usize::from(predicted == ds.labels[i] as usize);
         for &value in values {
             if value.is_finite() {
@@ -403,7 +414,8 @@ fn pct(correct: usize, size: usize) -> f64 { 100.0 * correct as f64 / size as f6
 struct Epoch {
     epoch: usize, train_accuracy: f64, validation_accuracy: f64,
     training_samples: usize, elapsed_ms: u128,
-    validation_predictions: Vec<usize>, validation_nonfinite: usize,
+    validation_predictions: Vec<usize>, validation_confusion: Vec<Vec<usize>>,
+    validation_nonfinite: usize,
     validation_extremes: usize, validation_max_abs: f64,
     nonfinite_fp32_params: Option<usize>,
 }
@@ -462,6 +474,7 @@ fn main() {
             training_samples: order.len(),
             elapsed_ms: epoch_start.elapsed().as_millis(),
             validation_predictions: val.predicted_counts,
+            validation_confusion: val.confusion,
             validation_nonfinite: val.nonfinite_outputs,
             validation_extremes: val.extreme_outputs,
             validation_max_abs: val.max_abs_output,
@@ -496,9 +509,9 @@ fn main() {
     }
 
     let epochs: Vec<String> = curve.iter().map(|m| format!(
-        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"validation_predictions\":{:?},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
+        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"validation_predictions\":{:?},\"validation_confusion\":{:?},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
         m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms,
-        m.validation_predictions, m.validation_nonfinite, m.validation_extremes, m.validation_max_abs,
+        m.validation_predictions, m.validation_confusion, m.validation_nonfinite, m.validation_extremes, m.validation_max_abs,
         m.nonfinite_fp32_params.map_or("null".to_string(), |n| n.to_string()),
     )).collect();
     let rss = peak_rss_kb().map_or("null".to_owned(), |n| n.to_string());
