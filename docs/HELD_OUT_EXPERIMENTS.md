@@ -68,16 +68,32 @@ python3 experiments/run_baselines.py --dataset iris --validation-only \
 # python3 experiments/run_baselines.py --dataset iris \
 #     --epochs 200 --batch-size 32 --lr-shift 6 --seeds 1337 2027 4242
 
-# Download canonical MNIST IDX files under data/mnist (see data/mnist README).
-# The runner REQUIRES 60,000 train + 10,000 test rows; it does not
-# substitute small sampled training/testing subsets.
-python3 experiments/run_baselines.py --dataset mnist --epochs 10 --seeds 1337 2027 4242
+# Download ONLY the canonical MNIST training partition: the official 10k
+# test images and labels are neither downloaded nor inspected.
+python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+
+# Development-only full 55k-train/5k-validation MNIST on your own CPU.
+# Both arithmetic backends and all three seeds; no official test access.
+python3 experiments/run_baselines.py --dataset mnist --validation-only \
+    --epochs 10 --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242
+
+# Optional cheap end-to-end validation-only smoke (40 train / 10 val).
+python3 experiments/run_baselines.py --dataset mnist --validation-only \
+    --smoke --epochs 2 --seeds 1337
+
+# Only once the learning-rate/epoch protocol is frozen, explicitly download
+# the additional test inputs (omit --train-only) and run the final test once.
+# python3 experiments/fetch_mnist.py --data-dir data/mnist
+# python3 experiments/run_baselines.py --dataset mnist \
+#     --epochs 10 --batch-size 32 --lr-shift 7 --seeds 1337 2027 4242
 ```
 
 Iris's validation-selected defaults are **batch size 32, LR shift 6,
 and 200 epochs** ([HPO report](IRIS_HPO.md)). MNIST retains LR shift 7.
-The explicit `--validation-only` flag also works with the tiny Iris smoke
-profile and never opens or hashes the historical test TSV.
+The explicit `--validation-only` flag works for **both Iris and MNIST**,
+including their cheap fixture-smoke profiles. It never opens or hashes the
+respective test data. `--validation-only` and `--ci-sample` are deliberately
+mutually exclusive so report semantics are not ambiguous.
 An explicit `--batch-size 32` is the default for both tasks. No early
 stopping, validation-guided checkpoint selection or test-guided tuning is
 performed: all epochs are specified **before** a run. If hyperparameters are
@@ -85,10 +101,24 @@ changed based on validation diagnostics, record a separate experiment;
 never choose them by reading test accuracy. For publication of a final
 locked protocol, freeze them before the final test run.
 
-MNIST uses the existing `load_mnist_auto` which prefers IDX over Parquet;
-the Python launcher **requires the canonical four IDX files** and hashes
-them. Don't claim a comparison from an alternate dataset variant. The
-standard runner checks the canonical train/test counts and dimensions.
+In **MNIST validation-only mode**, the Rust runner opens only the two
+canonical TRAINING IDX files: it does **not** run the test-aware format
+probe, open test data or allocate the 10,000-row test partition. The
+Python launcher checksums only the two training files and preserves these
+checksums in `manifest.json`. `experiments/fetch_mnist.py --train-only`
+similarly downloads/verifies only training IDX (including pinned SHA-256
+on download). A complete validation-only run still trains all **55,000**
+training examples and validates against **5,000** disjoint official
+training-partition examples. It records `test_size: 0`,
+`test_evaluated: false`, and null final-test scores. Nothing in this
+mode can produce an official held-out MNIST test accuracy.
+
+The **explicit final-test mode** (without `--validation-only`) uses
+`load_mnist_auto`, prefers IDX to Parquet, and the Python launcher
+requires/hashes all four canonical IDX files. Never claim a benchmark
+from a silently substituted dataset variant. Both modes enforce the
+expected canonical training sizes; only the final mode loads the 10k test.
+
 The Iris runner requires all 130 development rows, and in full-test mode
 the separate 20 historical test rows. Validation-only mode does not read
 the test file at all.
@@ -108,7 +138,8 @@ To keep CI bounded and avoid tuning against the official test split, the
 images (20/digit)**, selected deterministically from the original 60,000-row
 training pool. Its validation split is strictly disjoint from the 640-image
 training cohort. The official 10,000-image test data is verified and loaded
-but **never evaluated** in this mode. Reports explicitly set
+but **never evaluated** in this older `--ci-sample` mode. By contrast,
+the new `--validation-only` mode never reads test files at all. Reports explicitly set
 `ci_sample: true`, `test_evaluated: false`, and
 `test_accuracy_pct: null`.
 
@@ -128,10 +159,12 @@ python3 experiments/run_baselines.py --dataset mnist --ci-sample \
     --epochs 20 --seeds 1337 2027 --batch-size 32 --lr-shift 7
 ```
 
-The full-protocol `--dataset mnist` **without** `--ci-sample` still uses
-55,000 training and 5,000 validation examples, reserves all 10,000 official
-test examples until *after* all fixed epochs, and is a distinct scientific
-baseline. CI sampled validation results must never be mixed into the full
+The full-size `--dataset mnist --validation-only` uses 55,000
+training and 5,000 validation examples and reads **no** official test
+data. After validation-based hyperparameters are locked, an explicit
+`--dataset mnist` final run on all four canonical IDX files evaluates
+all 10,000 official test examples exactly once, *after* the fixed epochs.
+These are distinct scientific stages. CI sampled validation results must never be mixed into the full
 held-out results or used to set ADR-004 success thresholds.
 
 ## Machine-readable evidence
@@ -167,6 +200,13 @@ only after reading measured multi-seed curves and accounting for hardware,
 training budget and implementation maturity. The FP32 reference is written
 for auditability, not optimized BLAS; do not read a speed difference as
 proof that integer instructions are inherently faster or slower.
+
+The MNIST CI job also runs a two-epoch `--validation-only --smoke`
+test using a separate input directory containing *only* symlinks to
+canonical training IDX. It checks that both backends work without test
+files, hashes just those two train inputs, reports 40 training and 10
+validation rows, and never emits test metrics. **Full 55k/5k MNIST
+training does not run automatically in CI.**
 
 The CI smoke workflow now **removes Iris's historical test TSV from its
 checkout** and executes a two-epoch `--validation-only` fixture with both

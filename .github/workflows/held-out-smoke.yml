@@ -97,6 +97,42 @@ jobs:
               assert all(m["training_samples"] == 640 for m in row["learning_curve"])
               assert all(0 <= m["validation_accuracy_pct"] <= 100 for m in row["learning_curve"])
           PY
+      - name: Verify MNIST validation-only with NO test files present
+        run: |
+          # The original CI sample above uses all four canonical IDX inputs.
+          # This independent directory contains ONLY the two train IDX files.
+          mkdir -p /tmp/integers-mnist-train-only
+          ln -s "$PWD/data/mnist/train-images-idx3-ubyte" /tmp/integers-mnist-train-only/
+          ln -s "$PWD/data/mnist/train-labels-idx1-ubyte" /tmp/integers-mnist-train-only/
+          test ! -e /tmp/integers-mnist-train-only/t10k-images-idx3-ubyte
+          test ! -e /tmp/integers-mnist-train-only/t10k-labels-idx1-ubyte
+          python3 experiments/run_baselines.py --dataset mnist             --validation-only --smoke --epochs 2 --seeds 1337 2027             --data-dir /tmp/integers-mnist-train-only             --output-dir /tmp/integers-mnist-validation-smoke
+      - name: Assert MNIST test isolation, provenance and validation metrics
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/tmp/integers-mnist-validation-smoke/mnist/validation-only")
+          manifest = json.loads((root / "manifest.json").read_text())
+          sources = manifest["sources_sha256"]
+          assert len(sources) == 2 and all("train-" in p for p in sources), sources
+          assert not any("t10k" in p for p in sources)
+          reports = list(root.glob("*-seed-*.json"))
+          assert len(reports) == 4
+          assert "test NOT loaded or evaluated" in (root / "summary.md").read_text()
+          for path in reports:
+              row = json.loads(path.read_text())
+              assert row["dataset"] == "mnist"
+              assert row["validation_only"] is True and row["ci_sample"] is False
+              assert row["smoke"] is True
+              assert row["test_evaluated"] is False
+              assert row["test_correct"] is None and row["test_accuracy_pct"] is None
+              assert (row["train_size"], row["validation_size"], row["test_size"]) == (40, 10, 0)
+              assert row["epochs"] == 2
+              assert len(row["learning_curve"]) == 2
+              assert all(sum(epoch["validation_predictions"]) == 10
+                         for epoch in row["learning_curve"])
+          PY
       - name: Print MNIST validation-only comparison
         run: cat /tmp/integers-mnist-ci/mnist/ci-sample/summary.md
       - name: Preserve small MNIST diagnostics (no datasets or checkpoints)
