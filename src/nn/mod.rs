@@ -124,7 +124,10 @@ pub trait Module {
     /// One optimiser step: `params -= lr * velocity`.
     fn update(&mut self, lr_shift: u32);
 
-    /// Reset accumulated gradients.  Does **not** reset velocity.
+    /// Built-in trainable integer modules average summed per-sample gradients
+    /// over the actual number of accumulated samples BEFORE momentum and SGD.
+    /// Works for a full batch, a short last batch, and repeated backward calls.
+    /// Reset accumulated gradients. Does **not** reset velocity.
     fn zero_grad(&mut self);
 
     // ── Metadata ─────────────────────────────────────────────────────────────
@@ -256,28 +259,104 @@ fn sgd_step(w: Dyadic, g: Dyadic, lr_shift: u32) -> Dyadic {
 }
 
 fn momentum_step(w: Dyadic, g: Dyadic, v: &mut Dyadic, lr_shift: u32, m: u32) -> Dyadic {
-    let vd = Dyadic::new(stochastic_round(v.v, m), v.s);
-    let (vs, vn) = if g.s >= v.s {
-        let ga = Dyadic::new(stochastic_round(g.v, g.s - v.s), v.s);
-        (v.s, Dyadic::new(vd.v.saturating_add(ga.v), v.s))
-    } else {
-        let shift = v.s - g.s;
-        let vda = Dyadic::new(stochastic_round(vd.v, shift), g.s);
-        (g.s, Dyadic::new(vda.v.saturating_add(g.v), g.s))
-    };
-    *v = Dyadic::new(vn.v, vs);
+    // Align to the FINER dyadic scale. Previously an initial zero velocity
+    // at scale 0 quantized every sub-unit mean gradient away.
+    let decayed = Dyadic::new(stochastic_round(v.v, m), v.s);
+    *v = add(decayed, g);
     sgd_step(w, *v, lr_shift)
+}
+
+/// Integer-only dyadic approximation to a sample mean.
+///
+/// Power-of-two denominators are exact. Other denominators are divided
+/// in i128 fixed point and rounded to nearest (ties to even); the guard
+/// precision backs off until the signed i32 mantissa fits.
+fn mean_gradient(g: Dyadic, samples: usize) -> Dyadic {
+    assert!(samples > 0, "mean_gradient: sample count must be nonzero");
+    if samples == 1 { return g; }
+    if samples.is_power_of_two() {
+        return Dyadic::new(g.v, g.s.checked_add(samples.trailing_zeros())
+            .expect("mean_gradient: output scale overflow"));
+    }
+    let ceil_log2 = usize::BITS - (samples - 1).leading_zeros();
+    let mut bits = (ceil_log2 + 8).min(30).min(u32::MAX - g.s);
+    let magnitude = (g.v as i128).abs();
+    let divisor = samples as i128;
+    loop {
+        let numerator = magnitude << bits;
+        let mut quotient = numerator / divisor;
+        let remainder = numerator % divisor;
+        if remainder * 2 > divisor || (remainder * 2 == divisor && quotient & 1 != 0) {
+            quotient += 1;
+        }
+        let limit = if g.v < 0 { 1i128 << 31 } else { i32::MAX as i128 };
+        if quotient <= limit {
+            let signed = if g.v < 0 { -quotient } else { quotient };
+            return Dyadic::new(signed as i32, g.s + bits);
+        }
+        assert!(bits > 0, "mean_gradient: mean overflow after division");
+        bits -= 1;
+    }
 }
 
 fn apply_updates(
     params: &mut [Dyadic], grads: &Tensor, vels: &mut [Dyadic],
-    lr_shift: u32, momentum: Option<u32>,
+    lr_shift: u32, momentum: Option<u32>, samples: usize,
 ) {
+    assert!(samples > 0, "apply_updates: no accumulated examples");
+    assert_eq!(params.len(), grads.data.len(), "apply_updates: param/gradient mismatch");
+    assert_eq!(params.len(), vels.len(), "apply_updates: param/velocity mismatch");
     match momentum {
-        None    => params.iter_mut().zip(grads.data.iter())
-            .for_each(|(w, &g)| *w = sgd_step(*w, g, lr_shift)),
+        None => params.iter_mut().zip(grads.data.iter())
+            .for_each(|(w, &g)| *w = sgd_step(*w, mean_gradient(g, samples), lr_shift)),
         Some(m) => params.iter_mut().zip(grads.data.iter()).zip(vels.iter_mut())
-            .for_each(|((w, &g), v)| *w = momentum_step(*w, g, v, lr_shift, m)),
+            .for_each(|((w, &g), v)| {
+                *w = momentum_step(*w, mean_gradient(g, samples), v, lr_shift, m)
+            }),
+    }
+}
+
+#[cfg(test)]
+mod gradient_average_tests {
+    use super::{mean_gradient, Dyadic};
+
+    #[test]
+    fn power_of_two_sample_means_are_exact() {
+        assert_eq!(mean_gradient(Dyadic::new(7, 4), 32), Dyadic::new(7, 9));
+        assert_eq!(mean_gradient(Dyadic::new(-7, 4), 8), Dyadic::new(-7, 7));
+        assert_eq!(mean_gradient(Dyadic::new(19, 3), 1), Dyadic::new(19, 3));
+    }
+
+    #[test]
+    fn non_power_of_two_means_match_reference_with_bounded_rounding() {
+        for samples in [3usize, 7, 10, 24, 31] {
+            for v in [-123, -23, -1, 0, 1, 23, 123] {
+                let original = Dyadic::new(v, 7);
+                let actual = mean_gradient(original, samples);
+                let reference = original.to_f64() / samples as f64;
+                let tolerance = 0.5 * 2f64.powi(-(actual.s as i32)) + 1e-12;
+                assert!((actual.to_f64() - reference).abs() <= tolerance,
+                    "{original:?}, samples={samples}, actual={actual:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_mantissas_do_not_overflow_or_wrap() {
+        for v in [i32::MIN, i32::MAX] {
+            for samples in [3, 24, 31, 1000] {
+                let actual = mean_gradient(Dyadic::new(v, 0), samples);
+                let expected = v as f64 / samples as f64;
+                assert!((actual.to_f64() - expected).abs() <= 1.0,
+                    "v={v}, samples={samples}, actual={actual:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "sample count must be nonzero")]
+    fn zero_samples_rejected() {
+        mean_gradient(Dyadic::new(3, 0), 0);
     }
 }
 
