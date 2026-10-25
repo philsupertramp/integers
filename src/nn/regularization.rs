@@ -401,7 +401,7 @@ impl Module for BatchNorm1D {
         let scale = (1u32 << self.shift) as f64;
         let nf = n as f64;
 
-        let dL_dy: Vec<Vec<f64>> = grads
+        let d_l_dy: Vec<Vec<f64>> = grads
             .iter()
             .map(|g| g.data.iter().map(|d| d.to_f64()).collect())
             .collect();
@@ -412,20 +412,20 @@ impl Module for BatchNorm1D {
             let gamma_f = self.gamma.data[f].to_f64();
             let inv_std_f = self.inv_std_cache[f];
 
-            let sum_dL_dy: f64 = (0..n).map(|s| dL_dy[s][f]).sum();
-            let sum_dL_dy_xhat: f64 = (0..n).map(|s| dL_dy[s][f] * self.x_hat_cache[s][f]).sum();
+            let sum_d_l_dy: f64 = (0..n).map(|s| d_l_dy[s][f]).sum();
+            let sum_d_l_dy_xhat: f64 = (0..n).map(|s| d_l_dy[s][f] * self.x_hat_cache[s][f]).sum();
 
             // Accumulate learnable parameter gradients.
             self.grad_gamma.data[f] = Dyadic::new(
                 self.grad_gamma.data[f]
                     .v
-                    .saturating_add((sum_dL_dy_xhat * scale).round() as i32),
+                    .saturating_add((sum_d_l_dy_xhat * scale).round() as i32),
                 self.shift,
             );
             self.grad_beta.data[f] = Dyadic::new(
                 self.grad_beta.data[f]
                     .v
-                    .saturating_add((sum_dL_dy * scale).round() as i32),
+                    .saturating_add((sum_d_l_dy * scale).round() as i32),
                 self.shift,
             );
 
@@ -433,7 +433,9 @@ impl Module for BatchNorm1D {
             // ∂L/∂x_n = (γ/σ) · [ ∂L/∂ŷ_n − (1/N)·∂L/∂β − (x̂_n/N)·∂L/∂γ ]
             for s in 0..n {
                 let dx = (gamma_f * inv_std_f)
-                    * (dL_dy[s][f] - sum_dL_dy / nf - self.x_hat_cache[s][f] * sum_dL_dy_xhat / nf);
+                    * (d_l_dy[s][f]
+                        - sum_d_l_dy / nf
+                        - self.x_hat_cache[s][f] * sum_d_l_dy_xhat / nf);
                 grad_inputs[s * self.num_features + f] =
                     Dyadic::new((dx * scale).round() as i32, self.shift);
             }
@@ -714,7 +716,7 @@ impl Module for BatchNorm2D {
         let scale = (1u32 << self.shift) as f64;
         let n_hw = (n * hw) as f64;
 
-        let dL_dy: Vec<Vec<f64>> = grads
+        let d_l_dy: Vec<Vec<f64>> = grads
             .iter()
             .map(|g| g.data.iter().map(|d| d.to_f64()).collect())
             .collect();
@@ -729,26 +731,26 @@ impl Module for BatchNorm2D {
             let inv_std_c = self.inv_std_cache[c];
 
             // Sum gradients over all N*H*W positions for γ and β.
-            let mut sum_dL_dy = 0.0f64;
-            let mut sum_dL_dy_xhat = 0.0f64;
+            let mut sum_d_l_dy = 0.0f64;
+            let mut sum_d_l_dy_xhat = 0.0f64;
             for s in 0..n {
                 for p in 0..hw {
                     let idx = c * hw + p;
-                    sum_dL_dy += dL_dy[s][idx];
-                    sum_dL_dy_xhat += dL_dy[s][idx] * self.x_hat_cache[s][idx];
+                    sum_d_l_dy += d_l_dy[s][idx];
+                    sum_d_l_dy_xhat += d_l_dy[s][idx] * self.x_hat_cache[s][idx];
                 }
             }
 
             self.grad_gamma.data[c] = Dyadic::new(
                 self.grad_gamma.data[c]
                     .v
-                    .saturating_add((sum_dL_dy_xhat * scale).round() as i32),
+                    .saturating_add((sum_d_l_dy_xhat * scale).round() as i32),
                 self.shift,
             );
             self.grad_beta.data[c] = Dyadic::new(
                 self.grad_beta.data[c]
                     .v
-                    .saturating_add((sum_dL_dy * scale).round() as i32),
+                    .saturating_add((sum_d_l_dy * scale).round() as i32),
                 self.shift,
             );
 
@@ -757,9 +759,9 @@ impl Module for BatchNorm2D {
                 for p in 0..hw {
                     let idx = c * hw + p;
                     let dx = (gamma_c * inv_std_c)
-                        * (dL_dy[s][idx]
-                            - sum_dL_dy / n_hw
-                            - self.x_hat_cache[s][idx] * sum_dL_dy_xhat / n_hw);
+                        * (d_l_dy[s][idx]
+                            - sum_d_l_dy / n_hw
+                            - self.x_hat_cache[s][idx] * sum_d_l_dy_xhat / n_hw);
                     grad_inputs.data[s * self.channels * hw + idx] =
                         Dyadic::new((dx * scale).round() as i32, self.shift);
                 }

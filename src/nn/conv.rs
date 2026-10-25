@@ -83,7 +83,7 @@ impl Conv2D {
             momentum_shift: None,
             out_h,
             out_w,
-            kernels: kernels,
+            kernels,
             biases: Tensor::from_vec(z(out_channels), vec![out_channels]),
             input_cache: Tensor::new(),
             output_cache: Tensor::new(),
@@ -96,8 +96,8 @@ impl Conv2D {
             vel_k: Tensor::zeros(vec![n_k]),
             vel_b: Tensor::zeros(vec![out_channels]),
             grad_samples: 0,
-            q_min: q_min,
-            q_max: q_max,
+            q_min,
+            q_max,
         }
     }
 

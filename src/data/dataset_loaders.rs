@@ -395,7 +395,7 @@ fn finalize_dataset(
         labels,
         targets: Tensor::from_vec(tgt_data, vec![n_samples, n_classes]),
         n_classes,
-        input_shift: input_shift,
+        input_shift,
     })
 }
 

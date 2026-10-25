@@ -57,8 +57,8 @@ impl Linear {
         Self {
             in_features,
             out_features,
-            weights: weights,
-            biases: biases,
+            weights,
+            biases,
             quant_shift,
             output_bits,
             grad_clip: i32::MAX,
@@ -74,8 +74,8 @@ impl Linear {
             vel_w: Tensor::zeros(vec![n_w]),
             vel_b: Tensor::zeros(vec![out_features]),
             grad_samples: 0,
-            q_min: q_min,
-            q_max: q_max,
+            q_min,
+            q_max,
         }
     }
 
