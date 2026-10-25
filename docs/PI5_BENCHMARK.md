@@ -48,6 +48,8 @@ files, and never fetched at Job startup. License information and attribution:
 The image includes a modification and license notice. Do not transfer the
 dataset's license to the (separately undecided) Rust library licensing policy.
 
+On PR #43's GitHub Actions ARM64/QEMU build (2026-10-25), `docker image inspect .Size` reported **67,416,792 bytes** for the locally loaded image. This is a reproducible CI observation for that image build, **not** compressed GHCR transfer size or measured Pi process memory.
+
 Image **compressed registry transfer size** must be measured after publish;
 do not equate it with local `docker inspect .Size`, process RSS, or memory
 limits. Record pull duration separately:
