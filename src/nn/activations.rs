@@ -1,6 +1,5 @@
 use crate::dyadic::{Dyadic, Tensor, TensorView, signed_bounds};
 use crate::nn::{Module, TrainingArithmetic};
-use crate::rng::rng_range;
 
 pub struct ReLU {
     mask_bits: Vec<u64>,

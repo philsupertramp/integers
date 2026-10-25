@@ -67,11 +67,7 @@ pub use regularization::{BatchNorm1D, BatchNorm2D, Dropout, MaxPool2D};
 mod conv;
 pub use conv::Conv2D;
 
-use crate::dyadic::{
-    Dyadic, Tensor, TensorView, add, mul, requantize, signed_bounds, ste_requantize,
-    stochastic_round,
-};
-use crate::rng::rng_range;
+use crate::dyadic::{Dyadic, Tensor, TensorView, add, stochastic_round};
 
 // ─── Module trait ──────────────────────────────────────────────────────────────
 

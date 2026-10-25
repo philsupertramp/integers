@@ -1,6 +1,5 @@
 use crate::dyadic::{
     Dyadic, Tensor, TensorView, add, mul, requantize, signed_bounds, ste_requantize,
-    stochastic_round,
 };
 use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
 use crate::rng::rng_range;
