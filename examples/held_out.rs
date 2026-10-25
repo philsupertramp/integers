@@ -2,6 +2,9 @@
 //! A validation-only run never opens test data. A final run evaluates test
 //! exactly once after the fixed training budget.
 //! No FP arithmetic is performed in the integer Sequential training path.
+// The shared FP32 oracle exposes training helpers used by other experiments.
+// This target intentionally exercises only a subset of that reference API.
+#[allow(dead_code)]
 #[path = "../experiments/cnn_reference.rs"]
 mod cnn_reference;
 #[path = "mnist_nn/mnist_loader.rs"]
