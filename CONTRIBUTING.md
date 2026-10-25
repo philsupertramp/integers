@@ -30,9 +30,11 @@ cargo check --locked --all-targets --all-features
 Formatting and lint diagnostics:
 ```sh
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --locked --all-targets -- -D warnings
 ```
-A failing pre-existing check should be noted, not concealed. CI presently covers compilation, unit/oracle tests, bundled example execution and optional feature builds; wider hygiene and held-out experiment gates remain separate.
+The issue #20 hygiene workflow on `issue-20-rust-hygiene` runs rustfmt, the locked full suite, all-target compilation, and strict library Clippy. Strict all-target Clippy and rustfmt are blocking checks, enabled after a successful GitHub Actions run on the hygiene branch. Other regression, example-runtime, and feature-smoke workflows remain independent. A failing pre-existing check should be noted, not concealed.
+
+**Toolchain policy:** Rust edition 2024; current development and validation use stable Rust 1.95.0 on x86_64 Linux. An MSRV has not been adopted or tested; do not claim compatibility with an earlier compiler. Hardware priorities are x86_64 correctness and Raspberry Pi 5 AArch64 after parity tests. All default checks are dataset-free; dataset-dependent full MNIST/CIFAR runs are excluded from local fast gates.
 
 ## Experiments and claims
 Record Rust compiler version, git commit, target hardware, seed, dataset identity and split, hyperparameters, iterations, accuracy on a complete held-out test set, runtime, memory, and methodology. Distinguish arithmetic correctness from model convergence and runtime performance. When comparing to FP32, specify whether kernels and implementation quality are comparable. Don't commit licensed datasets without confirming redistribution rights.

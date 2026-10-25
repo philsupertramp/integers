@@ -4,7 +4,11 @@ use integers::rng::XorShift64;
 
 /// Class-balanced, deterministic hold-out split. The validation quota is
 /// applied to every class; the test set is NEVER passed to this function.
-pub fn stratified_validation(labels: &[u8], per_class: usize, seed: u64) -> (Vec<usize>, Vec<usize>) {
+pub fn stratified_validation(
+    labels: &[u8],
+    per_class: usize,
+    seed: u64,
+) -> (Vec<usize>, Vec<usize>) {
     assert!(seed != 0);
     assert!(per_class > 0);
     let classes = labels.iter().copied().max().map_or(0, |x| x as usize + 1);
@@ -12,10 +16,19 @@ pub fn stratified_validation(labels: &[u8], per_class: usize, seed: u64) -> (Vec
     let mut train = Vec::new();
     let mut validation = Vec::new();
     for class in 0..classes {
-        let mut candidates: Vec<usize> = labels.iter().enumerate()
-            .filter_map(|(i, &label)| (label as usize == class).then_some(i)).collect();
-        assert!(candidates.len() > per_class, "class {class} has too few samples for validation");
-        shuffle(&mut candidates, seed ^ (class as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15));
+        let mut candidates: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &label)| (label as usize == class).then_some(i))
+            .collect();
+        assert!(
+            candidates.len() > per_class,
+            "class {class} has too few samples for validation"
+        );
+        shuffle(
+            &mut candidates,
+            seed ^ (class as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15),
+        );
         validation.extend_from_slice(&candidates[..per_class]);
         train.extend_from_slice(&candidates[per_class..]);
     }

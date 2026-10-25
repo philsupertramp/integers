@@ -1,19 +1,33 @@
 //! Quick smoke-test: train a dyadic integer network on XOR.
 //! For the real examples run `cargo run --example iris` or `cargo run --example mnist`.
 
-use integers::{argmax, mse_grad, Dyadic, Tensor};
 use integers::nn::{Linear, ReLU, Sequential};
+use integers::{Dyadic, Tensor, mse_grad};
 
 const SHIFT: u32 = 7;
 
-fn enc(x: f64) -> Dyadic { Dyadic::new((x * 128.0).round() as i32, SHIFT) }
+fn enc(x: f64) -> Dyadic {
+    Dyadic::new((x * 128.0).round() as i32, SHIFT)
+}
 
 fn main() {
     let data: Vec<(Tensor, Tensor)> = vec![
-        (Tensor::from_vec(vec![enc( 1.0), enc( 1.0)], vec![1, 2]), Tensor::from_vec(vec![enc(-1.0)], vec![1, 1])),
-        (Tensor::from_vec(vec![enc( 1.0), enc(-1.0)], vec![1, 2]), Tensor::from_vec(vec![enc( 1.0)], vec![1, 1])),
-        (Tensor::from_vec(vec![enc(-1.0), enc( 1.0)], vec![1, 2]), Tensor::from_vec(vec![enc( 1.0)], vec![1, 1])),
-        (Tensor::from_vec(vec![enc(-1.0), enc(-1.0)], vec![1, 2]), Tensor::from_vec(vec![enc(-1.0)], vec![1, 1])),
+        (
+            Tensor::from_vec(vec![enc(1.0), enc(1.0)], vec![1, 2]),
+            Tensor::from_vec(vec![enc(-1.0)], vec![1, 1]),
+        ),
+        (
+            Tensor::from_vec(vec![enc(1.0), enc(-1.0)], vec![1, 2]),
+            Tensor::from_vec(vec![enc(1.0)], vec![1, 1]),
+        ),
+        (
+            Tensor::from_vec(vec![enc(-1.0), enc(1.0)], vec![1, 2]),
+            Tensor::from_vec(vec![enc(1.0)], vec![1, 1]),
+        ),
+        (
+            Tensor::from_vec(vec![enc(-1.0), enc(-1.0)], vec![1, 2]),
+            Tensor::from_vec(vec![enc(-1.0)], vec![1, 1]),
+        ),
     ];
 
     let mut model = Sequential::new();
@@ -26,8 +40,8 @@ fn main() {
         let mut sq_err = 0i64;
         for (x, t) in &data {
             model.zero_grad();
-            let y   = model.forward(&x.view());
-            let g   = Tensor::from_vec(mse_grad(&y.data, &t.data), t.shape.clone());
+            let y = model.forward(&x.view());
+            let g = Tensor::from_vec(mse_grad(&y.data, &t.data), t.shape.clone());
             sq_err += g.data.iter().map(|d| (d.v as i64).pow(2)).sum::<i64>();
             model.backward(&g.view());
             model.update(5);
@@ -41,7 +55,12 @@ fn main() {
     println!("\nFinal predictions:");
     for (x, t) in &data {
         let y = model.forward(&x.view()).data;
-        println!("  [{:5.2}, {:5.2}] → {:6.3}  (target {:5.2})",
-            x.data[0].to_f64(), x.data[1].to_f64(), y[0].to_f64(), t.data[0].to_f64());
+        println!(
+            "  [{:5.2}, {:5.2}] → {:6.3}  (target {:5.2})",
+            x.data[0].to_f64(),
+            x.data[1].to_f64(),
+            y[0].to_f64(),
+            t.data[0].to_f64()
+        );
     }
 }

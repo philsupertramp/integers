@@ -50,8 +50,8 @@
 //!     }
 //! }
 //! ```
-pub mod nn;
 pub mod data;
+pub mod nn;
 
 #[path = "lib/dyadic.rs"]
 pub mod dyadic;
@@ -63,7 +63,7 @@ pub mod rng;
 // ─── Re-exports ───────────────────────────────────────────────────────────────
 
 pub use dyadic::{Dyadic, Tensor};
-pub use rng::{seed_rng, rng_range, rng_next};
+pub use rng::{rng_next, rng_range, seed_rng};
 
 // ─── Dataset → network bridge ─────────────────────────────────────────────────
 
@@ -86,8 +86,14 @@ pub fn target_to_dyadic(values: &[i32], shift: u32) -> Vec<Dyadic> {
 /// Both slices must share the same dyadic scale.  The result is passed
 /// directly to [`nn::Sequential::backward`].
 pub fn mse_grad(output: &[Dyadic], target: &[Dyadic]) -> Vec<Dyadic> {
-    assert_eq!(output.len(), target.len(), "mse_grad: output/target length mismatch");
-    output.iter().zip(target.iter())
+    assert_eq!(
+        output.len(),
+        target.len(),
+        "mse_grad: output/target length mismatch"
+    );
+    output
+        .iter()
+        .zip(target.iter())
         .map(|(&y, &t)| {
             assert_eq!(y.s, t.s, "mse_grad: output/target scale mismatch");
             Dyadic::new(y.v.saturating_sub(t.v), y.s)
@@ -119,8 +125,14 @@ pub fn mse_grad(output: &[Dyadic], target: &[Dyadic]) -> Vec<Dyadic> {
 /// ```
 pub fn cross_entropy_grad(output: &[Dyadic], target: &[Dyadic], shift: u32) -> Vec<Dyadic> {
     // p − t: both at `shift`, result at `shift`.
-    assert_eq!(output.len(), target.len(), "cross_entropy_grad: output/target length mismatch");
-    output.iter().zip(target.iter())
+    assert_eq!(
+        output.len(),
+        target.len(),
+        "cross_entropy_grad: output/target length mismatch"
+    );
+    output
+        .iter()
+        .zip(target.iter())
         .map(|(&p, &t)| {
             assert_eq!(p.s, shift, "cross_entropy_grad: probability scale mismatch");
             assert_eq!(t.s, shift, "cross_entropy_grad: target scale mismatch");
@@ -134,7 +146,8 @@ pub fn cross_entropy_grad(output: &[Dyadic], target: &[Dyadic], shift: u32) -> V
 /// Since all elements share the same scale `s`, comparing mantissas is
 /// equivalent to comparing decoded values.
 pub fn argmax(output: &[Dyadic]) -> usize {
-    output.iter()
+    output
+        .iter()
         .enumerate()
         .max_by_key(|(_, d)| d.v)
         .map(|(i, _)| i)
@@ -163,17 +176,17 @@ pub fn argmax(output: &[Dyadic]) -> usize {
 /// reporter.print_footer();
 /// ```
 pub struct TrainingReporter {
-    pub total_epochs:  u32,
-    pub log_every:     u32,
-    pub shift:         u32,   // for decoding squared-error to real MSE
+    pub total_epochs: u32,
+    pub log_every: u32,
+    pub shift: u32, // for decoding squared-error to real MSE
 
     // per-epoch accumulators
     sq_err_sum: i64,
-    n_correct:  usize,
-    n_samples:  usize,
+    n_correct: usize,
+    n_samples: usize,
 
     pub best_train_acc: f64,
-    pub best_test_acc:  f64,
+    pub best_test_acc: f64,
 }
 
 impl TrainingReporter {
@@ -181,24 +194,31 @@ impl TrainingReporter {
     /// integer error back to floating-point MSE).
     pub fn new(total_epochs: u32, log_every: u32, shift: u32) -> Self {
         Self {
-            total_epochs, log_every, shift,
-            sq_err_sum: 0, n_correct: 0, n_samples: 0,
-            best_train_acc: 0.0, best_test_acc: 0.0,
+            total_epochs,
+            log_every,
+            shift,
+            sq_err_sum: 0,
+            n_correct: 0,
+            n_samples: 0,
+            best_train_acc: 0.0,
+            best_test_acc: 0.0,
         }
     }
 
     /// Print the column header.  Call once before the epoch loop.
     pub fn print_header(&self) {
-        println!("{:>7}  {:>14}  {:>10}  {:>12}",
-            "Epoch", "Train Loss", "Train Acc", "Test Acc");
+        println!(
+            "{:>7}  {:>14}  {:>10}  {:>12}",
+            "Epoch", "Train Loss", "Train Acc", "Test Acc"
+        );
         println!("{}", "─".repeat(50));
     }
 
     /// Reset accumulators at the start of each epoch.
     pub fn reset(&mut self) {
         self.sq_err_sum = 0;
-        self.n_correct  = 0;
-        self.n_samples  = 0;
+        self.n_correct = 0;
+        self.n_samples = 0;
     }
 
     /// Record a single sample's contribution to epoch statistics.
@@ -207,32 +227,45 @@ impl TrainingReporter {
     /// `correct` — whether the predicted class matched the true label.
     pub fn record(&mut self, sq_err: i64, correct: bool) {
         self.sq_err_sum += sq_err;
-        if correct { self.n_correct += 1; }
-        self.n_samples  += 1;
+        if correct {
+            self.n_correct += 1;
+        }
+        self.n_samples += 1;
     }
 
     /// Compute the current epoch's training accuracy (0.0–100.0).
     pub fn train_accuracy(&self) -> f64 {
-        if self.n_samples == 0 { return 0.0; }
+        if self.n_samples == 0 {
+            return 0.0;
+        }
         self.n_correct as f64 / self.n_samples as f64 * 100.0
     }
 
     /// Compute the current epoch's mean squared error (decoded to f64).
     pub fn train_mse(&self) -> f64 {
-        if self.n_samples == 0 { return 0.0; }
-        (self.sq_err_sum as f64 / self.n_samples as f64)
-            * 2f64.powi(-2 * self.shift as i32)
+        if self.n_samples == 0 {
+            return 0.0;
+        }
+        (self.sq_err_sum as f64 / self.n_samples as f64) * 2f64.powi(-2 * self.shift as i32)
     }
 
     /// Print a log row if this epoch should be logged.
     ///
     /// `test_acc` — optional test-set accuracy (0.0–100.0).  Pass `None` if
     ///              evaluation is skipped this epoch.
+    ///
+    /// Preserve the existing panic on a zero logging interval; `is_multiple_of(0)`
+    /// has different semantics from the remainder operator.
+    #[allow(clippy::manual_is_multiple_of)]
     pub fn maybe_print(&mut self, epoch: u32, test_acc: Option<f64>) {
         let train_acc = self.train_accuracy();
-        if train_acc > self.best_train_acc { self.best_train_acc = train_acc; }
-        if let Some(ta) = test_acc {
-            if ta > self.best_test_acc { self.best_test_acc = ta; }
+        if train_acc > self.best_train_acc {
+            self.best_train_acc = train_acc;
+        }
+        if let Some(ta) = test_acc
+            && ta > self.best_test_acc
+        {
+            self.best_test_acc = ta;
         }
 
         let is_last = epoch + 1 == self.total_epochs;
@@ -240,8 +273,13 @@ impl TrainingReporter {
             let test_str = test_acc
                 .map(|a| format!("{:>11.2}%", a))
                 .unwrap_or_else(|| "          —".to_string());
-            println!("{:>7}  {:>14.6}  {:>9.2}%  {}",
-                epoch, self.train_mse(), train_acc, test_str);
+            println!(
+                "{:>7}  {:>14.6}  {:>9.2}%  {}",
+                epoch,
+                self.train_mse(),
+                train_acc,
+                test_str
+            );
         }
     }
 
@@ -262,17 +300,17 @@ mod tests {
     #[test]
     fn mse_grad_is_difference() {
         let y = vec![Dyadic::new(100, 7), Dyadic::new(-50, 7)];
-        let t = vec![Dyadic::new(127, 7), Dyadic::new(  0, 7)];
+        let t = vec![Dyadic::new(127, 7), Dyadic::new(0, 7)];
         let g = mse_grad(&y, &t);
         assert_eq!(g[0].v, 100 - 127);
-        assert_eq!(g[1].v, -50 -   0);
+        assert_eq!(g[1].v, -50);
     }
 
     #[test]
     fn cross_entropy_grad_is_prob_minus_target() {
         // Predicted prob for class 0 ≈ 0.9 at shift 7 → mantissa ≈ 115
         let y = vec![Dyadic::new(115, 7), Dyadic::new(10, 7), Dyadic::new(3, 7)];
-        let t = vec![Dyadic::new(127, 7), Dyadic::new( 0, 7), Dyadic::new(0, 7)];
+        let t = vec![Dyadic::new(127, 7), Dyadic::new(0, 7), Dyadic::new(0, 7)];
         let g = cross_entropy_grad(&y, &t, 7);
         // Gradient for correct class should be negative (prob < target hot bit)
         assert!(g[0].v < 0);
@@ -283,11 +321,7 @@ mod tests {
 
     #[test]
     fn argmax_returns_max_index() {
-        let v = vec![
-            Dyadic::new(-10, 7),
-            Dyadic::new( 50, 7),
-            Dyadic::new( 20, 7),
-        ];
+        let v = vec![Dyadic::new(-10, 7), Dyadic::new(50, 7), Dyadic::new(20, 7)];
         assert_eq!(argmax(&v), 1);
     }
 

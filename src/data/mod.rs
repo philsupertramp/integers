@@ -8,7 +8,7 @@ pub mod dataset_loaders;
 use std::io;
 
 use crate::dyadic::{Dyadic, Tensor};
-use crate::rng::{rng_range};
+use crate::rng::rng_range;
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
@@ -26,22 +26,25 @@ impl std::error::Error for DataError {}
 impl std::fmt::Display for DataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DataError::Io(e) =>
-                write!(f, "IO error: {e}"),
-            DataError::InvalidMagic { expected, found } =>
-                write!(f, "Invalid magic number: expected {expected:#010x}, found {found:#010x}"),
-            DataError::DimensionMismatch { samples, labels } =>
-                write!(f, "Samples count ({samples}) does not match label count ({labels})"),
-            DataError::ParseError(s) =>
-                write!(f, "Parse error: {s}"),
-            DataError::EmptyDataset =>
-                write!(f, "Dataset is empty"),
+            DataError::Io(e) => write!(f, "IO error: {e}"),
+            DataError::InvalidMagic { expected, found } => write!(
+                f,
+                "Invalid magic number: expected {expected:#010x}, found {found:#010x}"
+            ),
+            DataError::DimensionMismatch { samples, labels } => write!(
+                f,
+                "Samples count ({samples}) does not match label count ({labels})"
+            ),
+            DataError::ParseError(s) => write!(f, "Parse error: {s}"),
+            DataError::EmptyDataset => write!(f, "Dataset is empty"),
         }
     }
 }
 
 impl From<io::Error> for DataError {
-    fn from(e: io::Error) -> Self { DataError::Io(e) }
+    fn from(e: io::Error) -> Self {
+        DataError::Io(e)
+    }
 }
 
 /// Convenience alias.
@@ -58,17 +61,21 @@ pub type DataResult<T> = Result<T, DataError>;
 /// | `targets`    | `[n_samples, n_classes]` | one-hot, hot bit = 127         |
 /// | `input_shift`| scalar                   | dyadic scale exponent for inputs |
 pub struct Dataset {
-    pub inputs:      Tensor,
-    pub labels:      Vec<u8>,
-    pub targets:     Tensor,
-    pub n_classes:   usize,
+    pub inputs: Tensor,
+    pub labels: Vec<u8>,
+    pub targets: Tensor,
+    pub n_classes: usize,
     /// Dyadic scale exponent `s` such that decoded value = mantissa · 2^{-s}.
     pub input_shift: i32,
 }
 
 impl Dataset {
-    pub fn len(&self) -> usize { self.labels.len() }
-    pub fn is_empty(&self) -> bool { self.labels.is_empty() }
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
 
     pub fn n_features(&self) -> usize {
         self.inputs.shape.get(1).copied().unwrap_or(0)
@@ -76,32 +83,25 @@ impl Dataset {
 
     /// Return a single input row as a `[1, n_features]` tensor.
     pub fn get_input(&self, idx: usize) -> Tensor {
-        let nf    = self.n_features();
+        let nf = self.n_features();
         let start = idx * nf;
-        Tensor::from_vec(
-            self.inputs.data[start..start + nf].to_vec(),
-            vec![1, nf],
-        )
+        Tensor::from_vec(self.inputs.data[start..start + nf].to_vec(), vec![1, nf])
     }
 
     /// Return a single one-hot target row as a `[1, n_classes]` tensor.
     pub fn get_target(&self, idx: usize) -> Tensor {
-        let nc    = self.n_classes;
+        let nc = self.n_classes;
         let start = idx * nc;
-        Tensor::from_vec(
-            self.targets.data[start..start + nc].to_vec(),
-            vec![1, nc],
-        )
+        Tensor::from_vec(self.targets.data[start..start + nc].to_vec(), vec![1, nc])
     }
 
     /// Predicted class from a `[1, n_classes]` output tensor (argmax).
     pub fn argmax(output: &Tensor) -> u8 {
-        let (max_idx, _) = output.data
+        let (max_idx, _) = output
+            .data
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| {
-                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap_or((0, &Dyadic::new(0, 0)));
         max_idx as u8
     }
@@ -112,7 +112,7 @@ impl Dataset {
     pub fn minibatch(&self, indices: &[usize]) -> (Tensor, Tensor) {
         let nf = self.n_features();
         let nc = self.n_classes;
-        let b  = indices.len();
+        let b = indices.len();
 
         let mut inp_data = Vec::<Dyadic>::with_capacity(b * nf);
         let mut tgt_data = Vec::<Dyadic>::with_capacity(b * nc);
@@ -156,11 +156,9 @@ pub fn shuffled_indices(n: usize) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::Tensor;
-    use crate::rng::XorShift64;
 
     #[test]
     fn shuffled_indices_length_and_contents() {
-        let mut rng = XorShift64::new(42);
         let idx = shuffled_indices(10);
         assert_eq!(idx.len(), 10);
         let mut sorted = idx.clone();
@@ -170,16 +168,24 @@ mod tests {
 
     #[test]
     fn shuffled_indices_is_not_identity() {
-        let mut rng = XorShift64::new(42);
         let idx = shuffled_indices(100);
-        assert_ne!(idx, (0..100).collect::<Vec<_>>(),
-            "shuffle returned identity permutation");
+        assert_ne!(
+            idx,
+            (0..100).collect::<Vec<_>>(),
+            "shuffle returned identity permutation"
+        );
     }
 
     #[test]
     fn argmax_picks_max() {
-        let t = Tensor::from_vec(vec![Dyadic {v: -10i32, s: 0}, Dyadic { v: 50, s: 0}, Dyadic{ v: 20, s: 0}], vec![1, 3]);
+        let t = Tensor::from_vec(
+            vec![
+                Dyadic { v: -10i32, s: 0 },
+                Dyadic { v: 50, s: 0 },
+                Dyadic { v: 20, s: 0 },
+            ],
+            vec![1, 3],
+        );
         assert_eq!(Dataset::argmax(&t), 1);
     }
 }
-

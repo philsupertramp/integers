@@ -1,9 +1,5 @@
+use crate::dyadic::{Dyadic, Tensor, TensorView, add, mul};
 use crate::nn::{Module, TrainingArithmetic, apply_updates};
-use crate::dyadic::{
-    add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
-    Tensor, TensorView
-};
-use crate::rng::rng_range;
 
 // ─── Dropout ──────────────────────────────────────────────────────────────────
 
@@ -12,65 +8,98 @@ use crate::rng::rng_range;
 /// Training: each element zeroed with probability `drop_rate`, survivors
 /// scaled by `1/(1 − drop_rate)`.  Eval: identity.
 pub struct Dropout {
-    pub drop_rate:   f32,
-    training:        bool,
-    mask:            Vec<bool>,
-    batch_masks:     Vec<Vec<bool>>,
-    scale:           Dyadic,
-    quant_shift:     u32,
-    keep_prob_bits:  u32,  // drop threshold in [0, u32::MAX]
+    pub drop_rate: f32,
+    training: bool,
+    mask: Vec<bool>,
+    batch_masks: Vec<Vec<bool>>,
+    scale: Dyadic,
+    quant_shift: u32,
+    keep_prob_bits: u32, // drop threshold in [0, u32::MAX]
 }
 
 impl Dropout {
     pub fn new(drop_rate: f32) -> Self {
-        assert!(drop_rate >= 0.0 && drop_rate < 1.0);
+        assert!((0.0..1.0).contains(&drop_rate));
         const SHIFT: u32 = 7;
-        let scale_f   = 1.0 / (1.0 - drop_rate);
-        let mantissa  = (scale_f * (1u32 << SHIFT) as f32).round() as i32;
+        let scale_f = 1.0 / (1.0 - drop_rate);
+        let mantissa = (scale_f * (1u32 << SHIFT) as f32).round() as i32;
         Self {
             drop_rate,
-            training:       true,
-            mask:           Vec::new(),
-            batch_masks:    Vec::new(),
-            scale:          Dyadic::new(mantissa, SHIFT),
-            quant_shift:    SHIFT,
+            training: true,
+            mask: Vec::new(),
+            batch_masks: Vec::new(),
+            scale: Dyadic::new(mantissa, SHIFT),
+            quant_shift: SHIFT,
             keep_prob_bits: (drop_rate * u32::MAX as f32) as u32,
         }
     }
 
     fn sample_mask(len: usize, keep_prob_bits: u32) -> Vec<bool> {
-        (0..len).map(|_| {
-            (crate::rng::rng_next() >> 32) as u32 >= keep_prob_bits
-        }).collect()
+        (0..len)
+            .map(|_| (crate::rng::rng_next() >> 32) as u32 >= keep_prob_bits)
+            .collect()
     }
 
     fn apply_mask(input: &TensorView, mask: &[bool], scale: Dyadic, qs: u32) -> Tensor {
-        assert_eq!(input.data.len(), mask.len(), "Dropout: mask/gradient shape mismatch");
+        assert_eq!(
+            input.data.len(),
+            mask.len(),
+            "Dropout: mask/gradient shape mismatch"
+        );
         Tensor::from_vec(
-            input.data.iter().zip(mask).map(|(&x, &keep)| {
-                if keep { mul(x, scale, qs) } else { Dyadic::new(0, x.s) }
-            }).collect(),
-            input.shape.to_vec()
+            input
+                .data
+                .iter()
+                .zip(mask)
+                .map(|(&x, &keep)| {
+                    if keep {
+                        mul(x, scale, qs)
+                    } else {
+                        Dyadic::new(0, x.s)
+                    }
+                })
+                .collect(),
+            input.shape.to_vec(),
         )
     }
 }
 
 impl Module for Dropout {
-    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
-    fn name(&self) -> &'static str { "Dropout" }
-    fn describe(&self) -> String { format!("Dropout(p={:.2}, training={})", self.drop_rate, self.training) }
-    fn set_training(&mut self, t: bool) { self.training = t; }
+    fn training_arithmetic(&self) -> TrainingArithmetic {
+        TrainingArithmetic::IntegerOnly
+    }
+    fn name(&self) -> &'static str {
+        "Dropout"
+    }
+    fn describe(&self) -> String {
+        format!(
+            "Dropout(p={:.2}, training={})",
+            self.drop_rate, self.training
+        )
+    }
+    fn set_training(&mut self, t: bool) {
+        self.training = t;
+    }
 
     fn forward(&mut self, input: &TensorView) -> Tensor {
-        if !self.training { self.mask.clear(); return input.to_tensor(); }
+        if !self.training {
+            self.mask.clear();
+            return input.to_tensor();
+        }
         self.mask = Self::sample_mask(input.data.len(), self.keep_prob_bits);
-        Self::apply_mask(&input, &self.mask, self.scale, self.quant_shift)
+        Self::apply_mask(input, &self.mask, self.scale, self.quant_shift)
     }
 
     fn backward(&mut self, grad: &TensorView) -> Tensor {
-        if !self.training { return grad.to_tensor(); }
-        assert_eq!(grad.data.len(), self.mask.len(), "Dropout: missing or incorrect forward mask");
-        Self::apply_mask(&grad, &self.mask, self.scale, self.quant_shift)
+        if !self.training {
+            return grad.to_tensor();
+        }
+        assert_eq!(
+            grad.data.len(),
+            self.mask.len(),
+            "Dropout: missing or incorrect forward mask"
+        );
+        Self::apply_mask(grad, &self.mask, self.scale, self.quant_shift)
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
@@ -79,22 +108,40 @@ impl Module for Dropout {
             return inputs.clone();
         }
         let mut masks = Vec::with_capacity(inputs.len());
-        let outputs: Tensor = inputs.iter().map(|x| {
-            let m = Self::sample_mask(x.data.len(), self.keep_prob_bits);
-            let out = Self::apply_mask(&x, &m, self.scale, self.quant_shift);
-            masks.push(m);
-            out
-        }).collect();
+        let outputs: Tensor = inputs
+            .iter()
+            .map(|x| {
+                let m = Self::sample_mask(x.data.len(), self.keep_prob_bits);
+                let out = Self::apply_mask(&x, &m, self.scale, self.quant_shift);
+                masks.push(m);
+                out
+            })
+            .collect();
         self.batch_masks = masks;
         outputs
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        if !self.training { return grads.clone(); }
-        assert!(grads.shape.len() >= 2, "Dropout: expected batched gradients");
-        assert_eq!(grads.shape[0], self.batch_masks.len(), "Dropout: batch mask count mismatch");
-        assert_eq!(grads.data.len(), grads.shape.iter().product::<usize>(), "Dropout: invalid gradient buffer shape");
-        grads.iter().enumerate()
+        if !self.training {
+            return grads.clone();
+        }
+        assert!(
+            grads.shape.len() >= 2,
+            "Dropout: expected batched gradients"
+        );
+        assert_eq!(
+            grads.shape[0],
+            self.batch_masks.len(),
+            "Dropout: batch mask count mismatch"
+        );
+        assert_eq!(
+            grads.data.len(),
+            grads.shape.iter().product::<usize>(),
+            "Dropout: invalid gradient buffer shape"
+        );
+        grads
+            .iter()
+            .enumerate()
             .map(|(n, g)| Self::apply_mask(&g, &self.batch_masks[n], self.scale, self.quant_shift))
             .collect()
     }
@@ -130,23 +177,23 @@ impl Module for Dropout {
 /// to `shift` after the f64 computation, resetting any accumulated scale drift.
 pub struct BatchNorm1D {
     pub num_features: usize,
-    pub shift:        u32,
-    pub momentum:     f32,    // EMA coefficient for running stats (typical: 0.1)
-    pub eps:          f64,    // numerical stability (typical: 1e-5)
-    pub gamma:        Tensor,
-    pub beta:         Tensor,
+    pub shift: u32,
+    pub momentum: f32, // EMA coefficient for running stats (typical: 0.1)
+    pub eps: f64,      // numerical stability (typical: 1e-5)
+    pub gamma: Tensor,
+    pub beta: Tensor,
     pub running_mean: Vec<f64>,
-    pub running_var:  Vec<f64>,
-    training:         bool,
+    pub running_var: Vec<f64>,
+    training: bool,
     // batch caches
-    x_hat_cache:  Vec<Vec<f64>>,   // normalised float values per (sample, feature)
-    inv_std_cache: Vec<f64>,        // 1/σ per feature
+    x_hat_cache: Vec<Vec<f64>>, // normalised float values per (sample, feature)
+    inv_std_cache: Vec<f64>,    // 1/σ per feature
     input_batch_cache: Tensor,
     // gradients + velocity
     grad_gamma: Tensor,
-    grad_beta:  Tensor,
-    vel_gamma:  Tensor,
-    vel_beta:   Tensor,
+    grad_beta: Tensor,
+    vel_gamma: Tensor,
+    vel_beta: Tensor,
     pub momentum_shift: Option<u32>,
 }
 
@@ -156,26 +203,32 @@ impl BatchNorm1D {
     /// `shift` should match the rest of the network.
     /// `momentum` is the EMA coefficient for running stats (PyTorch default: 0.1).
     pub fn new(num_features: usize, shift: u32) -> Self {
-        let scale = (1u32 << shift) as f64;  // value of 1.0 at this shift
-        let gamma = Tensor::from_vec(vec![Dyadic::new(scale.round() as i32, shift); num_features], vec![num_features]);
-        let beta  = Tensor::from_vec(vec![Dyadic::new(0, shift); num_features], vec![num_features]);
-        let z     = |n: usize| vec![Dyadic::new(0, shift); n];
+        let scale = (1u32 << shift) as f64; // value of 1.0 at this shift
+        let gamma = Tensor::from_vec(
+            vec![Dyadic::new(scale.round() as i32, shift); num_features],
+            vec![num_features],
+        );
+        let beta = Tensor::from_vec(
+            vec![Dyadic::new(0, shift); num_features],
+            vec![num_features],
+        );
         Self {
-            num_features, shift,
+            num_features,
+            shift,
             momentum: 0.1,
-            eps:      1e-5,
+            eps: 1e-5,
             gamma,
             beta,
             running_mean: vec![0.0; num_features],
-            running_var:  vec![1.0; num_features],
+            running_var: vec![1.0; num_features],
             training: true,
-            x_hat_cache:       vec![vec![0.0; num_features]; 0],
-            inv_std_cache:     vec![1.0; num_features],
+            x_hat_cache: Vec::new(),
+            inv_std_cache: vec![1.0; num_features],
             input_batch_cache: Tensor::new(),
             grad_gamma: Tensor::zeros(vec![num_features]),
-            grad_beta:  Tensor::zeros(vec![num_features]),
-            vel_gamma:  Tensor::zeros(vec![num_features]),
-            vel_beta:   Tensor::zeros(vec![num_features]),
+            grad_beta: Tensor::zeros(vec![num_features]),
+            vel_gamma: Tensor::zeros(vec![num_features]),
+            vel_beta: Tensor::zeros(vec![num_features]),
             momentum_shift: None,
         }
     }
@@ -187,13 +240,21 @@ impl BatchNorm1D {
 }
 
 impl Module for BatchNorm1D {
-    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::FloatingPoint }
-    fn name(&self) -> &'static str { "BatchNorm1D" }
-    fn describe(&self) -> String {
-        format!("BatchNorm1D(features={}, shift={}, eps={:.0e}, training={})",
-            self.num_features, self.shift, self.eps, self.training)
+    fn training_arithmetic(&self) -> TrainingArithmetic {
+        TrainingArithmetic::FloatingPoint
     }
-    fn set_training(&mut self, t: bool) { self.training = t; }
+    fn name(&self) -> &'static str {
+        "BatchNorm1D"
+    }
+    fn describe(&self) -> String {
+        format!(
+            "BatchNorm1D(features={}, shift={}, eps={:.0e}, training={})",
+            self.num_features, self.shift, self.eps, self.training
+        )
+    }
+    fn set_training(&mut self, t: bool) {
+        self.training = t;
+    }
 
     /// Single-sample forward — uses running statistics.
     /// During training this is an approximation; prefer `forward_batch`.
@@ -202,20 +263,31 @@ impl Module for BatchNorm1D {
         let mut out = Vec::with_capacity(self.num_features);
 
         for f in 0..self.num_features {
-            let x_f   = input.data[f].to_f64();
-            let mu    = if self.training { x_f } else { self.running_mean[f] };
-            let var   = if self.training { 0.0  } else { self.running_var[f] };
+            let x_f = input.data[f].to_f64();
+            let mu = if self.training {
+                x_f
+            } else {
+                self.running_mean[f]
+            };
+            let var = if self.training {
+                0.0
+            } else {
+                self.running_var[f]
+            };
             // With a single sample, variance is 0 — just update running stats
             // and pass through (γ·1 + β).
             if self.training {
                 let m = self.momentum as f64;
                 self.running_mean[f] = (1.0 - m) * self.running_mean[f] + m * x_f;
-                self.running_var[f]  = (1.0 - m) * self.running_var[f]  + m * 1.0;
+                self.running_var[f] = (1.0 - m) * self.running_var[f] + m * 1.0;
             }
             let inv_std = 1.0 / (var + self.eps).sqrt();
-            let x_hat   = (x_f - mu) * inv_std;
-            let xhd     = Dyadic::new((x_hat * scale).round() as i32, self.shift);
-            out.push(add(mul(self.gamma.data[f], xhd, self.shift), self.beta.data[f]));
+            let x_hat = (x_f - mu) * inv_std;
+            let xhd = Dyadic::new((x_hat * scale).round() as i32, self.shift);
+            out.push(add(
+                mul(self.gamma.data[f], xhd, self.shift),
+                self.beta.data[f],
+            ));
         }
         Tensor::from_vec(out, vec![self.num_features])
     }
@@ -224,55 +296,78 @@ impl Module for BatchNorm1D {
         // Single-sample STE: pass gradient through scaled by γ/σ.
         // (Full backward requires the batch; this is used when batch_size=1.)
         let scale = (1u32 << self.shift) as f64;
-        let gout = grad.data.iter().enumerate().map(|(f, &g)| {
-            let gamma_f   = self.gamma.data[f].to_f64();
-            let inv_std_f = self.inv_std_cache.get(f).copied().unwrap_or(1.0);
-            let dx = g.to_f64() * gamma_f * inv_std_f;
-            // Accumulate γ and β gradients
-            self.grad_gamma.data[f] = Dyadic::new(
-                self.grad_gamma.data[f].v.saturating_add((g.to_f64() * 0.0 * scale) as i32), // x_hat not cached
-                self.shift);
-            self.grad_beta.data[f]  = Dyadic::new(
-                self.grad_beta.data[f].v.saturating_add((g.to_f64() * scale).round() as i32),
-                self.shift);
-            Dyadic::new((dx * scale).round() as i32, self.shift)
-        }).collect();
+        let gout = grad
+            .data
+            .iter()
+            .enumerate()
+            .map(|(f, &g)| {
+                let gamma_f = self.gamma.data[f].to_f64();
+                let inv_std_f = self.inv_std_cache.get(f).copied().unwrap_or(1.0);
+                let dx = g.to_f64() * gamma_f * inv_std_f;
+                // Accumulate γ and β gradients
+                self.grad_gamma.data[f] = Dyadic::new(
+                    self.grad_gamma.data[f]
+                        .v
+                        .saturating_add((g.to_f64() * 0.0 * scale) as i32), // x_hat not cached
+                    self.shift,
+                );
+                self.grad_beta.data[f] = Dyadic::new(
+                    self.grad_beta.data[f]
+                        .v
+                        .saturating_add((g.to_f64() * scale).round() as i32),
+                    self.shift,
+                );
+                Dyadic::new((dx * scale).round() as i32, self.shift)
+            })
+            .collect();
         Tensor::from_vec(gout, grad.shape.to_vec())
     }
 
     /// Batch forward — computes proper batch statistics.  Always use this during training.
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
-        assert_eq!(inputs.shape.len(), 2, "BatchNorm1D: expected [batch, features]");
+        assert_eq!(
+            inputs.shape.len(),
+            2,
+            "BatchNorm1D: expected [batch, features]"
+        );
         let n = inputs.shape[0];
         assert!(n > 0, "BatchNorm1D: empty batch");
-        assert_eq!(inputs.shape[1], self.num_features, "BatchNorm1D: feature count mismatch");
-        assert_eq!(inputs.data.len(), n * self.num_features, "BatchNorm1D: buffer length mismatch");
+        assert_eq!(
+            inputs.shape[1], self.num_features,
+            "BatchNorm1D: feature count mismatch"
+        );
+        assert_eq!(
+            inputs.data.len(),
+            n * self.num_features,
+            "BatchNorm1D: buffer length mismatch"
+        );
         let scale = (1u32 << self.shift) as f64;
         let m_ema = self.momentum as f64;
 
         // Decode all inputs
-        let decoded: Vec<Vec<f64>> = inputs.iter()
+        let decoded: Vec<Vec<f64>> = inputs
+            .iter()
             .map(|x| x.data.iter().map(|d| d.to_f64()).collect())
             .collect();
 
-        let mut means     = vec![0.0f64; self.num_features];
-        let mut inv_stds  = vec![0.0f64; self.num_features];
+        let mut means = vec![0.0f64; self.num_features];
+        let mut inv_stds = vec![0.0f64; self.num_features];
         let mut x_hat_all = vec![vec![0.0f64; self.num_features]; n];
-        let mut outputs   = vec![Dyadic::new(0, self.shift); self.num_features * n];
+        let mut outputs = vec![Dyadic::new(0, self.shift); self.num_features * n];
 
         for f in 0..self.num_features {
             // Compute mean and variance over the batch.
-            let mu  = decoded.iter().map(|x| x[f]).sum::<f64>() / n as f64;
+            let mu = decoded.iter().map(|x| x[f]).sum::<f64>() / n as f64;
             let var = decoded.iter().map(|x| (x[f] - mu).powi(2)).sum::<f64>() / n as f64;
             let inv_std = 1.0 / (var + self.eps).sqrt();
 
-            means[f]    = mu;
+            means[f] = mu;
             inv_stds[f] = inv_std;
 
             // Update running statistics.
             if self.training {
                 self.running_mean[f] = (1.0 - m_ema) * self.running_mean[f] + m_ema * mu;
-                self.running_var[f]  = (1.0 - m_ema) * self.running_var[f]  + m_ema * var;
+                self.running_var[f] = (1.0 - m_ema) * self.running_var[f] + m_ema * var;
             }
 
             // Normalise each sample.
@@ -280,52 +375,64 @@ impl Module for BatchNorm1D {
                 let x_hat = (decoded[s][f] - mu) * inv_std;
                 x_hat_all[s][f] = x_hat;
                 let xhd = Dyadic::new((x_hat * scale).round() as i32, self.shift);
-                outputs[s * self.num_features + f] = add(mul(self.gamma.data[f], xhd, self.shift), self.beta.data[f]);
+                outputs[s * self.num_features + f] =
+                    add(mul(self.gamma.data[f], xhd, self.shift), self.beta.data[f]);
             }
         }
 
-        self.inv_std_cache     = inv_stds;
-        self.x_hat_cache       = x_hat_all;
+        self.inv_std_cache = inv_stds;
+        self.x_hat_cache = x_hat_all;
         self.input_batch_cache = inputs.clone();
         Tensor::from_vec(outputs, vec![n, self.num_features])
     }
 
     /// Batch backward — full batch-norm gradient.
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        assert_eq!(grads.shape, self.input_batch_cache.shape, "BatchNorm1D: gradients/forward batch mismatch");
+        assert_eq!(
+            grads.shape, self.input_batch_cache.shape,
+            "BatchNorm1D: gradients/forward batch mismatch"
+        );
         let n = grads.shape[0];
         let scale = (1u32 << self.shift) as f64;
-        let nf    = n as f64;
+        let nf = n as f64;
 
-        let dL_dy: Vec<Vec<f64>> = grads.iter()
+        let d_l_dy: Vec<Vec<f64>> = grads
+            .iter()
             .map(|g| g.data.iter().map(|d| d.to_f64()).collect())
             .collect();
 
         let mut grad_inputs = vec![Dyadic::new(0, self.shift); self.num_features * n];
 
         for f in 0..self.num_features {
-            let gamma_f   = self.gamma.data[f].to_f64();
+            let gamma_f = self.gamma.data[f].to_f64();
             let inv_std_f = self.inv_std_cache[f];
 
-            let sum_dL_dy:      f64 = (0..n).map(|s| dL_dy[s][f]).sum();
-            let sum_dL_dy_xhat: f64 = (0..n).map(|s| dL_dy[s][f] * self.x_hat_cache[s][f]).sum();
+            let sum_d_l_dy: f64 = (0..n).map(|s| d_l_dy[s][f]).sum();
+            let sum_d_l_dy_xhat: f64 = (0..n).map(|s| d_l_dy[s][f] * self.x_hat_cache[s][f]).sum();
 
             // Accumulate learnable parameter gradients.
             self.grad_gamma.data[f] = Dyadic::new(
-                self.grad_gamma.data[f].v.saturating_add((sum_dL_dy_xhat * scale).round() as i32),
-                self.shift);
+                self.grad_gamma.data[f]
+                    .v
+                    .saturating_add((sum_d_l_dy_xhat * scale).round() as i32),
+                self.shift,
+            );
             self.grad_beta.data[f] = Dyadic::new(
-                self.grad_beta.data[f].v.saturating_add((sum_dL_dy * scale).round() as i32),
-                self.shift);
+                self.grad_beta.data[f]
+                    .v
+                    .saturating_add((sum_d_l_dy * scale).round() as i32),
+                self.shift,
+            );
 
             // Full BN backward:
             // ∂L/∂x_n = (γ/σ) · [ ∂L/∂ŷ_n − (1/N)·∂L/∂β − (x̂_n/N)·∂L/∂γ ]
             for s in 0..n {
                 let dx = (gamma_f * inv_std_f)
-                    * (dL_dy[s][f]
-                       - sum_dL_dy / nf
-                       - self.x_hat_cache[s][f] * sum_dL_dy_xhat / nf);
-                grad_inputs[s * self.num_features + f] = Dyadic::new((dx * scale).round() as i32, self.shift);
+                    * (d_l_dy[s][f]
+                        - sum_d_l_dy / nf
+                        - self.x_hat_cache[s][f] * sum_d_l_dy_xhat / nf);
+                grad_inputs[s * self.num_features + f] =
+                    Dyadic::new((dx * scale).round() as i32, self.shift);
             }
         }
 
@@ -333,8 +440,20 @@ impl Module for BatchNorm1D {
     }
 
     fn update(&mut self, lr: u32) {
-        apply_updates(&mut self.gamma.data, &self.grad_gamma, &mut self.vel_gamma.data, lr, self.momentum_shift);
-        apply_updates(&mut self.beta.data,  &self.grad_beta,  &mut self.vel_beta.data,  lr, self.momentum_shift);
+        apply_updates(
+            &mut self.gamma.data,
+            &self.grad_gamma,
+            &mut self.vel_gamma.data,
+            lr,
+            self.momentum_shift,
+        );
+        apply_updates(
+            &mut self.beta.data,
+            &self.grad_beta,
+            &mut self.vel_beta.data,
+            lr,
+            self.momentum_shift,
+        );
     }
 
     fn zero_grad(&mut self) {
@@ -355,26 +474,26 @@ impl Module for BatchNorm1D {
 /// is that the "batch" for channel `c` consists of all `N × H × W` spatial
 /// positions across all N samples.
 pub struct BatchNorm2D {
-    pub channels:  usize,
-    pub h:         usize,
-    pub w:         usize,
-    pub shift:     u32,
-    pub momentum:  f32,
-    pub eps:       f64,
-    pub gamma:     Tensor,   // [channels]
-    pub beta:      Tensor,   // [channels]
+    pub channels: usize,
+    pub h: usize,
+    pub w: usize,
+    pub shift: u32,
+    pub momentum: f32,
+    pub eps: f64,
+    pub gamma: Tensor, // [channels]
+    pub beta: Tensor,  // [channels]
     pub running_mean: Vec<f64>,
-    pub running_var:  Vec<f64>,
-    training:      bool,
+    pub running_var: Vec<f64>,
+    training: bool,
     // caches
-    x_hat_cache:       Vec<Vec<f64>>,   // [n_samples, C*H*W]
-    inv_std_cache:     Vec<f64>,         // [channels]
+    x_hat_cache: Vec<Vec<f64>>, // [n_samples, C*H*W]
+    inv_std_cache: Vec<f64>,    // [channels]
     input_batch_cache: Tensor,
     // gradients + velocity
     grad_gamma: Tensor,
-    grad_beta:  Tensor,
-    vel_gamma:  Tensor,
-    vel_beta:   Tensor,
+    grad_beta: Tensor,
+    vel_gamma: Tensor,
+    vel_beta: Tensor,
 
     pub momentum_shift: Option<u32>,
 }
@@ -382,26 +501,31 @@ pub struct BatchNorm2D {
 impl BatchNorm2D {
     pub fn new(channels: usize, h: usize, w: usize, shift: u32) -> Self {
         let scale = (1u32 << shift) as f64;
-        let gamma = Tensor::from_vec(vec![Dyadic::new(scale.round() as i32, shift); channels], vec![channels]);
-        let beta  = Tensor::from_vec(vec![Dyadic::new(0, shift); channels], vec![channels]);
+        let gamma = Tensor::from_vec(
+            vec![Dyadic::new(scale.round() as i32, shift); channels],
+            vec![channels],
+        );
+        let beta = Tensor::from_vec(vec![Dyadic::new(0, shift); channels], vec![channels]);
 
-        let z     = |n: usize| vec![Dyadic::new(0, shift); n];
         Self {
-            channels, h, w, shift,
+            channels,
+            h,
+            w,
+            shift,
             momentum: 0.1,
-            eps:      1e-5,
+            eps: 1e-5,
             gamma,
             beta,
             running_mean: vec![0.0; channels],
-            running_var:  vec![1.0; channels],
+            running_var: vec![1.0; channels],
             training: true,
-            x_hat_cache:       Vec::new(),
-            inv_std_cache:     vec![1.0; channels],
+            x_hat_cache: Vec::new(),
+            inv_std_cache: vec![1.0; channels],
             input_batch_cache: Tensor::new(),
             grad_gamma: Tensor::zeros(vec![channels]),
-            grad_beta:  Tensor::zeros(vec![channels]),
-            vel_gamma:  Tensor::zeros(vec![channels]),
-            vel_beta:   Tensor::zeros(vec![channels]),
+            grad_beta: Tensor::zeros(vec![channels]),
+            vel_gamma: Tensor::zeros(vec![channels]),
+            vel_beta: Tensor::zeros(vec![channels]),
             momentum_shift: None,
         }
     }
@@ -411,50 +535,60 @@ impl BatchNorm2D {
         self
     }
 
-    #[inline] fn spatial_idx(&self, c: usize, h: usize, w: usize) -> usize {
+    #[inline]
+    fn spatial_idx(&self, c: usize, h: usize, w: usize) -> usize {
         c * self.h * self.w + h * self.w + w
     }
 }
 
 impl Module for BatchNorm2D {
-    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::FloatingPoint }
-    fn name(&self) -> &'static str { "BatchNorm2D" }
-    fn describe(&self) -> String {
-        format!("BatchNorm2D(C={}, H={}, W={}, shift={}, training={})",
-            self.channels, self.h, self.w, self.shift, self.training)
+    fn training_arithmetic(&self) -> TrainingArithmetic {
+        TrainingArithmetic::FloatingPoint
     }
-    fn set_training(&mut self, t: bool) { self.training = t; }
+    fn name(&self) -> &'static str {
+        "BatchNorm2D"
+    }
+    fn describe(&self) -> String {
+        format!(
+            "BatchNorm2D(C={}, H={}, W={}, shift={}, training={})",
+            self.channels, self.h, self.w, self.shift, self.training
+        )
+    }
+    fn set_training(&mut self, t: bool) {
+        self.training = t;
+    }
 
     /// Single-sample forward using running statistics.
     fn forward(&mut self, input: &TensorView) -> Tensor {
         let scale = (1u32 << self.shift) as f64;
-        let hw    = self.h * self.w;
+        let hw = self.h * self.w;
         let m_ema = self.momentum as f64;
         let mut out = Tensor::from_vec(
             vec![Dyadic::new(0, self.shift); input.data.len()],
-            vec![input.data.len()]
+            vec![input.data.len()],
         );
 
         for c in 0..self.channels {
             let (mu, inv_std) = if self.training {
                 // With a single sample, compute stats over H*W spatial positions.
-                let vals: Vec<f64> = (0..hw)
-                    .map(|p| input.data[c * hw + p].to_f64())
-                    .collect();
-                let mu  = vals.iter().sum::<f64>() / hw as f64;
+                let vals: Vec<f64> = (0..hw).map(|p| input.data[c * hw + p].to_f64()).collect();
+                let mu = vals.iter().sum::<f64>() / hw as f64;
                 let var = vals.iter().map(|&v| (v - mu).powi(2)).sum::<f64>() / hw as f64;
                 self.running_mean[c] = (1.0 - m_ema) * self.running_mean[c] + m_ema * mu;
-                self.running_var[c]  = (1.0 - m_ema) * self.running_var[c]  + m_ema * var;
+                self.running_var[c] = (1.0 - m_ema) * self.running_var[c] + m_ema * var;
                 (mu, 1.0 / (var + self.eps).sqrt())
             } else {
-                (self.running_mean[c], 1.0 / (self.running_var[c] + self.eps).sqrt())
+                (
+                    self.running_mean[c],
+                    1.0 / (self.running_var[c] + self.eps).sqrt(),
+                )
             };
 
             for p in 0..hw {
-                let idx   = self.spatial_idx(c, p / self.w, p % self.w);
+                let idx = self.spatial_idx(c, p / self.w, p % self.w);
                 let x_hat = (input.data[idx].to_f64() - mu) * inv_std;
-                let xhd   = Dyadic::new((x_hat * scale).round() as i32, self.shift);
-                out.data[idx]  = add(mul(self.gamma.data[c], xhd, self.shift), self.beta.data[c]);
+                let xhd = Dyadic::new((x_hat * scale).round() as i32, self.shift);
+                out.data[idx] = add(mul(self.gamma.data[c], xhd, self.shift), self.beta.data[c]);
             }
         }
         out
@@ -463,22 +597,25 @@ impl Module for BatchNorm2D {
     fn backward(&mut self, grad: &TensorView) -> Tensor {
         // Single-sample STE: γ/σ passthrough.
         let scale = (1u32 << self.shift) as f64;
-        let hw    = self.h * self.w;
+        let hw = self.h * self.w;
         let mut out = Tensor::from_vec(
             vec![Dyadic::new(0, self.shift); grad.data.len()],
-            vec![grad.data.len()]
+            vec![grad.data.len()],
         );
 
         for c in 0..self.channels {
-            let gamma_f   = self.gamma.data[c].to_f64();
+            let gamma_f = self.gamma.data[c].to_f64();
             let inv_std_c = self.inv_std_cache[c];
             for p in 0..hw {
                 let idx = self.spatial_idx(c, p / self.w, p % self.w);
-                let dx  = grad.data[idx].to_f64() * gamma_f * inv_std_c;
+                let dx = grad.data[idx].to_f64() * gamma_f * inv_std_c;
                 // Accumulate β gradient
                 self.grad_beta.data[c] = Dyadic::new(
-                    self.grad_beta.data[c].v.saturating_add((grad.data[idx].to_f64() * scale).round() as i32),
-                    self.shift);
+                    self.grad_beta.data[c]
+                        .v
+                        .saturating_add((grad.data[idx].to_f64() * scale).round() as i32),
+                    self.shift,
+                );
                 out.data[idx] = Dyadic::new((dx * scale).round() as i32, self.shift);
             }
         }
@@ -486,40 +623,53 @@ impl Module for BatchNorm2D {
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
-        assert_eq!(inputs.shape.len(), 2, "BatchNorm2D: expected [batch, flattened C*H*W]");
+        assert_eq!(
+            inputs.shape.len(),
+            2,
+            "BatchNorm2D: expected [batch, flattened C*H*W]"
+        );
         let n = inputs.shape[0];
         assert!(n > 0, "BatchNorm2D: empty batch");
-        assert_eq!(inputs.shape[1], self.channels * self.h * self.w, "BatchNorm2D: feature count mismatch");
-        assert_eq!(inputs.data.len(), n * inputs.shape[1], "BatchNorm2D: buffer length mismatch");
-        let hw    = self.h * self.w;
+        assert_eq!(
+            inputs.shape[1],
+            self.channels * self.h * self.w,
+            "BatchNorm2D: feature count mismatch"
+        );
+        assert_eq!(
+            inputs.data.len(),
+            n * inputs.shape[1],
+            "BatchNorm2D: buffer length mismatch"
+        );
+        let hw = self.h * self.w;
         let scale = (1u32 << self.shift) as f64;
         let m_ema = self.momentum as f64;
-        let n_hw  = (n * hw) as f64;
+        let n_hw = (n * hw) as f64;
 
-        let decoded: Vec<Vec<f64>> = inputs.iter()
+        let decoded: Vec<Vec<f64>> = inputs
+            .iter()
             .map(|x| x.data.iter().map(|d| d.to_f64()).collect())
             .collect();
 
-        let mut inv_stds  = vec![0.0f64; self.channels];
+        let mut inv_stds = vec![0.0f64; self.channels];
         let mut x_hat_all = vec![vec![0.0f64; self.channels * hw]; n];
-        let mut outputs   = Tensor::from_vec(
+        let mut outputs = Tensor::from_vec(
             vec![Dyadic::new(0, self.shift); self.channels * hw * n],
-            vec![n, self.channels * hw]
+            vec![n, self.channels * hw],
         );
 
         for c in 0..self.channels {
             // Collect all N*H*W values for this channel.
-            let mut mu  = 0.0f64;
+            let mut mu = 0.0f64;
             let mut var = 0.0f64;
-            for s in 0..n {
+            for sample in &decoded {
                 for p in 0..hw {
-                    mu += decoded[s][c * hw + p];
+                    mu += sample[c * hw + p];
                 }
             }
             mu /= n_hw;
-            for s in 0..n {
+            for sample in &decoded {
                 for p in 0..hw {
-                    var += (decoded[s][c * hw + p] - mu).powi(2);
+                    var += (sample[c * hw + p] - mu).powi(2);
                 }
             }
             var /= n_hw;
@@ -528,74 +678,90 @@ impl Module for BatchNorm2D {
 
             if self.training {
                 self.running_mean[c] = (1.0 - m_ema) * self.running_mean[c] + m_ema * mu;
-                self.running_var[c]  = (1.0 - m_ema) * self.running_var[c]  + m_ema * var;
+                self.running_var[c] = (1.0 - m_ema) * self.running_var[c] + m_ema * var;
             }
 
             for s in 0..n {
                 for p in 0..hw {
-                    let idx   = c * hw + p;
+                    let idx = c * hw + p;
                     let x_hat = (decoded[s][idx] - mu) * inv_std;
                     x_hat_all[s][idx] = x_hat;
                     let xhd = Dyadic::new((x_hat * scale).round() as i32, self.shift);
                     // original: outputs[s][idx]
-                    outputs.data[s * self.channels * hw + idx] = add(mul(self.gamma.data[c], xhd, self.shift), self.beta.data[c]);
+                    outputs.data[s * self.channels * hw + idx] =
+                        add(mul(self.gamma.data[c], xhd, self.shift), self.beta.data[c]);
                 }
             }
         }
 
-        self.inv_std_cache     = inv_stds;
-        self.x_hat_cache       = x_hat_all;
+        self.inv_std_cache = inv_stds;
+        self.x_hat_cache = x_hat_all;
         self.input_batch_cache = inputs.clone();
         outputs
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        assert_eq!(grads.shape, self.input_batch_cache.shape, "BatchNorm2D: gradients/forward batch mismatch");
+        assert_eq!(
+            grads.shape, self.input_batch_cache.shape,
+            "BatchNorm2D: gradients/forward batch mismatch"
+        );
         let n = grads.shape[0];
-        let hw    = self.h * self.w;
+        let hw = self.h * self.w;
         let scale = (1u32 << self.shift) as f64;
-        let n_hw  = (n * hw) as f64;
+        let n_hw = (n * hw) as f64;
 
-        let dL_dy: Vec<Vec<f64>> = grads.iter()
+        let d_l_dy: Vec<Vec<f64>> = grads
+            .iter()
             .map(|g| g.data.iter().map(|d| d.to_f64()).collect())
             .collect();
 
         let mut grad_inputs = Tensor::from_vec(
             vec![Dyadic::new(0, self.shift); self.channels * hw * n],
-            vec![n, self.channels*hw]
+            vec![n, self.channels * hw],
         );
 
+        assert_eq!(d_l_dy.len(), n);
+        assert_eq!(self.x_hat_cache.len(), n);
+
         for c in 0..self.channels {
-            let gamma_c   = self.gamma.data[c].to_f64();
+            let gamma_c = self.gamma.data[c].to_f64();
             let inv_std_c = self.inv_std_cache[c];
 
             // Sum gradients over all N*H*W positions for γ and β.
-            let mut sum_dL_dy      = 0.0f64;
-            let mut sum_dL_dy_xhat = 0.0f64;
-            for s in 0..n {
+            let mut sum_d_l_dy = 0.0f64;
+            let mut sum_d_l_dy_xhat = 0.0f64;
+            for (sample, x_hat_sample) in d_l_dy.iter().zip(&self.x_hat_cache) {
                 for p in 0..hw {
                     let idx = c * hw + p;
-                    sum_dL_dy      += dL_dy[s][idx];
-                    sum_dL_dy_xhat += dL_dy[s][idx] * self.x_hat_cache[s][idx];
+                    sum_d_l_dy += sample[idx];
+                    sum_d_l_dy_xhat += sample[idx] * x_hat_sample[idx];
                 }
             }
 
             self.grad_gamma.data[c] = Dyadic::new(
-                self.grad_gamma.data[c].v.saturating_add((sum_dL_dy_xhat * scale).round() as i32),
-                self.shift);
+                self.grad_gamma.data[c]
+                    .v
+                    .saturating_add((sum_d_l_dy_xhat * scale).round() as i32),
+                self.shift,
+            );
             self.grad_beta.data[c] = Dyadic::new(
-                self.grad_beta.data[c].v.saturating_add((sum_dL_dy * scale).round() as i32),
-                self.shift);
+                self.grad_beta.data[c]
+                    .v
+                    .saturating_add((sum_d_l_dy * scale).round() as i32),
+                self.shift,
+            );
 
             // Full BN backward per spatial position.
-            for s in 0..n {
+            for (s, sample) in d_l_dy.iter().enumerate() {
                 for p in 0..hw {
                     let idx = c * hw + p;
-                    let dx  = (gamma_c * inv_std_c)
-                        * (dL_dy[s][idx]
-                           - sum_dL_dy / n_hw
-                           - self.x_hat_cache[s][idx] * sum_dL_dy_xhat / n_hw);
-                    grad_inputs.data[s * self.channels * hw + idx] = Dyadic::new((dx * scale).round() as i32, self.shift);
+                    let dx = (gamma_c * inv_std_c)
+                        * (sample[idx]
+                            - sum_d_l_dy / n_hw
+                            - self.x_hat_cache[s][idx] * sum_d_l_dy_xhat / n_hw);
+
+                    grad_inputs.data[s * self.channels * hw + idx] =
+                        Dyadic::new((dx * scale).round() as i32, self.shift);
                 }
             }
         }
@@ -604,8 +770,20 @@ impl Module for BatchNorm2D {
     }
 
     fn update(&mut self, lr: u32) {
-        apply_updates(&mut self.gamma.data, &self.grad_gamma, &mut self.vel_gamma.data, lr, self.momentum_shift);
-        apply_updates(&mut self.beta.data,  &self.grad_beta,  &mut self.vel_beta.data,  lr, self.momentum_shift);
+        apply_updates(
+            &mut self.gamma.data,
+            &self.grad_gamma,
+            &mut self.vel_gamma.data,
+            lr,
+            self.momentum_shift,
+        );
+        apply_updates(
+            &mut self.beta.data,
+            &self.grad_beta,
+            &mut self.vel_beta.data,
+            lr,
+            self.momentum_shift,
+        );
     }
 
     fn zero_grad(&mut self) {
@@ -613,7 +791,6 @@ impl Module for BatchNorm2D {
         self.grad_beta.data.iter_mut().for_each(|g| g.v = 0);
     }
 }
-
 
 // Compare v * 2^(-s) without floats or unbounded shifts.
 // Equal highest binary exponents imply a scale difference of at most 31.
@@ -624,7 +801,11 @@ fn dyadic_greater(a: Dyadic, b: Dyadic) -> bool {
     let a_order = (31 - a.v.unsigned_abs().leading_zeros()) as i64 - a.s as i64;
     let b_order = (31 - b.v.unsigned_abs().leading_zeros()) as i64 - b.s as i64;
     if a_order != b_order {
-        return if a.v > 0 { a_order > b_order } else { a_order < b_order };
+        return if a.v > 0 {
+            a_order > b_order
+        } else {
+            a_order < b_order
+        };
     }
     let shift = a.s.max(b.s);
     ((a.v as i64) << (shift - a.s)) > ((b.v as i64) << (shift - b.s))
@@ -632,38 +813,63 @@ fn dyadic_greater(a: Dyadic, b: Dyadic) -> bool {
 
 pub struct MaxPool2D {
     pub channels: usize,
-    pub in_h:     usize,
-    pub in_w:     usize,
-    pub kernel:   usize,
-    pub stride:   usize,
-    out_h:        usize,
-    out_w:        usize,
-    max_mask:       Vec<usize>,
+    pub in_h: usize,
+    pub in_w: usize,
+    pub kernel: usize,
+    pub stride: usize,
+    out_h: usize,
+    out_w: usize,
+    max_mask: Vec<usize>,
     batch_max_masks: Vec<Vec<usize>>,
 }
 
 impl MaxPool2D {
     pub fn new(channels: usize, in_h: usize, in_w: usize, kernel: usize, stride: usize) -> Self {
-        assert!(channels > 0 && kernel > 0 && stride > 0, "MaxPool2D: nonzero channels, kernel and stride required");
-        assert!(in_h >= kernel && in_w >= kernel, "MaxPool2D: kernel must fit input");
+        assert!(
+            channels > 0 && kernel > 0 && stride > 0,
+            "MaxPool2D: nonzero channels, kernel and stride required"
+        );
+        assert!(
+            in_h >= kernel && in_w >= kernel,
+            "MaxPool2D: kernel must fit input"
+        );
         let out_h = (in_h - kernel) / stride + 1;
         let out_w = (in_w - kernel) / stride + 1;
-        Self { channels, in_h, in_w, kernel, stride, out_h, out_w,
-               max_mask: Vec::new(), batch_max_masks: Vec::new() }
+        Self {
+            channels,
+            in_h,
+            in_w,
+            kernel,
+            stride,
+            out_h,
+            out_w,
+            max_mask: Vec::new(),
+            batch_max_masks: Vec::new(),
+        }
     }
 
-    pub fn output_len(&self) -> usize { self.channels * self.out_h * self.out_w }
+    pub fn output_len(&self) -> usize {
+        self.channels * self.out_h * self.out_w
+    }
 
-    #[inline] fn in_idx (&self, c: usize, h: usize, w: usize) -> usize { c * self.in_h  * self.in_w  + h * self.in_w  + w }
-    #[inline] fn out_idx(&self, c: usize, h: usize, w: usize) -> usize { c * self.out_h * self.out_w + h * self.out_w + w }
+    #[inline]
+    fn in_idx(&self, c: usize, h: usize, w: usize) -> usize {
+        c * self.in_h * self.in_w + h * self.in_w + w
+    }
+    #[inline]
+    fn out_idx(&self, c: usize, h: usize, w: usize) -> usize {
+        c * self.out_h * self.out_w + h * self.out_w + w
+    }
 
-    fn pool_forward(
-        &self, input: &TensorView, mask: &mut Vec<usize>,
-    ) -> Tensor {
-        assert_eq!(input.data.len(), self.channels * self.in_h * self.in_w, "MaxPool2D: input shape mismatch");
+    fn pool_forward(&self, input: &TensorView, mask: &mut Vec<usize>) -> Tensor {
+        assert_eq!(
+            input.data.len(),
+            self.channels * self.in_h * self.in_w,
+            "MaxPool2D: input shape mismatch"
+        );
         let mut out = Tensor::from_vec(
             vec![Dyadic::new(0, 0); self.output_len()],
-            vec![self.output_len()]
+            vec![self.output_len()],
         );
         *mask = vec![0usize; self.output_len()];
         for c in 0..self.channels {
@@ -675,7 +881,9 @@ impl MaxPool2D {
                     for kh in 0..self.kernel {
                         for kw in 0..self.kernel {
                             let idx = self.in_idx(c, ih0 + kh, iw0 + kw);
-                            if dyadic_greater(input.data[idx], input.data[mxi]) { mxi = idx; }
+                            if dyadic_greater(input.data[idx], input.data[mxi]) {
+                                mxi = idx;
+                            }
                         }
                     }
                     let op = self.out_idx(c, oh, ow);
@@ -687,15 +895,21 @@ impl MaxPool2D {
         out
     }
 
-    fn pool_backward(
-        &self, grad: &TensorView, mask: &[usize],
-    ) -> Tensor {
-        assert_eq!(grad.data.len(), self.output_len(), "MaxPool2D: output gradient size mismatch");
-        assert_eq!(mask.len(), self.output_len(), "MaxPool2D: missing forward mask");
+    fn pool_backward(&self, grad: &TensorView, mask: &[usize]) -> Tensor {
+        assert_eq!(
+            grad.data.len(),
+            self.output_len(),
+            "MaxPool2D: output gradient size mismatch"
+        );
+        assert_eq!(
+            mask.len(),
+            self.output_len(),
+            "MaxPool2D: missing forward mask"
+        );
         let g_s = grad.data.first().map_or(0, |g| g.s);
         let mut gi = Tensor::from_vec(
             vec![Dyadic::new(0, g_s); self.channels * self.in_h * self.in_w],
-            vec![self.channels * self.in_h * self.in_w]
+            vec![self.channels * self.in_h * self.in_w],
         );
         for (op, &mi) in mask.iter().enumerate() {
             gi.data[mi] = add(gi.data[mi], grad.data[op]);
@@ -705,11 +919,17 @@ impl MaxPool2D {
 }
 
 impl Module for MaxPool2D {
-    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
-    fn name(&self) -> &'static str { "MaxPool2D" }
+    fn training_arithmetic(&self) -> TrainingArithmetic {
+        TrainingArithmetic::IntegerOnly
+    }
+    fn name(&self) -> &'static str {
+        "MaxPool2D"
+    }
     fn describe(&self) -> String {
-        format!("MaxPool2D(C={}, {}×{}→{}×{}, k={}, s={})",
-            self.channels, self.in_h, self.in_w, self.out_h, self.out_w, self.kernel, self.stride)
+        format!(
+            "MaxPool2D(C={}, {}×{}→{}×{}, k={}, s={})",
+            self.channels, self.in_h, self.in_w, self.out_h, self.out_w, self.kernel, self.stride
+        )
     }
 
     fn forward(&mut self, input: &TensorView) -> Tensor {
@@ -726,25 +946,53 @@ impl Module for MaxPool2D {
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {
         let sample = self.channels * self.in_h * self.in_w;
         assert!(inputs.shape.len() >= 2, "MaxPool2D: expected batched input");
-        assert_eq!(inputs.shape[1..].iter().product::<usize>(), sample, "MaxPool2D: input sample shape mismatch");
-        assert_eq!(inputs.data.len(), inputs.shape[0] * sample, "MaxPool2D: input buffer mismatch");
+        assert_eq!(
+            inputs.shape[1..].iter().product::<usize>(),
+            sample,
+            "MaxPool2D: input sample shape mismatch"
+        );
+        assert_eq!(
+            inputs.data.len(),
+            inputs.shape[0] * sample,
+            "MaxPool2D: input buffer mismatch"
+        );
         let mut all_masks = Vec::with_capacity(inputs.len());
-        let outputs: Tensor = inputs.iter().map(|x| {
-            let mut mask = Vec::new();
-            let out = self.pool_forward(&x, &mut mask);
-            all_masks.push(mask);
-            out
-        }).collect();
+        let outputs: Tensor = inputs
+            .iter()
+            .map(|x| {
+                let mut mask = Vec::new();
+                let out = self.pool_forward(&x, &mut mask);
+                all_masks.push(mask);
+                out
+            })
+            .collect();
         self.batch_max_masks = all_masks;
         outputs
     }
 
     fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
-        assert!(grads.shape.len() >= 2, "MaxPool2D: expected batched gradients");
-        assert_eq!(grads.shape[0], self.batch_max_masks.len(), "MaxPool2D: batch size mismatch");
-        assert_eq!(grads.shape[1..].iter().product::<usize>(), self.output_len(), "MaxPool2D: gradient sample size mismatch");
-        assert_eq!(grads.data.len(), grads.shape[0] * self.output_len(), "MaxPool2D: gradient buffer mismatch");
-        grads.iter().enumerate()
+        assert!(
+            grads.shape.len() >= 2,
+            "MaxPool2D: expected batched gradients"
+        );
+        assert_eq!(
+            grads.shape[0],
+            self.batch_max_masks.len(),
+            "MaxPool2D: batch size mismatch"
+        );
+        assert_eq!(
+            grads.shape[1..].iter().product::<usize>(),
+            self.output_len(),
+            "MaxPool2D: gradient sample size mismatch"
+        );
+        assert_eq!(
+            grads.data.len(),
+            grads.shape[0] * self.output_len(),
+            "MaxPool2D: gradient buffer mismatch"
+        );
+        grads
+            .iter()
+            .enumerate()
             .map(|(n, g)| self.pool_backward(&g, &self.batch_max_masks[n]))
             .collect()
     }
@@ -752,4 +1000,3 @@ impl Module for MaxPool2D {
     fn update(&mut self, _: u32) {}
     fn zero_grad(&mut self) {}
 }
-

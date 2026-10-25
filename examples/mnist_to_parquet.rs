@@ -1,16 +1,15 @@
 /// Helper script to convert MNIST IDX binary format to Parquet
-/// 
+///
 /// Run this once to convert your MNIST data:
-/// 
+///
 /// ```bash
 /// cargo run --example mnist_convert_to_parquet -- data/mnist data/
 /// ```
-
 use std::fs::File;
-use std::io::{self, Read, BufReader};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 
-use arrow::array::{UInt8Array};
+use arrow::array::UInt8Array;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_writer::ArrowWriter;
@@ -108,7 +107,7 @@ fn convert_split(
 
     // Build columns: 784 pixel features + 1 label
     let mut pixel_columns: Vec<UInt8Array> = Vec::new();
-    
+
     // For each pixel position, extract all values across samples
     for pixel_idx in 0..n_features {
         let mut values = Vec::new();
@@ -120,9 +119,7 @@ fn convert_split(
     }
 
     // Label column
-    let label_column = UInt8Array::from(
-        labels.iter().map(|&l| Some(l)).collect::<Vec<_>>()
-    );
+    let label_column = UInt8Array::from(labels.iter().map(|&l| Some(l)).collect::<Vec<_>>());
 
     // Build schema
     let mut fields = Vec::new();
