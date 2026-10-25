@@ -222,7 +222,7 @@ impl BatchNorm1D {
             running_mean: vec![0.0; num_features],
             running_var: vec![1.0; num_features],
             training: true,
-            x_hat_cache: vec![vec![0.0; num_features]; 0],
+            x_hat_cache: Vec::new(),
             inv_std_cache: vec![1.0; num_features],
             input_batch_cache: Tensor::new(),
             grad_gamma: Tensor::zeros(vec![num_features]),
