@@ -214,10 +214,10 @@ fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_s
             .map(|x| (x[feature] - mean).powi(2))
             .sum::<f64>()
             / 3.0;
-        for sample in 0..3 {
+        for (sample, values) in inputs.iter().enumerate() {
             near(
                 output1.data[sample * 2 + feature],
-                (inputs[sample][feature] - mean) / (variance + 1e-5).sqrt(),
+                (values[feature] - mean) / (variance + 1e-5).sqrt(),
                 0.51,
             );
         }
@@ -243,12 +243,12 @@ fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_s
         ];
         let mean = vals.iter().sum::<f64>() / 4.0;
         let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / 4.0;
-        for sample in 0..2 {
+        for (sample, values) in decoded.iter().enumerate() {
             for spatial in 0..2 {
                 let idx = sample * 4 + channel * 2 + spatial;
                 near(
                     output2.data[idx],
-                    (decoded[sample][channel * 2 + spatial] - mean) / (var + 1e-5).sqrt(),
+                    (values[channel * 2 + spatial] - mean) / (var + 1e-5).sqrt(),
                     0.51,
                 );
             }
