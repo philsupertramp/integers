@@ -158,7 +158,7 @@ impl Config {
             "CNN requires MNIST"
         );
         assert!(
-            cfg.train_limit.map_or(true, |v| v > 0) && cfg.validation_limit.map_or(true, |v| v > 0),
+            cfg.train_limit.is_none_or(|v| v > 0) && cfg.validation_limit.is_none_or(|v| v > 0),
             "sample limits must be positive"
         );
         assert!(
@@ -465,6 +465,7 @@ impl FloatMlp {
         }
         history
     }
+    #[allow(dead_code)] // Reference-only prediction helper, not used by the smoke example.
     fn predict(&self, input: &[f32]) -> usize {
         let values = self.activations(input);
         values
@@ -505,8 +506,8 @@ impl FloatMlp {
             // upstream neuron gradient before parameter accumulation,
             // not the aggregate gradient at optimizer update time.
             let clip = GRAD_CLIP as f32 / (1u32 << SHIFT) as f32;
-            for j in 0..layer.output {
-                let g = grad[j].clamp(-clip, clip);
+            for (j, &grad_j) in grad.iter().enumerate().take(layer.output) {
+                let g = grad_j.clamp(-clip, clip);
                 layer.grad_b[j] += g;
                 for i in 0..layer.input {
                     let p = j * layer.input + i;
