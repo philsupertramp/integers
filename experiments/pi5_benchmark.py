@@ -109,6 +109,35 @@ def extract_result_archive(log_lines: str) -> bytes:
     return recovered
 
 
+def select_indexed_seed(seed_list: str, index: str | None) -> int:
+    """Map a Kubernetes completion index to a unique predeclared seed.
+
+    Fail closed if the controller-provided index is absent or invalid.
+    """
+    parts = seed_list.split(",")
+    if not parts or any(not s.isascii() or not s.isdecimal() for s in parts):
+        raise ValueError("--seed-list must contain positive decimal seeds separated by commas")
+    seeds = [int(s) for s in parts]
+    if (len(seeds) != len(set(seeds)) or
+            any(not 0 < seed < (1 << 64) for seed in seeds)):
+        raise ValueError("--seed-list must contain unique positive u64 seeds")
+    if index is None or not index.isascii() or not index.isdecimal():
+        raise ValueError("JOB_COMPLETION_INDEX must be a nonnegative decimal number")
+    i = int(index)
+    if i >= len(seeds):
+        raise ValueError("JOB_COMPLETION_INDEX exceeds available seeds")
+    return seeds[i]
+
+
+def indexed_seed_metadata(args) -> dict:
+    if args.seed_list is None:
+        return {}
+    return {
+        "job_completion_index": int(os.environ["JOB_COMPLETION_INDEX"]),
+        "indexed_job_seeds": [int(x) for x in args.seed_list.split(",")],
+    }
+
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -221,6 +250,7 @@ def run(args) -> dict:
         if record["backend"] != backend or record["seed"] != args.seed:
             raise ValueError("runner output does not match request")
         record["benchmark_schema"] = 1
+        record.update(indexed_seed_metadata(args))
         record["git_commit_sha"] = os.environ.get("BENCHMARK_GIT_SHA", "unknown")
         record["image_reference"] = os.environ.get("BENCHMARK_IMAGE", "not_provided")
         record["rustc"] = os.environ.get("BENCHMARK_RUSTC") or try_text("/opt/build-info/rustc.txt") or "unknown"
@@ -273,7 +303,9 @@ def parse_args(argv=None):
     parser.add_argument("--data-dir", type=Path, default=Path("/opt/dataset"))
     parser.add_argument("--results-dir", type=Path, default=Path("/results"))
     parser.add_argument("--architecture", choices=("dense", "cnn"), default="dense")
-    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed-list", type=str, default=None,
+                        help="indexed Kubernetes Job seed list (JOB_COMPLETION_INDEX)")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr-shift", type=int, default=7)
@@ -283,6 +315,16 @@ def parse_args(argv=None):
     parser.add_argument("--validation-limit", type=int, default=None)
     parser.add_argument("--require-arm64", action="store_true", default=False)
     args = parser.parse_args(argv)
+    if args.seed_list is not None:
+        if args.seed is not None:
+            parser.error("choose --seed or --seed-list, not both")
+        try:
+            args.seed = select_indexed_seed(args.seed_list,
+                                            os.environ.get("JOB_COMPLETION_INDEX"))
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.seed is None:
+        args.seed = 1337
     if args.validation_only == args.final_test:
         parser.error("choose exactly one of --validation-only or --final-test")
     if args.final_test and (args.train_limit is not None or args.validation_limit is not None):
