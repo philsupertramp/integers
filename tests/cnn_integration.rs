@@ -6,6 +6,9 @@ use integers::mse_grad;
 use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, Module, ReLU};
 use integers::rng::seed_rng;
 
+// The shared FP32 oracle exposes training helpers used by other experiments.
+// This target intentionally exercises only a subset of that reference API.
+#[allow(dead_code)]
 #[path = "../experiments/cnn_reference.rs"]
 mod cnn_reference;
 
