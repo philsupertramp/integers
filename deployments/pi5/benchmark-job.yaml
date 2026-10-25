@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: integers-pi5-benchmark
+  labels:
+    app.kubernetes.io/name: integers-pi5-benchmark
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: integers-pi5-benchmark
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        benchmark.integers.dev/pi5: "true"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: benchmark
+          # Replace with the published GHCR SHA tag, preferably its digest.
+          image: ghcr.io/philsupertramp/integers-benchmark:sha-REPLACE_WITH_FULL_COMMIT_SHA
+          imagePullPolicy: IfNotPresent
+          env:
+            # Kubernetes cannot expose the running container image digest through
+            # the Downward API. Supply the SAME pinned reference as above.
+            - name: BENCHMARK_IMAGE
+              value: ghcr.io/philsupertramp/integers-benchmark:sha-REPLACE_WITH_FULL_COMMIT_SHA
+          args:
+            - --require-arm64
+            - --validation-only
+            - --epochs
+            - "1"
+            - --seed
+            - "1337"
+            - --train-limit
+            - "128"
+            - --validation-limit
+            - "128"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: results
+              mountPath: /results
+          # Optional verified custom dataset mount:
+          # - name: dataset
+          #   mountPath: /opt/dataset
+          #   readOnly: true
+      volumes:
+        - name: results
+          emptyDir: {}
+        # Replace with an approved PVC only for future external datasets:
+        # - name: dataset
+        #   persistentVolumeClaim:
+        #     claimName: REPLACE_WITH_DATASET_PVC

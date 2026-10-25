@@ -1,0 +1,41 @@
+# Multi-stage, native-target build. Buildx/QEMU can validate ARM64 elsewhere,
+# but only a physical Raspberry Pi 5 run is a hardware measurement.
+FROM rust:1.95-bookworm AS rust-build
+ARG GIT_SHA=unknown
+ARG BENCHMARK_RUSTFLAGS=
+ENV RUSTFLAGS=${BENCHMARK_RUSTFLAGS}
+WORKDIR /app
+COPY . .
+RUN cargo build --locked --release --example held_out \
+    && mkdir -p /build-info \
+    && rustc --version > /build-info/rustc.txt \
+    && printf 'cargo build --locked --release --example held_out; RUSTFLAGS=%s\n' "$RUSTFLAGS" > /build-info/options.txt
+
+FROM python:3.13-slim-bookworm AS dataset-build
+WORKDIR /source/experiments
+COPY experiments/fetch_mnist.py experiments/prepare_pi5_dataset.py ./
+# Only this stage uses networking. SHA256 of compressed AND uncompressed inputs
+# is verified. The runtime never needs network access or an IDX dataset PVC.
+RUN mkdir -p /tmp/idx /prepared \
+    && python3 fetch_mnist.py --data-dir /tmp/idx \
+    && python3 prepare_pi5_dataset.py --idx-dir /tmp/idx --output-dir /prepared \
+    && rm -rf /tmp/idx
+
+FROM python:3.13-slim-bookworm
+ARG GIT_SHA=unknown
+ARG BENCHMARK_RUSTFLAGS=
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    BENCHMARK_GIT_SHA=${GIT_SHA} \
+    BENCHMARK_BUILD_OPTIONS="cargo build --locked --release --example held_out; RUSTFLAGS=${BENCHMARK_RUSTFLAGS}"
+COPY --from=rust-build /app/target/release/examples/held_out /usr/local/bin/held_out
+COPY --from=rust-build /build-info/ /opt/build-info/
+COPY --from=dataset-build /prepared/ /opt/dataset/
+COPY experiments/pi5_benchmark.py /opt/benchmark/pi5_benchmark.py
+COPY deployments/pi5/DATASET_NOTICE.txt /opt/dataset/DATASET_NOTICE.txt
+RUN mkdir -p /results && chmod 0777 /results \
+    && chmod -R a-w /opt/dataset /opt/build-info /opt/benchmark /usr/local/bin/held_out
+USER 65532:65532
+WORKDIR /opt/benchmark
+ENTRYPOINT ["python3", "/opt/benchmark/pi5_benchmark.py"]
+CMD ["--validation-only", "--epochs", "1", "--train-limit", "128", "--validation-limit", "128"]

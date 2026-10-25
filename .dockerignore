@@ -1,0 +1,16 @@
+# Never accidentally bake local datasets, credentials or generated reports.
+.git
+.github
+target
+__pycache__
+**/__pycache__
+*.pyc
+.env
+.env.*
+data/mnist/*
+!data/mnist/README.md
+reports
+*.idx
+*.gz
+*.parquet
+/results
