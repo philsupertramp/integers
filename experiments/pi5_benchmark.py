@@ -25,7 +25,7 @@ def digest(path: Path) -> str:
     return h.hexdigest()
 
 
-def verify_dataset(data_dir: Path) -> tuple[dict, str]:
+def verify_dataset(data_dir: Path, validation_only: bool = False) -> tuple[dict, str]:
     manifest_path = data_dir / "dataset-manifest.json"
     expected = (data_dir / "dataset-manifest.sha256").read_text().strip()
     actual = digest(manifest_path)
@@ -41,6 +41,9 @@ def verify_dataset(data_dir: Path) -> tuple[dict, str]:
     for name, meta in manifest["artifacts"].items():
         if name not in ("train-inputs.i8", "train-labels.u8", "test-inputs.i8", "test-labels.u8"):
             raise ValueError(f"unrecognized artifact: {name}")
+        # Validation-only mode MUST NOT open or even hash official test files.
+        if validation_only and name.startswith("test-"):
+            continue
         path = data_dir / name
         if path.stat().st_size != meta["bytes"] or digest(path) != meta["sha256"]:
             raise ValueError(f"dataset checksum/size mismatch: {name}")
@@ -95,7 +98,7 @@ def machine_metadata() -> dict:
 
 def run(args) -> dict:
     start = time.monotonic()
-    manifest, manifest_hash = verify_dataset(args.data_dir)
+    manifest, manifest_hash = verify_dataset(args.data_dir, validation_only=args.validation_only)
     setup_ms = round((time.monotonic() - start) * 1000, 3)
     machine = machine_metadata()
     if args.require_arm64 and machine["architecture"] not in ("aarch64", "arm64"):
@@ -128,13 +131,14 @@ def run(args) -> dict:
         record["benchmark_schema"] = 1
         record["git_commit_sha"] = os.environ.get("BENCHMARK_GIT_SHA", "unknown")
         record["image_reference"] = os.environ.get("BENCHMARK_IMAGE", "not_provided")
-        record["rustc"] = os.environ.get("BENCHMARK_RUSTC", "unknown")
+        record["rustc"] = os.environ.get("BENCHMARK_RUSTC") or try_text("/opt/build-info/rustc.txt") or "unknown"
         record["build_options"] = os.environ.get("BENCHMARK_BUILD_OPTIONS", "release; locked")
         record["dataset_manifest_sha256"] = manifest_hash
         record["dataset_identity"] = manifest["dataset"]
         record["dataset_splits"] = manifest["splits"]
         record["prepared_artifact_sha256"] = {k: v["sha256"] for k, v in manifest["artifacts"].items()}
         record["machine"] = machine
+        record["machine_after_run"] = machine_metadata()
         record["entrypoint_setup_ms"] = setup_ms
         record["process_elapsed_ms"] = process_ms
         record["subprocess_exit_code"] = completed.returncode

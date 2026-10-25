@@ -112,5 +112,5 @@ jobs:
             GIT_SHA=${{ github.sha }}
       - name: Report immutable digest
         run: |
-          echo "Published ghcr.io/philsupertramp/integers-benchmark@sha256:${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published ghcr.io/philsupertramp/integers-benchmark@${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Digest: ${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

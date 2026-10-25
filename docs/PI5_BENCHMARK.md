@@ -34,7 +34,10 @@ No weights, backend-specific input augmentations, or tuning are included.
 
 `/opt/dataset` contains four prepared files, `dataset-manifest.json`,
 `dataset-manifest.sha256`, and `DATASET_NOTICE.txt`. Their SHA256 checks
-run **before every benchmark**; tampering fails closed. Dataset source,
+run **before each applicable benchmark** (train artifacts in validation-only;
+train and official-test artifacts in explicitly selected final-test mode);
+tampering fails closed. Validation-only mode never opens or hashes official
+test bytes. Dataset source,
 compressed and IDX hashes, preprocessing, 55,000/5,000 stratified split
 (seed `81985529216486895`), and original official 10k test identity are
 machine-readable. Manifest generation does not include wall time or host

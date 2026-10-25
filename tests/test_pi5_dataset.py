@@ -1,5 +1,4 @@
 """Dataset integrity/provenance tests; no MNIST download required."""
-import importlib.util
 import hashlib
 import json
 import sys
@@ -41,6 +40,8 @@ class Pi5DatasetTests(unittest.TestCase):
             _, digest = runner.verify_dataset(root)
             self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
             (root / "test-labels.u8").write_bytes(b"corrupted")
+            # Strict validation-only isolation: test bytes must never be opened.
+            runner.verify_dataset(root, validation_only=True)
             with self.assertRaisesRegex(ValueError, "checksum/size mismatch"):
                 runner.verify_dataset(root)
             (root / "test-labels.u8").write_bytes(("test-labels.u8\n").encode())
