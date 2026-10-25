@@ -10,12 +10,17 @@ const BITS: u32 = 31;
 const GRAD_CLIP: i32 = 8192;
 const MOM_SHIFT: u32 = 1;
 
-fn decode(x: Dyadic) -> f32 { (x.v as f32) * 2f32.powi(-(x.s as i32)) }
+fn decode(x: Dyadic) -> f32 {
+    (x.v as f32) * 2f32.powi(-(x.s as i32))
+}
 
 struct Parameters {
-    weights: Vec<f32>, bias: Vec<f32>,
-    grad_weights: Vec<f32>, grad_bias: Vec<f32>,
-    velocity_weights: Vec<f32>, velocity_bias: Vec<f32>,
+    weights: Vec<f32>,
+    bias: Vec<f32>,
+    grad_weights: Vec<f32>,
+    grad_bias: Vec<f32>,
+    velocity_weights: Vec<f32>,
+    velocity_bias: Vec<f32>,
 }
 impl Parameters {
     fn new(weights: &[Dyadic], bias: &[Dyadic]) -> Self {
@@ -26,7 +31,8 @@ impl Parameters {
             grad_bias: vec![0.0; bias.len()],
             velocity_weights: vec![0.0; weights.len()],
             velocity_bias: vec![0.0; bias.len()],
-            weights, bias,
+            weights,
+            bias,
         }
     }
     fn zero_grad(&mut self) {
@@ -39,7 +45,8 @@ impl Parameters {
         let momentum = 2f32.powi(-(MOM_SHIFT as i32));
         let lr = 2f32.powi(-(lr_shift as i32));
         for i in 0..self.weights.len() {
-            self.velocity_weights[i] = momentum * self.velocity_weights[i] + scale * self.grad_weights[i];
+            self.velocity_weights[i] =
+                momentum * self.velocity_weights[i] + scale * self.grad_weights[i];
             self.weights[i] -= lr * self.velocity_weights[i];
         }
         for i in 0..self.bias.len() {
@@ -48,30 +55,49 @@ impl Parameters {
         }
     }
     fn nonfinite(&self) -> usize {
-        self.weights.iter().chain(self.bias.iter())
-            .chain(self.velocity_weights.iter()).chain(self.velocity_bias.iter())
-            .filter(|v| !v.is_finite()).count()
+        self.weights
+            .iter()
+            .chain(self.bias.iter())
+            .chain(self.velocity_weights.iter())
+            .chain(self.velocity_bias.iter())
+            .filter(|v| !v.is_finite())
+            .count()
     }
 }
 
 struct Convolution {
-    cin: usize, cout: usize, h: usize, w: usize, kh: usize, kw: usize,
+    cin: usize,
+    cout: usize,
+    h: usize,
+    w: usize,
+    kh: usize,
+    kw: usize,
     params: Parameters,
 }
 impl Convolution {
     fn from_integer(src: &Conv2D) -> Self {
         Self {
-            cin: src.in_channels, cout: src.out_channels,
-            h: src.in_h, w: src.in_w, kh: src.kernel_h, kw: src.kernel_w,
+            cin: src.in_channels,
+            cout: src.out_channels,
+            h: src.in_h,
+            w: src.in_w,
+            kh: src.kernel_h,
+            kw: src.kernel_w,
             params: Parameters::new(&src.kernels.data, &src.biases.data),
         }
     }
-    fn out_h(&self) -> usize { self.h - self.kh + 1 }
-    fn out_w(&self) -> usize { self.w - self.kw + 1 }
+    fn out_h(&self) -> usize {
+        self.h - self.kh + 1
+    }
+    fn out_w(&self) -> usize {
+        self.w - self.kw + 1
+    }
     fn kernel_index(&self, oc: usize, ic: usize, y: usize, x: usize) -> usize {
         ((oc * self.cin + ic) * self.kh + y) * self.kw + x
     }
-    fn input_index(&self, ic: usize, y: usize, x: usize) -> usize { (ic * self.h + y) * self.w + x }
+    fn input_index(&self, ic: usize, y: usize, x: usize) -> usize {
+        (ic * self.h + y) * self.w + x
+    }
     fn output_index(&self, oc: usize, y: usize, x: usize) -> usize {
         (oc * self.out_h() + y) * self.out_w() + x
     }
@@ -97,7 +123,11 @@ impl Convolution {
         y
     }
     fn backward(&mut self, input: &[f32], grad: &[f32]) -> Vec<f32> {
-        assert_eq!(grad.len(), self.cout * self.out_h() * self.out_w(), "FP32 conv gradient shape");
+        assert_eq!(
+            grad.len(),
+            self.cout * self.out_h() * self.out_w(),
+            "FP32 conv gradient shape"
+        );
         let mut dx = vec![0.0; input.len()];
         let max_grad = GRAD_CLIP as f32 * 2f32.powi(-(SHIFT as i32));
         for oc in 0..self.cout {
@@ -122,11 +152,16 @@ impl Convolution {
     }
 }
 
-struct Dense { input: usize, output: usize, params: Parameters }
+struct Dense {
+    input: usize,
+    output: usize,
+    params: Parameters,
+}
 impl Dense {
     fn from_integer(src: &Linear) -> Self {
         Self {
-            input: src.in_features, output: src.out_features,
+            input: src.in_features,
+            output: src.out_features,
             params: Parameters::new(&src.weights.data, &src.biases.data),
         }
     }
@@ -158,15 +193,29 @@ impl Dense {
 }
 
 struct Pool {
-    channels: usize, h: usize, w: usize,
-    kernel: usize, stride: usize, winners: Vec<usize>,
+    channels: usize,
+    h: usize,
+    w: usize,
+    kernel: usize,
+    stride: usize,
+    winners: Vec<usize>,
 }
 impl Pool {
     fn new(channels: usize, h: usize, w: usize, kernel: usize, stride: usize) -> Self {
-        Self { channels, h, w, kernel, stride, winners: Vec::new() }
+        Self {
+            channels,
+            h,
+            w,
+            kernel,
+            stride,
+            winners: Vec::new(),
+        }
     }
     fn output_dims(&self) -> (usize, usize) {
-        ((self.h - self.kernel) / self.stride + 1, (self.w - self.kernel) / self.stride + 1)
+        (
+            (self.h - self.kernel) / self.stride + 1,
+            (self.w - self.kernel) / self.stride + 1,
+        )
     }
     fn forward(&mut self, input: &[f32]) -> Vec<f32> {
         assert_eq!(input.len(), self.channels * self.h * self.w);
@@ -179,9 +228,12 @@ impl Pool {
                     let mut winner = (c * self.h + y * self.stride) * self.w + x * self.stride;
                     for ky in 0..self.kernel {
                         for kx in 0..self.kernel {
-                            let at = (c * self.h + y * self.stride + ky) * self.w + x * self.stride + kx;
+                            let at =
+                                (c * self.h + y * self.stride + ky) * self.w + x * self.stride + kx;
                             // A strict comparison guarantees first-index tie routing.
-                            if input[at] > input[winner] { winner = at; }
+                            if input[at] > input[winner] {
+                                winner = at;
+                            }
                         }
                     }
                     self.winners.push(winner);
@@ -194,13 +246,24 @@ impl Pool {
     fn backward(&self, grad: &[f32]) -> Vec<f32> {
         assert_eq!(grad.len(), self.winners.len(), "FP32 pool gradient shape");
         let mut dx = vec![0.0; self.channels * self.h * self.w];
-        for (&winner, &g) in self.winners.iter().zip(grad) { dx[winner] += g; }
+        for (&winner, &g) in self.winners.iter().zip(grad) {
+            dx[winner] += g;
+        }
         dx
     }
 }
 
-enum Op { Conv(Convolution), Relu, Pool(Pool), Flatten, Linear(Dense) }
-pub struct CnnFp32 { ops: Vec<Op>, inputs: Vec<Vec<f32>> }
+enum Op {
+    Conv(Convolution),
+    Relu,
+    Pool(Pool),
+    Flatten,
+    Linear(Dense),
+}
+pub struct CnnFp32 {
+    ops: Vec<Op>,
+    inputs: Vec<Vec<f32>>,
+}
 impl CnnFp32 {
     pub fn forward(&mut self, input: &[f32]) -> Vec<f32> {
         assert_eq!(input.len(), 784, "MNIST CNN expects a 28x28 input");
@@ -225,7 +288,9 @@ impl CnnFp32 {
         // Integer argmax chooses the first maximum on ties.
         let mut prediction = 0;
         for i in 1..y.len() {
-            if y[i] > y[prediction] { prediction = i; }
+            if y[i] > y[prediction] {
+                prediction = i;
+            }
         }
         // d/dy [0.5 sum_j (y_j - t_j)^2] = y - t.
         let mut grad: Vec<f32> = y.iter().zip(target).map(|(&v, &t)| v - t).collect();
@@ -234,7 +299,10 @@ impl CnnFp32 {
                 Op::Conv(layer) => layer.backward(x, &grad),
                 Op::Relu => {
                     assert_eq!(x.len(), grad.len());
-                    grad.iter().zip(x).map(|(&g, &v)| if v > 0.0 { g } else { 0.0 }).collect()
+                    grad.iter()
+                        .zip(x)
+                        .map(|(&g, &v)| if v > 0.0 { g } else { 0.0 })
+                        .collect()
                 }
                 Op::Pool(layer) => layer.backward(&grad),
                 Op::Flatten => grad,
@@ -263,11 +331,14 @@ impl CnnFp32 {
         }
     }
     pub fn nonfinite_parameters(&self) -> usize {
-        self.ops.iter().map(|op| match op {
-            Op::Conv(c) => c.params.nonfinite(),
-            Op::Linear(c) => c.params.nonfinite(),
-            _ => 0,
-        }).sum()
+        self.ops
+            .iter()
+            .map(|op| match op {
+                Op::Conv(c) => c.params.nonfinite(),
+                Op::Linear(c) => c.params.nonfinite(),
+                _ => 0,
+            })
+            .sum()
     }
 }
 
@@ -279,32 +350,46 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
     let mut ops = Vec::new();
 
     let a = Conv2D::new(1, 4, 3, 3, 28, 28, SHIFT, SHIFT, BITS)
-        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT);
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
     ops.push(Op::Conv(Convolution::from_integer(&a)));
     integer.add(a);
-    integer.add(ReLU::new()); ops.push(Op::Relu);
+    integer.add(ReLU::new());
+    ops.push(Op::Relu);
     integer.add(MaxPool2D::new(4, 26, 26, 2, 2));
     ops.push(Op::Pool(Pool::new(4, 26, 26, 2, 2)));
 
     let b = Conv2D::new(4, 8, 3, 3, 13, 13, SHIFT, SHIFT, BITS)
-        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT);
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
     ops.push(Op::Conv(Convolution::from_integer(&b)));
     integer.add(b);
-    integer.add(ReLU::new()); ops.push(Op::Relu);
+    integer.add(ReLU::new());
+    ops.push(Op::Relu);
     integer.add(MaxPool2D::new(8, 11, 11, 2, 2));
     ops.push(Op::Pool(Pool::new(8, 11, 11, 2, 2)));
 
-    integer.add(Flatten); ops.push(Op::Flatten);
+    integer.add(Flatten);
+    ops.push(Op::Flatten);
     let c = Linear::new(200, 64, SHIFT, SHIFT, BITS)
-        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT);
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
     ops.push(Op::Linear(Dense::from_integer(&c)));
     integer.add(c);
-    integer.add(ReLU::new()); ops.push(Op::Relu);
+    integer.add(ReLU::new());
+    ops.push(Op::Relu);
     let d = Linear::new(64, 10, SHIFT, SHIFT, BITS)
-        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT);
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
     ops.push(Op::Linear(Dense::from_integer(&d)));
     integer.add(d);
-    (integer, CnnFp32 { ops, inputs: Vec::new() })
+    (
+        integer,
+        CnnFp32 {
+            ops,
+            inputs: Vec::new(),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -316,7 +401,10 @@ mod tests {
         let x = [1., 2., 3., 4., 9., 9., 7., 9., 9.];
         assert_eq!(pool.forward(&x), vec![9., 9., 9., 9.]);
         assert_eq!(pool.winners, vec![4, 4, 4, 4]);
-        assert_eq!(pool.backward(&[1., 2., 3., 4.]), vec![0.,0.,0.,0.,10.,0.,0.,0.,0.]);
+        assert_eq!(
+            pool.backward(&[1., 2., 3., 4.]),
+            vec![0., 0., 0., 0., 10., 0., 0., 0., 0.]
+        );
     }
     #[test]
     fn multichannel_conv_accumulates_correct_weight_gradient() {
@@ -325,8 +413,8 @@ mod tests {
         c.biases.data[0] = Dyadic::new(0, 0);
         let mut f = Convolution::from_integer(&c);
         let x: Vec<f32> = (1..=18).map(|n| n as f32).collect();
-        assert_eq!(f.forward(&x), vec![60.,68.,84.,92.]);
-        let dx = f.backward(&x, &[1.,1.,1.,1.]);
+        assert_eq!(f.forward(&x), vec![60., 68., 84., 92.]);
+        let dx = f.backward(&x, &[1., 1., 1., 1.]);
         assert_eq!(dx[4], 4.0); // center of first channel in all 4 windows
         assert_eq!(dx[13], 4.0); // center of second channel
         assert_eq!(f.params.grad_bias, vec![4.]);

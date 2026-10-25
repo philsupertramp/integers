@@ -25,7 +25,7 @@ pub fn none_quantize(col: &[f32]) -> (Vec<i32>, i32) {
 ///
 /// Constant columns (range = 0) are mapped to 0.
 pub fn minmax_quantize(col: &[f32]) -> (Vec<i32>, i32) {
-    let min = col.iter().cloned().fold(f32::INFINITY,     f32::min);
+    let min = col.iter().cloned().fold(f32::INFINITY, f32::min);
     let max = col.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let range = max - min;
 
@@ -35,7 +35,7 @@ pub fn minmax_quantize(col: &[f32]) -> (Vec<i32>, i32) {
         col.iter()
             .map(|&x| {
                 // [0, 1] → [-127, 127]
-                let norm   = (x - min) / range;
+                let norm = (x - min) / range;
                 let scaled = norm * 254.0 - 127.0;
                 scaled.round().clamp(-127.0, 127.0) as i32
             })
@@ -53,17 +53,17 @@ pub fn minmax_quantize(col: &[f32]) -> (Vec<i32>, i32) {
 ///
 /// Constant columns (std = 0) are mapped to 0.
 pub fn standard_score_quantize(col: &[f32]) -> (Vec<i32>, i32) {
-    let n    = col.len() as f32;
+    let n = col.len() as f32;
     let mean = col.iter().sum::<f32>() / n;
-    let var  = col.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
-    let std  = var.sqrt();
+    let var = col.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n;
+    let std = var.sqrt();
 
     let values = if std == 0.0 {
         vec![0i32; col.len()]
     } else {
         col.iter()
             .map(|&x| {
-                let z      = (x - mean) / std;
+                let z = (x - mean) / std;
                 let scaled = z * (127.0 / 3.0); // ±3σ → ±127
                 scaled.round().clamp(-127.0, 127.0) as i32
             })
@@ -83,7 +83,7 @@ mod tests {
         let (q, s) = minmax_quantize(&[0.0, 0.5, 1.0]);
         assert_eq!(s, 7);
         assert_eq!(q[0], -127);
-        assert_eq!(q[2],  127);
+        assert_eq!(q[2], 127);
     }
 
     #[test]

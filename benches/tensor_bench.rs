@@ -1,16 +1,19 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use integers::{Dyadic, Tensor, nn::{ReLU, Module}};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use integers::{
+    Dyadic, Tensor,
+    nn::{Module, ReLU},
+};
 
 fn bench_batch_forward(c: &mut Criterion) {
     let mut group = c.benchmark_group("ReLU_Forward_Batch");
-    
+
     // Create a realistically sized batch for an AI researcher:
     // Batch size 128, each item is a 64x64 feature map (4096 elements)
     // Total elements: 524,288
     let batch_size = 1024;
     let feature_size = 128 * 128;
     let dummy_data = vec![Dyadic { v: 1, s: 0 }; batch_size * feature_size];
-    
+
     let batch = Tensor {
         data: dummy_data,
         shape: vec![batch_size, 128, 128],
@@ -22,7 +25,7 @@ fn bench_batch_forward(c: &mut Criterion) {
     group.bench_function("ZeroCopy_TensorView", |b| {
         b.iter(|| {
             let _result: Vec<Tensor> = black_box(&batch)
-                .iter() 
+                .iter()
                 .map(|view_row| relu.forward(&view_row))
                 .collect();
             black_box(_result);
@@ -37,7 +40,6 @@ fn bench_batch_forward(c: &mut Criterion) {
             black_box(_result);
         })
     });
-
 
     group.finish();
 }

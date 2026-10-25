@@ -1,12 +1,14 @@
 //! Regression: built-in integer trainable modules must apply the same
 //! per-example mean gradient for full and short batches, before momentum.
 use integers::dyadic::{Dyadic, Tensor};
-use integers::nn::{Conv2D, Linear, Module};
 use integers::mse_grad;
+use integers::nn::{Conv2D, Linear, Module};
 
 fn linear(batch: usize, momentum: bool, steps: usize) -> (Dyadic, Dyadic) {
     let mut layer = Linear::new(1, 1, 0, 0, 31);
-    if momentum { layer = layer.with_momentum(1); }
+    if momentum {
+        layer = layer.with_momentum(1);
+    }
     layer.weights.data[0] = Dyadic::new(4, 0);
     layer.biases.data[0] = Dyadic::new(0, 0);
     for _ in 0..steps {
@@ -14,7 +16,9 @@ fn linear(batch: usize, momentum: bool, steps: usize) -> (Dyadic, Dyadic) {
         let targets = Tensor::from_vec(vec![Dyadic::new(0, 0); batch], vec![batch, 1]);
         layer.zero_grad();
         let outputs = layer.forward_batch(&inputs);
-        let gradients: Tensor = outputs.iter().zip(targets.iter())
+        let gradients: Tensor = outputs
+            .iter()
+            .zip(targets.iter())
             .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
             .collect();
         layer.backward_batch(&gradients);
@@ -25,7 +29,9 @@ fn linear(batch: usize, momentum: bool, steps: usize) -> (Dyadic, Dyadic) {
 
 fn conv(batch: usize, momentum: bool, steps: usize) -> (Dyadic, Dyadic) {
     let mut layer = Conv2D::new(1, 1, 1, 1, 1, 1, 0, 0, 31);
-    if momentum { layer = layer.with_momentum(1); }
+    if momentum {
+        layer = layer.with_momentum(1);
+    }
     layer.kernels.data[0] = Dyadic::new(4, 0);
     layer.biases.data[0] = Dyadic::new(0, 0);
     for _ in 0..steps {
@@ -33,7 +39,9 @@ fn conv(batch: usize, momentum: bool, steps: usize) -> (Dyadic, Dyadic) {
         let targets = Tensor::from_vec(vec![Dyadic::new(0, 0); batch], vec![batch, 1]);
         layer.zero_grad();
         let outputs = layer.forward_batch(&inputs);
-        let gradients: Tensor = outputs.iter().zip(targets.iter())
+        let gradients: Tensor = outputs
+            .iter()
+            .zip(targets.iter())
             .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
             .collect();
         layer.backward_batch(&gradients);
@@ -89,7 +97,10 @@ fn repeated_backward_calls_use_total_sample_count() {
         layer.backward(&gradient.view());
     }
     layer.update(0);
-    assert_eq!((layer.weights.data[0], layer.biases.data[0]), linear(1, false, 1));
+    assert_eq!(
+        (layer.weights.data[0], layer.biases.data[0]),
+        linear(1, false, 1)
+    );
 }
 
 #[test]
@@ -101,7 +112,6 @@ fn update_after_zero_grad_with_no_examples_is_no_op() {
     assert_eq!(layer.weights.data[0], Dyadic::new(4, 0));
 }
 
-
 fn train_subunit_with_momentum(batch: usize) -> (Dyadic, Dyadic) {
     let mut layer = Linear::new(1, 1, 7, 7, 31).with_momentum(1);
     layer.weights.data[0] = Dyadic::new(128, 7); // 1.0
@@ -110,7 +120,9 @@ fn train_subunit_with_momentum(batch: usize) -> (Dyadic, Dyadic) {
     let targets = Tensor::from_vec(vec![Dyadic::new(0, 7); batch], vec![batch, 1]);
     layer.zero_grad();
     let outputs = layer.forward_batch(&inputs);
-    let gradients: Tensor = outputs.iter().zip(targets.iter())
+    let gradients: Tensor = outputs
+        .iter()
+        .zip(targets.iter())
         .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
         .collect();
     layer.backward_batch(&gradients);
@@ -139,7 +151,9 @@ fn momentum_handles_different_batch_sizes_on_consecutive_updates() {
             let target = Tensor::from_vec(vec![Dyadic::new(0, 0); count], vec![count, 1]);
             layer.zero_grad();
             let outs = layer.forward_batch(&inp);
-            let grads: Tensor = outs.iter().zip(target.iter())
+            let grads: Tensor = outs
+                .iter()
+                .zip(target.iter())
                 .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
                 .collect();
             layer.backward_batch(&grads);

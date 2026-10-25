@@ -1,15 +1,12 @@
 //! Exercises the current public dyadic API without loading external datasets.
-use integers::{Dyadic, Tensor, mse_grad};
 use integers::data::dataset_loaders::{DatasetBuilder, FileFormat, QuantizationMethod};
 use integers::nn::{Linear, ReLU, Sequential};
+use integers::{Dyadic, Tensor, mse_grad};
 
 #[test]
 fn public_layer_forward_backward_and_update() {
     let s = 7;
-    let x = Tensor::from_vec(
-        vec![Dyadic::new(64, s), Dyadic::new(-32, s)],
-        vec![1, 2],
-    );
+    let x = Tensor::from_vec(vec![Dyadic::new(64, s), Dyadic::new(-32, s)], vec![1, 2]);
     let target = Tensor::from_vec(vec![Dyadic::new(64, s)], vec![1, 1]);
     let mut model = Sequential::new();
     model.add(Linear::new(2, 4, s, s, 16).with_grad_clip(8192));
@@ -18,10 +15,7 @@ fn public_layer_forward_backward_and_update() {
     model.zero_grad();
     let output = model.forward(&x.view());
     assert_eq!(output.data.len(), 1);
-    let gradient = Tensor::from_vec(
-        mse_grad(&output.data, &target.data),
-        output.shape.clone(),
-    );
+    let gradient = Tensor::from_vec(mse_grad(&output.data, &target.data), output.shape.clone());
     let backprop = model.backward(&gradient.view());
     assert_eq!(backprop.data.len(), 2);
     model.update(6);

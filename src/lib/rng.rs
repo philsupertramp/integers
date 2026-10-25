@@ -46,7 +46,6 @@ impl XorShift64 {
     }
 }
 
-
 // ─── Thread-local XorShift64 RNG ─────────────────────────────────────────────
 
 // Seeded with a Weyl-sequence constant — guaranteed non-zero.
@@ -96,7 +95,10 @@ mod tests {
         let mut rng = XorShift64::new(1);
         let mut saw_nonzero = false;
         for _ in 0..100 {
-            if rng.next_u64() != 0 { saw_nonzero = true; break; }
+            if rng.next_u64() != 0 {
+                saw_nonzero = true;
+                break;
+            }
         }
         assert!(saw_nonzero);
     }

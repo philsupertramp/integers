@@ -25,11 +25,11 @@
 
 use std::time::Instant;
 
+use integers::data::dataset_loaders::{DatasetBuilder, FileFormat, QuantizationMethod};
 use integers::data::shuffled_indices;
-use integers::data::dataset_loaders::{DatasetBuilder, QuantizationMethod, FileFormat};
-use integers::nn::{Linear, ReLU, Sequential};
-use integers::{argmax, mse_grad, TrainingReporter};
 use integers::dyadic::Tensor;
+use integers::nn::{Linear, ReLU, Sequential};
+use integers::{TrainingReporter, argmax, mse_grad};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -38,15 +38,21 @@ fn main() {
         eprintln!("Supply both paths to avoid evaluating on the training data.");
         std::process::exit(2);
     }
-    let train_path = args.get(1).map(|s| s.as_str()).unwrap_or("data/iris_train.tsv");
-    let test_path = args.get(2).map(|s| s.as_str()).unwrap_or("data/iris_test.tsv");
+    let train_path = args
+        .get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("data/iris_train.tsv");
+    let test_path = args
+        .get(2)
+        .map(|s| s.as_str())
+        .unwrap_or("data/iris_test.tsv");
 
     // ── Hyperparameters ───────────────────────────────────────────────────────
-    const SHIFT:     u32 = 7;
-    const LR_SHIFT:  u32 = 7;    // lr = 2^(-7) ≈ 0.0078
-    const MOM_SHIFT: u32 = 1;    // momentum decay = 2^(-1) = 0.5
+    const SHIFT: u32 = 7;
+    const LR_SHIFT: u32 = 7; // lr = 2^(-7) ≈ 0.0078
+    const MOM_SHIFT: u32 = 1; // momentum decay = 2^(-1) = 0.5
     const GRAD_CLIP: i32 = 8192; // 2^13
-    const EPOCHS:    u32 = 500;
+    const EPOCHS: u32 = 500;
     const LOG_EVERY: u32 = 50;
     const BITS_OUT: u32 = 31;
 
@@ -77,20 +83,33 @@ fn main() {
         });
 
     let shift = ds.input_shift.max(0) as u32;
-    println!("  {} samples,  {} features,  {} classes  (input_shift={shift})\n",
-        ds.len(), ds.n_features(), ds.n_classes);
+    println!(
+        "  {} samples,  {} features,  {} classes  (input_shift={shift})\n",
+        ds.len(),
+        ds.n_features(),
+        ds.n_classes
+    );
 
     // ── Model ─────────────────────────────────────────────────────────────────
     //  4 → Linear(8) → ReLU → Linear(8) → ReLU → Linear(3) (raw scores)
     let mut model = Sequential::new();
-    model.add(Linear::new(ds.n_features(), 8, SHIFT, SHIFT, BITS_OUT)
-        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(
+        Linear::new(ds.n_features(), 8, SHIFT, SHIFT, BITS_OUT)
+            .with_grad_clip(GRAD_CLIP)
+            .with_momentum(MOM_SHIFT),
+    );
     model.add(ReLU::new());
-    model.add(Linear::new(8, 8, SHIFT, SHIFT, BITS_OUT)
-        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(
+        Linear::new(8, 8, SHIFT, SHIFT, BITS_OUT)
+            .with_grad_clip(GRAD_CLIP)
+            .with_momentum(MOM_SHIFT),
+    );
     model.add(ReLU::new());
-    model.add(Linear::new(8, ds.n_classes, SHIFT, SHIFT, BITS_OUT)
-        .with_grad_clip(GRAD_CLIP).with_momentum(MOM_SHIFT));
+    model.add(
+        Linear::new(8, ds.n_classes, SHIFT, SHIFT, BITS_OUT)
+            .with_grad_clip(GRAD_CLIP)
+            .with_momentum(MOM_SHIFT),
+    );
     // No Softmax: the integer backend forbids its FP64 runtime path.
     model.summary();
     println!();
@@ -103,7 +122,7 @@ fn main() {
 
     for epoch in 0..EPOCHS {
         let epoch_start = Instant::now();
-        
+
         reporter.reset();
 
         // Online SGD (batch_size = 1), shuffled each epoch.
@@ -122,51 +141,68 @@ fn main() {
             model.backward(&g.view());
             model.update(LR_SHIFT);
         }
-        
+
         // Evaluate on the test set at the end of each epoch.
-        let test_correct: usize = (0..test.len()).filter(|&i| {
-            let x = test.get_input(i);
-            argmax(&model.forward(&x.view()).data) == test.labels[i] as usize
-        }).count();
+        let test_correct: usize = (0..test.len())
+            .filter(|&i| {
+                let x = test.get_input(i);
+                argmax(&model.forward(&x.view()).data) == test.labels[i] as usize
+            })
+            .count();
         let test_acc = test_correct as f64 / test.len() as f64 * 100.0;
 
         let epoch_elapsed = epoch_start.elapsed();
 
         reporter.maybe_print(epoch, Some(test_acc));
-        
+
         if epoch % LOG_EVERY == 0 || epoch == EPOCHS - 1 {
-            println!("  └─ Epoch {} duration: {:.4}s", epoch, epoch_elapsed.as_secs_f64());
+            println!(
+                "  └─ Epoch {} duration: {:.4}s",
+                epoch,
+                epoch_elapsed.as_secs_f64()
+            );
         }
     }
 
     let total_elapsed = total_start.elapsed();
 
     // ── Final evaluation ──────────────────────────────────────────────────────
-    let correct: usize = (0..ds.len()).filter(|&i| {
-        let x = ds.get_input(i);
-        argmax(&model.forward(&x.view()).data) == ds.labels[i] as usize
-    }).count();
+    let correct: usize = (0..ds.len())
+        .filter(|&i| {
+            let x = ds.get_input(i);
+            argmax(&model.forward(&x.view()).data) == ds.labels[i] as usize
+        })
+        .count();
 
     println!();
     reporter.print_footer();
     println!();
     println!("Total training time: {:.4}s", total_elapsed.as_secs_f64());
-    println!("Final pass accuracy: {}/{} = {:.1}%",
-        correct, ds.len(), correct as f64 / ds.len() as f64 * 100.0);
+    println!(
+        "Final pass accuracy: {}/{} = {:.1}%",
+        correct,
+        ds.len(),
+        correct as f64 / ds.len() as f64 * 100.0
+    );
 
     // ── Per-class breakdown ───────────────────────────────────────────────────
     let nc = ds.n_classes;
     let mut per_class = vec![(0usize, 0usize); nc]; // (correct, total)
     for i in 0..ds.len() {
-        let x   = ds.get_input(i);
-        let y   = model.forward(&x.view()).data;
+        let x = ds.get_input(i);
+        let y = model.forward(&x.view()).data;
         let cls = ds.labels[i] as usize;
         per_class[cls].1 += 1;
-        if argmax(&y) == cls { per_class[cls].0 += 1; }
+        if argmax(&y) == cls {
+            per_class[cls].0 += 1;
+        }
     }
     println!();
     println!("Per-class accuracy:");
     for (c, (ok, total)) in per_class.iter().enumerate() {
-        println!("  class {c}: {ok}/{total} = {:.1}%", *ok as f64 / *total as f64 * 100.0);
+        println!(
+            "  class {c}: {ok}/{total} = {:.1}%",
+            *ok as f64 / *total as f64 * 100.0
+        );
     }
 }

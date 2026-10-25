@@ -36,7 +36,10 @@ pub struct Dyadic {
 }
 
 impl Dyadic {
-    #[inline] pub fn new(v: i32, s: u32) -> Self { Self { v, s } }
+    #[inline]
+    pub fn new(v: i32, s: u32) -> Self {
+        Self { v, s }
+    }
 
     /// Decode to `f64`: `[[x]] = v · 2^{-s}`.
     /// Decode for diagnostics; very small values may underflow to zero in f64.
@@ -61,7 +64,9 @@ impl Dyadic {
     /// other operand's exponent. The latter can overflow even an i64.
     pub fn equivalent(self, rhs: Self) -> bool {
         fn canonical(mut v: i32, mut s: u32) -> (i32, u32) {
-            if v == 0 { return (0, 0); }
+            if v == 0 {
+                return (0, 0);
+            }
             let factors = v.trailing_zeros().min(s);
             v >>= factors;
             s -= factors;
@@ -86,13 +91,17 @@ impl std::fmt::Display for Dyadic {
 /// For `k >= 32`, use the wide path rather than discarding rare outcomes.
 #[inline]
 pub fn stochastic_round(v: i32, k: u32) -> i32 {
-    if k == 0  { return v; }
-    if k >= 32 { return stochastic_round_i64(v as i64, k); }
+    if k == 0 {
+        return v;
+    }
+    if k >= 32 {
+        return stochastic_round_i64(v as i64, k);
+    }
     // Use upper 32 bits of the 64-bit RNG output — better quality than lower.
-    let mask      = (1u32 << k) - 1;
+    let mask = (1u32 << k) - 1;
     let threshold = (rng_next() >> 32) as u32 & mask; // U ~ Uniform{0, 2^k − 1}
-    let floor     = v >> k;
-    let remainder = (v as u32) & mask;         // v mod 2^k  (unsigned)
+    let floor = v >> k;
+    let remainder = (v as u32) & mask; // v mod 2^k  (unsigned)
     floor + i32::from(remainder > threshold)
 }
 
@@ -107,7 +116,9 @@ fn bernoulli_power_of_two(magnitude: u64, bits: u32) -> bool {
     debug_assert!(bits >= 64);
     let mut extra_bits = bits - 64;
     while extra_bits >= 32 {
-        if (rng_next() >> 32) != 0 { return false; }
+        if (rng_next() >> 32) != 0 {
+            return false;
+        }
         extra_bits -= 32;
     }
     if extra_bits > 0 && ((rng_next() >> 32) & ((1u64 << extra_bits) - 1)) != 0 {
@@ -153,18 +164,30 @@ pub fn stochastic_round_i64(v: i64, k: u32) -> i32 {
 /// exponent is a lossy coarsening operation and uses stochastic rounding.
 /// Returns `(mantissa, overflowed_i32)`.
 fn rescale_mantissa(x: Dyadic, target_shift: u32) -> (i32, bool) {
-    if target_shift == x.s { return (x.v, false); }
+    if target_shift == x.s {
+        return (x.v, false);
+    }
     if target_shift < x.s {
         let k = x.s - target_shift;
-        return (if k < 32 { stochastic_round(x.v, k) }
-                else { stochastic_round_i64(x.v as i64, k) }, false);
+        return (
+            if k < 32 {
+                stochastic_round(x.v, k)
+            } else {
+                stochastic_round_i64(x.v as i64, k)
+            },
+            false,
+        );
     }
 
     let k = target_shift - x.s;
     if k >= 32 {
-        return if x.v == 0 { (0, false) }
-               else if x.v < 0 { (i32::MIN, true) }
-               else { (i32::MAX, true) };
+        return if x.v == 0 {
+            (0, false)
+        } else if x.v < 0 {
+            (i32::MIN, true)
+        } else {
+            (i32::MAX, true)
+        };
     }
     // i32 << 31 fits i64; a wider intermediate detects i32 saturation.
     let wide = (x.v as i64) << k;
@@ -177,7 +200,10 @@ fn rescale_mantissa(x: Dyadic, target_shift: u32) -> (i32, bool) {
 /// A larger exponent means a *finer*, not coarser, scale. Saturates on overflow;
 /// reducing the exponent uses stochastic rounding.
 pub fn align(x: Dyadic, s_star: u32) -> Dyadic {
-    Dyadic { v: rescale_mantissa(x, s_star).0, s: s_star }
+    Dyadic {
+        v: rescale_mantissa(x, s_star).0,
+        s: s_star,
+    }
 }
 
 // ─── Four arithmetic operations ───────────────────────────────────────────────
@@ -185,13 +211,19 @@ pub fn align(x: Dyadic, s_star: u32) -> Dyadic {
 /// `x_1 \oplus x_2 = (\hat{v}_1 + \hat{v}_2, s^*)`,  `s^* = max(s_1, s_2)`.
 pub fn add(x1: Dyadic, x2: Dyadic) -> Dyadic {
     let s = x1.s.max(x2.s);
-    Dyadic { v: align(x1, s).v.saturating_add(align(x2, s).v), s }
+    Dyadic {
+        v: align(x1, s).v.saturating_add(align(x2, s).v),
+        s,
+    }
 }
 
 /// `x_1 \ominus x_2 = (\hat{v}_1 − \hat{v}_2, s^*)`,  `s^* = max(s_1, s_2)`.
 pub fn sub(x1: Dyadic, x2: Dyadic) -> Dyadic {
     let s = x1.s.max(x2.s);
-    Dyadic { v: align(x1, s).v.saturating_sub(align(x2, s).v), s }
+    Dyadic {
+        v: align(x1, s).v.saturating_sub(align(x2, s).v),
+        s,
+    }
 }
 
 /// `x_1 \otimes x_2 = (SR(v_1 * v_2, q), s_1 + s_2 - q)`.
@@ -206,7 +238,10 @@ pub fn mul(x1: Dyadic, x2: Dyadic, q: u32) -> Dyadic {
         .expect("mul: negative output scale");
     let s = u32::try_from(output_shift).expect("mul: output scale overflow");
     let product = (x1.v as i64) * (x2.v as i64);
-    Dyadic { v: stochastic_round_i64(product, q), s }
+    Dyadic {
+        v: stochastic_round_i64(product, q),
+        s,
+    }
 }
 
 /// `x_1 / x_2 = (trunc(v_1 * 2^p / v_2), s_1 + p - s_2)`.
@@ -228,7 +263,11 @@ pub fn div(x1: Dyadic, x2: Dyadic, p: u32) -> Dyadic {
     let quotient = if x1.v == 0 {
         0
     } else if p >= 63 {
-        if (x1.v < 0) ^ (x2.v < 0) { i32::MIN } else { i32::MAX }
+        if (x1.v < 0) ^ (x2.v < 0) {
+            i32::MIN
+        } else {
+            i32::MAX
+        }
     } else {
         let shifted = (x1.v as i128) << p;
         (shifted / x2.v as i128).clamp(i32::MIN as i128, i32::MAX as i128) as i32
@@ -242,13 +281,17 @@ pub fn div(x1: Dyadic, x2: Dyadic, p: u32) -> Dyadic {
 /// Returns `(−2^(b−1), 2^(b−1) − 1)`.
 pub fn signed_bounds(bits: u32) -> (i32, i32) {
     assert!(bits > 0, "signed_bounds: bits must be positive");
-    if bits >= 32 { return (i32::MIN, i32::MAX); }
+    if bits >= 32 {
+        return (i32::MIN, i32::MAX);
+    }
     (-(1i32 << (bits - 1)), (1i32 << (bits - 1)) - 1)
 }
 
 /// Standard saturation clamp.
 #[inline]
-pub fn clip(v: i32, q_min: i32, q_max: i32) -> i32 { v.clamp(q_min, q_max) }
+pub fn clip(v: i32, q_min: i32, q_max: i32) -> i32 {
+    v.clamp(q_min, q_max)
+}
 
 // ─── Requantisation ───────────────────────────────────────────────────────────
 
@@ -260,21 +303,30 @@ pub fn clip(v: i32, q_min: i32, q_max: i32) -> i32 { v.clamp(q_min, q_max) }
 pub fn requantize(x: Dyadic, s_target: u32, q_min: i32, q_max: i32) -> (Dyadic, bool) {
     let (scaled, overflowed) = rescale_mantissa(x, s_target);
     let was_clipped = overflowed || scaled < q_min || scaled > q_max;
-    (Dyadic { v: clip(scaled, q_min, q_max), s: s_target }, was_clipped)
+    (
+        Dyadic {
+            v: clip(scaled, q_min, q_max),
+            s: s_target,
+        },
+        was_clipped,
+    )
 }
 
 // ─── Straight-Through Estimator ───────────────────────────────────────────────
 
 /// STE for `clip`: gradient passes through iff `v_y` was within bounds.
 pub fn ste_clip(grad: Dyadic, v_y: i32, q_min: i32, q_max: i32) -> Dyadic {
-    if v_y >= q_min && v_y <= q_max { grad } else { Dyadic::new(0, grad.s) }
+    if v_y >= q_min && v_y <= q_max {
+        grad
+    } else {
+        Dyadic::new(0, grad.s)
+    }
 }
 
 /// Combined STE for `ℛ`: SR is treated as identity, clip gates the gradient.
 pub fn ste_requantize(grad_y: Dyadic, v_y: i32, q_min: i32, q_max: i32) -> Dyadic {
     ste_clip(grad_y, v_y, q_min, q_max)
 }
-
 
 // ─── Tensor ───────────────────────────────────────────────────────────────────
 
@@ -284,7 +336,7 @@ pub fn ste_requantize(grad_y: Dyadic, v_y: i32, q_min: i32, q_max: i32) -> Dyadi
 /// lives at `data[i₀·(d₁·…·dₙ) + i₁·(d₂·…·dₙ) + … + iₙ]`.
 #[derive(Clone, Debug, Default)]
 pub struct Tensor {
-    pub data:  Vec<Dyadic>,
+    pub data: Vec<Dyadic>,
     pub shape: Vec<usize>,
 }
 
@@ -304,7 +356,6 @@ pub struct TensorViewMut<'a> {
     pub shape: &'a [usize],
 }
 
-
 impl<'a> TensorView<'a> {
     /// Materializes the borrowed view into a fully owned Tensor.
     /// This allocates memory and copies the underlying data.
@@ -321,8 +372,6 @@ impl<'a> From<TensorView<'a>> for Tensor {
         view.to_tensor()
     }
 }
-
-
 
 /// Iterator yielding read-only views (TensorView)
 pub struct TensorIter<'a> {
@@ -359,13 +408,11 @@ impl<'a> Iterator for TensorIterMut<'a> {
     }
 }
 
-
-
 impl Tensor {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
-            shape: vec![]
+            shape: vec![],
         }
     }
     /// Construct from a flat buffer and a shape.  Panics in debug mode if the
@@ -375,7 +422,8 @@ impl Tensor {
             data.len(),
             shape.iter().product::<usize>(),
             "Tensor::from_vec: buffer length {} ≠ shape product {}",
-            data.len(), shape.iter().product::<usize>(),
+            data.len(),
+            shape.iter().product::<usize>(),
         );
         Self { data, shape }
     }
@@ -383,14 +431,23 @@ impl Tensor {
     /// Allocate an all-zero tensor with the given shape.
     pub fn zeros(shape: Vec<usize>) -> Self {
         let n = shape.iter().product();
-        Self { data: vec![Dyadic::new(0, 0); n], shape }
+        Self {
+            data: vec![Dyadic::new(0, 0); n],
+            shape,
+        }
     }
 
     /// Total number of elements.
-    #[inline] pub fn len(&self) -> usize { self.data.len() }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
 
     /// `true` if the tensor has no elements.
-    #[inline] pub fn is_empty(&self) -> bool { self.data.is_empty() }
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
 
     /// Borrows the ENTIRE Tensor as a read-only View.
     /// This is O(1) and does no allocation.
@@ -418,7 +475,11 @@ impl Tensor {
         };
 
         // The shape of the yielded views (everything except the batch dimension)
-        let sub_shape = if self.shape.is_empty() { &[] } else { &self.shape[1..] };
+        let sub_shape = if self.shape.is_empty() {
+            &[]
+        } else {
+            &self.shape[1..]
+        };
 
         TensorIter {
             chunks: self.data.chunks(item_size.max(1)),
@@ -434,7 +495,11 @@ impl Tensor {
             self.shape[1..].iter().product()
         };
 
-        let sub_shape = if self.shape.is_empty() { &[] } else { &self.shape[1..] };
+        let sub_shape = if self.shape.is_empty() {
+            &[]
+        } else {
+            &self.shape[1..]
+        };
 
         TensorIterMut {
             chunks: self.data.chunks_mut(item_size.max(1)),
@@ -453,15 +518,15 @@ impl FromIterator<Tensor> for Tensor {
         if let Some(first) = iter.next() {
             base_shape = Some(first.shape.clone());
             let item_size = first.data.len();
-            
+
             // THE MAGIC TRICK: Ask the iterator how many items are left,
             // and pre-allocate the EXACT memory needed for the whole batch!
             let (lower_bound_remaining, _) = iter.size_hint();
             all_data.reserve(item_size * (lower_bound_remaining + 1));
-            
+
             all_data.extend(first.data);
             batch_size += 1;
-            
+
             for tensor in iter {
                 all_data.extend(tensor.data); // No more reallocations!
                 batch_size += 1;
@@ -485,37 +550,43 @@ impl FromIterator<Tensor> for Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::{seed_rng};
+    use crate::rng::seed_rng;
     const EPS: f64 = 1e-5;
 
-    #[test] fn interpretation_map() {
+    #[test]
+    fn interpretation_map() {
         assert!((Dyadic::new(3, 2).to_f64() - 0.75).abs() < EPS);
     }
 
-    #[test] fn non_uniqueness() {
+    #[test]
+    fn non_uniqueness() {
         let (a, b, c) = (Dyadic::new(3, 2), Dyadic::new(6, 3), Dyadic::new(12, 4));
         assert!(a.equivalent(b) && b.equivalent(c) && a.equivalent(c));
     }
 
-    #[test] fn align_exact_power_of_two() {
+    #[test]
+    fn align_exact_power_of_two() {
         let a = align(Dyadic::new(4, 0), 2);
         assert_eq!(a.s, 2);
         assert_eq!(a.v, 16);
         assert_eq!(a.to_f64(), 4.0);
     }
 
-    #[test] fn add_same_scale() {
+    #[test]
+    fn add_same_scale() {
         assert_eq!(add(Dyadic::new(3, 4), Dyadic::new(5, 4)), Dyadic::new(8, 4));
     }
 
-    #[test] fn mul_scale_arithmetic() {
+    #[test]
+    fn mul_scale_arithmetic() {
         let r = mul(Dyadic::new(4, 2), Dyadic::new(3, 2), 2);
         assert_eq!(r.s, 2);
         let step = 2f64.powi(-(r.s as i32));
         assert!((r.to_f64() - 0.75).abs() <= step + EPS);
     }
 
-    #[test] fn stochastic_round_unbiased() {
+    #[test]
+    fn stochastic_round_unbiased() {
         // SR(1, 1) should average to 0.5 over many samples.
         seed_rng(42);
         let n = 100_000;
@@ -524,25 +595,29 @@ mod tests {
         assert!((mean - 0.5).abs() < 0.01, "mean = {mean:.4}, expected 0.5");
     }
 
-    #[test] fn stochastic_round_identity_at_zero() {
+    #[test]
+    fn stochastic_round_identity_at_zero() {
         for v in [-100, -1, 0, 1, 100] {
             assert_eq!(stochastic_round(v, 0), v);
         }
     }
 
-    #[test] fn requantize_clips() {
+    #[test]
+    fn requantize_clips() {
         let (lo, hi) = signed_bounds(8);
         let (r, clipped) = requantize(Dyadic::new(1000, 0), 0, lo, hi);
         assert!(clipped);
         assert_eq!(r.v, 127);
     }
 
-    #[test] fn ste_passes_in_bounds() {
+    #[test]
+    fn ste_passes_in_bounds() {
         let (lo, hi) = signed_bounds(8);
         assert_eq!(ste_requantize(Dyadic::new(42, 4), 50, lo, hi).v, 42);
     }
 
-    #[test] fn ste_zeros_when_clipped() {
+    #[test]
+    fn ste_zeros_when_clipped() {
         let (lo, hi) = signed_bounds(8);
         let out = ste_requantize(Dyadic::new(42, 4), 200, lo, hi);
         assert_eq!(out.v, 0);

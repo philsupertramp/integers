@@ -62,14 +62,14 @@ mod activations;
 pub use activations::{ReLU, Softmax};
 
 mod regularization;
-pub use regularization::{Dropout, BatchNorm1D, BatchNorm2D, MaxPool2D};
+pub use regularization::{BatchNorm1D, BatchNorm2D, Dropout, MaxPool2D};
 
 mod conv;
 pub use conv::Conv2D;
 
 use crate::dyadic::{
-    add, mul, requantize, signed_bounds, ste_requantize, stochastic_round, Dyadic,
-    Tensor, TensorView
+    Dyadic, Tensor, TensorView, add, mul, requantize, signed_bounds, ste_requantize,
+    stochastic_round,
 };
 use crate::rng::rng_range;
 
@@ -133,7 +133,9 @@ pub trait Module {
     // ── Metadata ─────────────────────────────────────────────────────────────
 
     fn name(&self) -> &'static str;
-    fn describe(&self) -> String { self.name().to_string() }
+    fn describe(&self) -> String {
+        self.name().to_string()
+    }
 
     /// Toggle training / eval mode.  Only meaningful for stochastic layers
     /// (Dropout, BatchNorm).  Default: no-op.
@@ -151,23 +153,32 @@ pub struct Sequential {
 impl Sequential {
     /// Default backend: require integer-only forward/backward/update.
     pub fn new() -> Self {
-        Self { layers: Vec::new(), allow_experimental_float: false }
+        Self {
+            layers: Vec::new(),
+            allow_experimental_float: false,
+        }
     }
 
     /// Explicit opt-in to the historical floating-point experimental path.
     /// This is NOT the ADR-002 integer backend. Softmax and BatchNorm still
     /// perform FP64 runtime operations here.
     pub fn new_experimental_float() -> Self {
-        Self { layers: Vec::new(), allow_experimental_float: true }
+        Self {
+            layers: Vec::new(),
+            allow_experimental_float: true,
+        }
     }
 
     fn check_integer_backend(&self) {
-        if self.allow_experimental_float { return; }
+        if self.allow_experimental_float {
+            return;
+        }
         for layer in &self.layers {
             assert!(
                 layer.training_arithmetic() == TrainingArithmetic::IntegerOnly,
                 "Sequential integer backend rejects '{}' ({:?}); use the experimental float mode if intended",
-                layer.name(), layer.training_arithmetic(),
+                layer.name(),
+                layer.training_arithmetic(),
             );
         }
     }
@@ -177,7 +188,8 @@ impl Sequential {
             assert!(
                 layer.training_arithmetic() == TrainingArithmetic::IntegerOnly,
                 "Sequential integer backend rejects '{}' ({:?}); use the experimental float mode if intended",
-                layer.name(), layer.training_arithmetic(),
+                layer.name(),
+                layer.training_arithmetic(),
             );
         }
         self.layers.push(Box::new(layer));
@@ -187,7 +199,9 @@ impl Sequential {
     pub fn forward(&mut self, input: &TensorView) -> Tensor {
         self.check_integer_backend();
         let mut x = input.to_tensor();
-        for layer in &mut self.layers { x = layer.forward(&x.view()); }
+        for layer in &mut self.layers {
+            x = layer.forward(&x.view());
+        }
         x
     }
 
@@ -195,7 +209,9 @@ impl Sequential {
     pub fn backward(&mut self, grad: &TensorView) -> Tensor {
         self.check_integer_backend();
         let mut g = grad.to_tensor();
-        for layer in self.layers.iter_mut().rev() { g = layer.backward(&g.view()); }
+        for layer in self.layers.iter_mut().rev() {
+            g = layer.backward(&g.view());
+        }
         g
     }
 
@@ -221,17 +237,23 @@ impl Sequential {
 
     pub fn update(&mut self, lr_shift: u32) {
         self.check_integer_backend();
-        for layer in &mut self.layers { layer.update(lr_shift); }
+        for layer in &mut self.layers {
+            layer.update(lr_shift);
+        }
     }
 
     pub fn zero_grad(&mut self) {
         self.check_integer_backend();
-        for layer in &mut self.layers { layer.zero_grad(); }
+        for layer in &mut self.layers {
+            layer.zero_grad();
+        }
     }
 
     pub fn set_training(&mut self, training: bool) {
         self.check_integer_backend();
-        for layer in &mut self.layers { layer.set_training(training); }
+        for layer in &mut self.layers {
+            layer.set_training(training);
+        }
     }
 
     pub fn summary(&self) {
@@ -243,7 +265,11 @@ impl Sequential {
     }
 }
 
-impl Default for Sequential { fn default() -> Self { Self::new() } }
+impl Default for Sequential {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ─── Shared optimiser helpers ─────────────────────────────────────────────────
 
@@ -273,10 +299,15 @@ fn momentum_step(w: Dyadic, g: Dyadic, v: &mut Dyadic, lr_shift: u32, m: u32) ->
 /// precision backs off until the signed i32 mantissa fits.
 fn mean_gradient(g: Dyadic, samples: usize) -> Dyadic {
     assert!(samples > 0, "mean_gradient: sample count must be nonzero");
-    if samples == 1 { return g; }
+    if samples == 1 {
+        return g;
+    }
     if samples.is_power_of_two() {
-        return Dyadic::new(g.v, g.s.checked_add(samples.trailing_zeros())
-            .expect("mean_gradient: output scale overflow"));
+        return Dyadic::new(
+            g.v,
+            g.s.checked_add(samples.trailing_zeros())
+                .expect("mean_gradient: output scale overflow"),
+        );
     }
     let ceil_log2 = usize::BITS - (samples - 1).leading_zeros();
     let mut bits = (ceil_log2 + 8).min(30).min(u32::MAX - g.s);
@@ -289,7 +320,11 @@ fn mean_gradient(g: Dyadic, samples: usize) -> Dyadic {
         if remainder * 2 > divisor || (remainder * 2 == divisor && quotient & 1 != 0) {
             quotient += 1;
         }
-        let limit = if g.v < 0 { 1i128 << 31 } else { i32::MAX as i128 };
+        let limit = if g.v < 0 {
+            1i128 << 31
+        } else {
+            i32::MAX as i128
+        };
         if quotient <= limit {
             let signed = if g.v < 0 { -quotient } else { quotient };
             return Dyadic::new(signed as i32, g.s + bits);
@@ -303,28 +338,53 @@ fn mean_gradient(g: Dyadic, samples: usize) -> Dyadic {
 // preserves their existing SUM-gradient optimizer behavior. Not used by
 // the ADR-002 integer-only trainable layers.
 fn apply_updates(
-    params: &mut [Dyadic], grads: &Tensor, vels: &mut [Dyadic],
-    lr_shift: u32, momentum: Option<u32>,
+    params: &mut [Dyadic],
+    grads: &Tensor,
+    vels: &mut [Dyadic],
+    lr_shift: u32,
+    momentum: Option<u32>,
 ) {
     match momentum {
-        None => params.iter_mut().zip(grads.data.iter())
+        None => params
+            .iter_mut()
+            .zip(grads.data.iter())
             .for_each(|(w, &g)| *w = sgd_step(*w, g, lr_shift)),
-        Some(m) => params.iter_mut().zip(grads.data.iter()).zip(vels.iter_mut())
+        Some(m) => params
+            .iter_mut()
+            .zip(grads.data.iter())
+            .zip(vels.iter_mut())
             .for_each(|((w, &g), v)| *w = momentum_step(*w, g, v, lr_shift, m)),
     }
 }
 
 fn apply_updates_mean(
-    params: &mut [Dyadic], grads: &Tensor, vels: &mut [Dyadic],
-    lr_shift: u32, momentum: Option<u32>, samples: usize,
+    params: &mut [Dyadic],
+    grads: &Tensor,
+    vels: &mut [Dyadic],
+    lr_shift: u32,
+    momentum: Option<u32>,
+    samples: usize,
 ) {
     assert!(samples > 0, "apply_updates: no accumulated examples");
-    assert_eq!(params.len(), grads.data.len(), "apply_updates: param/gradient mismatch");
-    assert_eq!(params.len(), vels.len(), "apply_updates: param/velocity mismatch");
+    assert_eq!(
+        params.len(),
+        grads.data.len(),
+        "apply_updates: param/gradient mismatch"
+    );
+    assert_eq!(
+        params.len(),
+        vels.len(),
+        "apply_updates: param/velocity mismatch"
+    );
     match momentum {
-        None => params.iter_mut().zip(grads.data.iter())
+        None => params
+            .iter_mut()
+            .zip(grads.data.iter())
             .for_each(|(w, &g)| *w = sgd_step(*w, mean_gradient(g, samples), lr_shift)),
-        Some(m) => params.iter_mut().zip(grads.data.iter()).zip(vels.iter_mut())
+        Some(m) => params
+            .iter_mut()
+            .zip(grads.data.iter())
+            .zip(vels.iter_mut())
             .for_each(|((w, &g), v)| {
                 *w = momentum_step(*w, mean_gradient(g, samples), v, lr_shift, m)
             }),
@@ -333,7 +393,7 @@ fn apply_updates_mean(
 
 #[cfg(test)]
 mod gradient_average_tests {
-    use super::{mean_gradient, Dyadic};
+    use super::{Dyadic, mean_gradient};
 
     #[test]
     fn power_of_two_sample_means_are_exact() {
@@ -350,8 +410,10 @@ mod gradient_average_tests {
                 let actual = mean_gradient(original, samples);
                 let reference = original.to_f64() / samples as f64;
                 let tolerance = 0.5 * 2f64.powi(-(actual.s as i32)) + 1e-12;
-                assert!((actual.to_f64() - reference).abs() <= tolerance,
-                    "{original:?}, samples={samples}, actual={actual:?}");
+                assert!(
+                    (actual.to_f64() - reference).abs() <= tolerance,
+                    "{original:?}, samples={samples}, actual={actual:?}"
+                );
             }
         }
     }
@@ -362,8 +424,10 @@ mod gradient_average_tests {
             for samples in [3, 24, 31, 1000] {
                 let actual = mean_gradient(Dyadic::new(v, 0), samples);
                 let expected = v as f64 / samples as f64;
-                assert!((actual.to_f64() - expected).abs() <= 1.0,
-                    "v={v}, samples={samples}, actual={actual:?}");
+                assert!(
+                    (actual.to_f64() - expected).abs() <= 1.0,
+                    "v={v}, samples={samples}, actual={actual:?}"
+                );
             }
         }
     }
@@ -375,16 +439,23 @@ mod gradient_average_tests {
     }
 }
 
-
 // ─── Flatten ──────────────────────────────────────────────────────────────────
 
 /// Pass-through shape bridge (conv → linear). Exists for `summary()` clarity.
 pub struct Flatten;
 impl Module for Flatten {
-    fn training_arithmetic(&self) -> TrainingArithmetic { TrainingArithmetic::IntegerOnly }
-    fn name(&self) -> &'static str { "Flatten" }
-    fn forward(&mut self, x: &TensorView) -> Tensor { x.to_tensor() }
-    fn backward(&mut self, g: &TensorView) -> Tensor { g.to_tensor() }
+    fn training_arithmetic(&self) -> TrainingArithmetic {
+        TrainingArithmetic::IntegerOnly
+    }
+    fn name(&self) -> &'static str {
+        "Flatten"
+    }
+    fn forward(&mut self, x: &TensorView) -> Tensor {
+        x.to_tensor()
+    }
+    fn backward(&mut self, g: &TensorView) -> Tensor {
+        g.to_tensor()
+    }
     fn update(&mut self, _: u32) {}
     fn zero_grad(&mut self) {}
 }
