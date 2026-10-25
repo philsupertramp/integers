@@ -51,7 +51,7 @@ def summarize(records, source, output_dir, metadata):
     lines = [
         "# Held-out experiment report",
         "",
-        f"Dataset: **{records[0]['dataset']}**; smoke mode: **{records[0]['smoke']}**; "
+        f"Dataset: **{records[0]['dataset']}**; architecture: **{metadata['architecture']}**; smoke mode: **{records[0]['smoke']}**; "
         f"CI sample: **{records[0].get('ci_sample', False)}**.",
         f"Commit: `{metadata['git_commit']}`; Rust: `{metadata['rustc']}`.",
         f"Target: `{metadata['platform']}`; generated at `{metadata['timestamp_utc']}`.",
@@ -100,12 +100,28 @@ def summarize(records, source, output_dir, metadata):
         "in advance and never selected using test performance.",
         "",
         "**Comparison limits:** FP32 is a transparent scalar Rust reference, not an",
-        "optimized BLAS/PyTorch implementation. It uses the identical dense architecture,",
-        "starting weights, sample order, target and squared-error objective, power-of-two",
+        "optimized BLAS/PyTorch implementation. Both backends use identical topology,",
+        "decoded starting weights, sample order, target and 0.5·sum(squared-error) objective, power-of-two",
         "learning rate and momentum convention, but continuous arithmetic differs from",
         "dyadic quantization, stochastic rounding, and STE. Latency reflects kernels and",
         "implementation maturity, not intrinsic integer-versus-float hardware efficiency.",
     ]
+    if metadata["architecture"] == "cnn":
+        lines.extend([
+            "", "**CNN baseline:** Conv(1→4,3) / ReLU / 2x2 pool / Conv(4→8,3) / "
+            "ReLU / 2x2 pool / Flatten(200) / Dense(64) / ReLU / Dense(10). "
+            "The FP32 path uses separate scalar kernels and continuous derivatives; "
+            "the integer path uses quantization, stochastic rounding, clipping and STE. "
+            "Both optimize 0.5·sum((logits-target)^2), not cross entropy.",
+            "", "**Prior test disclosure:** MNIST's official 10k test set was already used "
+            "in issue #15. Any CNN final-test result is an already-known benchmark, "
+            "not a pristine independent generalization test.",
+        ])
+    if metadata["train_limit"] is not None or metadata["validation_limit"] is not None:
+        lines.extend([
+            "", "**FEASIBILITY SUBSAMPLE:** training/validation are capped *after* the "
+            "fixed canonical 55k/5k split. Do not describe this result as full-data convergence."
+        ])
     if validation_only:
         lines.extend(["", "**VALIDATION ONLY:** the test partition was not "
                       "opened, loaded, hashed, or evaluated. This score is used "
@@ -131,9 +147,44 @@ def summarize(records, source, output_dir, metadata):
     }, indent=2) + "\n")
 
 
+
+def cnn_accuracy_svg(records, output_dir):
+    """Dependency-free SVG validation learning curves, one line per paired run."""
+    width, height, left, top, right, bottom = 860, 430, 55, 25, 180, 45
+    plot_w, plot_h = width - left - right, height - top - bottom
+    epochs = max(len(row["learning_curve"]) for row in records)
+    colors = ("#275dad", "#d05f28", "#36966c", "#9356b4", "#a18326", "#5482a0")
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+             '<rect width="100%" height="100%" fill="white"/>',
+             '<text x="55" y="16" font-size="14">MNIST CNN validation accuracy (%)</text>']
+    for tick in range(0,101,20):
+        y = top + plot_h * (100-tick)/100
+        parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left+plot_w}" y2="{y:.1f}" stroke="#e4e4e4"/>')
+        parts.append(f'<text x="7" y="{y+4:.1f}" font-size="12">{tick}%</text>')
+    for n, row in enumerate(records):
+        xs = [(left + plot_w * i/max(1,epochs-1)) for i in range(len(row["learning_curve"]))]
+        ys = [top + plot_h * (100-m["validation_accuracy_pct"])/100 for m in row["learning_curve"]]
+        points = " ".join(f"{x:.1f},{y:.1f}" for x,y in zip(xs,ys))
+        color = colors[n % len(colors)]
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{points}"/>')
+        for x,y in zip(xs,ys):
+            parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.5" fill="{color}"/>')
+        label = f'{row["backend"]} seed {row["seed"]}'
+        ly = 50 + 23*n
+        parts.append(f'<line x1="{left+plot_w+9}" y1="{ly}" x2="{left+plot_w+28}" y2="{ly}" stroke="{color}" stroke-width="3"/>')
+        parts.append(f'<text x="{left+plot_w+35}" y="{ly+4}" font-size="12">{label}</text>')
+    parts.append(f'<text x="{left+plot_w/2:.1f}" y="{height-10}" font-size="12">Epoch (1…{epochs})</text>')
+    parts.append('</svg>')
+    (output_dir / "validation_accuracy.svg").write_text("\n".join(parts) + "\n")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=("iris", "mnist"), default="iris")
+    parser.add_argument("--architecture", choices=("dense", "cnn"), default="dense")
+    parser.add_argument("--train-limit", type=int, default=None,
+                        help="validation-only feasibility cap after canonical split")
+    parser.add_argument("--validation-limit", type=int, default=None,
+                        help="validation-only feasibility cap after canonical split")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/mnist")
     parser.add_argument("--seeds", type=int, nargs="+", default=[1337, 2027, 4242])
     parser.add_argument("--epochs", type=int, default=None)
@@ -151,6 +202,15 @@ def main():
     args = parser.parse_args()
     if args.lr_shift is None:
         args.lr_shift = 6 if args.dataset == "iris" else 7
+    if args.architecture == "cnn" and args.dataset != "mnist":
+        parser.error("CNN architecture requires --dataset mnist")
+    if args.architecture == "cnn" and args.ci_sample:
+        parser.error("CNN sampled development uses --validation-only with no test files")
+    if (args.train_limit is not None or args.validation_limit is not None):
+        if not args.validation_only or args.ci_sample:
+            parser.error("sample limits require --validation-only")
+        if any(n is not None and n <= 0 for n in (args.train_limit, args.validation_limit)):
+            parser.error("sample limits must be positive")
     if args.validation_only and args.ci_sample:
         parser.error("--validation-only and --ci-sample cannot be combined")
     if args.final_test and (args.validation_only or args.ci_sample or args.smoke):
@@ -174,7 +234,11 @@ def main():
     source = {str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path):
               file_sha256(path) for path in paths}
     profile = "validation-only" if args.validation_only else "ci-sample" if args.ci_sample else "smoke" if args.smoke else "full"
-    output_dir = args.output_dir.resolve() / args.dataset / profile
+    # Preserve #15's original dense output paths; isolate CNN reports.
+    output_dir = args.output_dir.resolve() / args.dataset
+    if args.architecture == "cnn":
+        output_dir = output_dir / "cnn"
+    output_dir = output_dir / profile
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "git_commit": command_output("git", "rev-parse", "HEAD"),
@@ -183,6 +247,10 @@ def main():
         "platform": platform.platform(),
         "machine": platform.machine(),
         "lr_shift": args.lr_shift,
+        "architecture": args.architecture,
+        "train_limit": args.train_limit,
+        "validation_limit": args.validation_limit,
+        "profile": ("debug" if args.smoke else "release"),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     }
     records = []
@@ -194,10 +262,15 @@ def main():
                 "cargo", "run", "--locked", "--release" if not args.smoke else "--quiet",
                 "--example", "held_out", "--",
                 "--dataset", args.dataset, "--backend", backend,
+                "--architecture", args.architecture,
                 "--seed", str(seed), "--batch-size", str(args.batch_size),
                 "--lr-shift", str(args.lr_shift),
                 "--data-dir", str(args.data_dir), "--report", str(path),
             ]
+            if args.train_limit is not None:
+                cmd.extend(["--train-limit", str(args.train_limit)])
+            if args.validation_limit is not None:
+                cmd.extend(["--validation-limit", str(args.validation_limit)])
             if args.epochs is not None:
                 cmd.extend(["--epochs", str(args.epochs)])
             if args.smoke:
@@ -213,6 +286,8 @@ def main():
             row = json.loads(path.read_text())
             assert row["seed"] == seed and row["backend"] == backend
             assert row["lr_shift"] == args.lr_shift
+            assert row["architecture_kind"] == ("mnist_cnn_v1" if args.architecture == "cnn"
+                                                 else "dense_mlp")
             assert row["test_size"] == (0 if args.validation_only else 20 if args.dataset == "iris" else 10000)
             assert row["ci_sample"] == args.ci_sample
             assert row["validation_only"] == args.validation_only
@@ -224,8 +299,10 @@ def main():
                     assert row["train_size"] == (12 if args.smoke else 106)
                     assert row["validation_size"] == (3 if args.smoke else 24)
                 else:
-                    assert row["train_size"] == (40 if args.smoke else 55000)
-                    assert row["validation_size"] == (10 if args.smoke else 5000)
+                    assert row["train_size"] == min(args.train_limit or 55000,
+                                                      40 if args.smoke else 55000)
+                    assert row["validation_size"] == min(args.validation_limit or 5000,
+                                                           10 if args.smoke else 5000)
             if args.ci_sample:
                 assert row["train_size"] == 640 and row["validation_size"] == 200
                 assert row["test_correct"] is None and row["test_accuracy_pct"] is None
@@ -234,6 +311,8 @@ def main():
                        for epoch in row["learning_curve"])
             records.append(row)
     summarize(records, source, output_dir, metadata)
+    if args.architecture == "cnn":
+        cnn_accuracy_svg(records, output_dir)
     print(f"Complete: {output_dir / 'summary.md'}")
 
 

@@ -1,0 +1,61 @@
+name: CNN validation-only feasibility gate
+
+on:
+  pull_request:
+    branches: [big-refactor]
+
+permissions:
+  contents: read
+
+jobs:
+  small-cnn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch only verified MNIST training IDX
+        run: python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+      - name: Assert test files never downloaded
+        run: |
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: One representative validation-only epoch (paired backends)
+        run: |
+          python3 experiments/run_baselines.py --dataset mnist --architecture cnn \
+            --validation-only --epochs 1 --seeds 1337 --batch-size 32 --lr-shift 7 \
+            --train-limit 128 --validation-limit 128 \
+            --output-dir /tmp/integers-cnn-feasibility
+      - name: Verify manifest and bounded confusion matrices
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/tmp/integers-cnn-feasibility/mnist/cnn/validation-only")
+          manifest = json.loads((root / "manifest.json").read_text())
+          assert len(manifest["sources_sha256"]) == 2
+          assert all("train-" in key for key in manifest["sources_sha256"])
+          assert manifest["environment"]["architecture"] == "cnn"
+          reports = sorted(root.glob("*-seed-*.json"))
+          assert len(reports) == 2
+          for report in reports:
+              data = json.loads(report.read_text())
+              assert data["architecture_kind"] == "mnist_cnn_v1"
+              assert (data["train_size"], data["validation_size"], data["test_size"]) == (128,128,0)
+              assert data["test_evaluated"] is False
+              assert data["test_correct"] is None and data["test_accuracy_pct"] is None
+              assert len(data["learning_curve"]) == 1
+              metric = data["learning_curve"][0]
+              assert metric["training_samples"] == 128
+              assert metric["training_ms"] >= 0 and metric["validation_ms"] >= 0
+              matrix = metric["validation_confusion"]
+              assert len(matrix) == 10 and all(len(row) == 10 for row in matrix)
+              assert sum(map(sum,matrix)) == 128
+          print((root / "summary.md").read_text())
+          PY
+      - name: Preserve small auditable feasibility measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnist-cnn-validation-feasibility
+          path: /tmp/integers-cnn-feasibility/mnist/cnn/validation-only/
+          retention-days: 30
