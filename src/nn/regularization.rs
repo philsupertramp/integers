@@ -212,7 +212,6 @@ impl BatchNorm1D {
             vec![Dyadic::new(0, shift); num_features],
             vec![num_features],
         );
-        let z = |n: usize| vec![Dyadic::new(0, shift); n];
         Self {
             num_features,
             shift,
@@ -508,7 +507,6 @@ impl BatchNorm2D {
         );
         let beta = Tensor::from_vec(vec![Dyadic::new(0, shift); channels], vec![channels]);
 
-        let z = |n: usize| vec![Dyadic::new(0, shift); n];
         Self {
             channels,
             h,

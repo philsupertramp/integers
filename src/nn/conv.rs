@@ -242,7 +242,6 @@ impl Module for Conv2D {
         "Conv2D"
     }
     fn describe(&self) -> String {
-        let ws = self.kernels.data.first().map_or(0, |k| k.s);
         let clip = if self.grad_clip == i32::MAX {
             "off".into()
         } else {
