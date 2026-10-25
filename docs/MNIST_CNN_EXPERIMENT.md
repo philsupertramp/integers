@@ -1,6 +1,6 @@
 # Issue #35 — reproducible MNIST CNN methodology and status
 
-**Status:** implementation PR #36, **experiment incomplete pending measured feasibility and full runs**. This is not a claim of 94% CNN accuracy or hardware efficiency. Base commit: `795129207f8ca1d4be7b8ac4e5f590b91b633017` on `big-refactor`. Architecture and exploratory settings are frozen below before full CNN measurements.
+**Status:** implementation PR #36 and the frozen full 55k/5k, three-seed **10-epoch validation experiment completed and archived** on 2026-10-24. Official MNIST test results are **not** part of this validation-only archive; a separate, explicitly labeled already-known benchmark run may be performed under `--final-test`. This is not a claim of deep-network numerical correctness or hardware efficiency. Base commit: `795129207f8ca1d4be7b8ac4e5f590b91b633017` on `big-refactor`. Architecture and exploratory settings are frozen below before full CNN measurements.
 
 ## Model and arithmetic
 
@@ -62,15 +62,34 @@ Note: the train-only fetch option and its checksum behavior must be verified aga
 
 The first measured feasibility run on the GitHub-hosted x86_64 Ubuntu runner ([CI 40127767359](https://github.com/philsupertramp/integers/actions/runs/40127767359), commit `c8cd44eb`) completed one epoch with **128 training and 128 validation images**, seed 1337, batch 32, release build, no test IDX files. Integer online training accuracy was 10.94%, validation 8.59%, whole epoch 275 ms, peak RSS 410.85 MiB and extreme output count zero. Scalar FP32 online training accuracy was 12.50%, validation 12.50%, whole epoch 55 ms, RSS 410.95 MiB and zero nonfinite parameters. These numbers do not show convergence; integer elapsed time was about 5× the scalar FP32 reference for this tiny cohort. The report artifact is attached to that run. A 128+128-sample timing cannot safely predict throughput at 55k+5k or with different batch/cache conditions; the runner now also records training and validation time separately for an improved subsequent estimate.
 
-No CNN-specific full 55k/5k three-seed accuracy, numerical anomaly frequency, runtime or peak-RSS comparison has been established by the existing dense experiment. Do not extrapolate dense timings to CNN. To estimate expense, measure both backends on a representative post-split 128-example cohort, measure validation overhead separately, and extrapolate the **training-only component** to 55,000 examples per epoch; validation remains 5,000 per epoch. Multiply by ten epochs, three seeds and both backends, retaining an uncertainty margin for allocation, cache effects and hardware differences. Reports must include measured samples, profile, wall-time and VmHWM, not fabricated full-run estimates.
+At the initial feasibility stage, no CNN-specific full 55k/5k three-seed accuracy, numerical anomaly frequency, runtime or peak-RSS comparison had been established by the existing dense experiment. The complete measured CNN validation results are recorded below. Do not extrapolate dense timings to CNN. To estimate expense, measure both backends on a representative post-split 128-example cohort, measure validation overhead separately, and extrapolate the **training-only component** to 55,000 examples per epoch; validation remains 5,000 per epoch. Multiply by ten epochs, three seeds and both backends, retaining an uncertainty margin for allocation, cache effects and hardware differences. Reports must include measured samples, profile, wall-time and VmHWM, not fabricated full-run estimates.
 
 ### Issue #35 acceptance snapshot (to be updated after CI)
 
 - Implemented: integer CNN path through default ADR-002 backend, paired independently implemented scalar FP32 reference, architecture switch and shared #15 split/provenance/reporting, deterministic offline composition tests and batch/cache regressions. The small real-MNIST, validation-only feasibility gate passed on CI 40127767359.
 - Verification pending: successful `cargo test --locked`, all-target checks and feature checks on the PR head.
-- Not established: full three-seed CNN learning curves, full-data benchmark accuracy and parity, observed convergence, hardware efficiency, full feasibility extrapolation and detailed per-operation saturation/overflow telemetry.
+- Established by the subsequent frozen validation run: full 55k/5k three-seed learning curves, measurable integer CNN learning, paired validation accuracy and measured per-backend wall time/process peak RSS. Not established: an optimization plateau, strict numerical parity, independent final-test generalization, Pi 5/hardware efficiency or detailed per-operation saturation/overflow telemetry.
 - Validation-only guarantees apply to the explicitly isolated mode, not historical `--ci-sample` which uses the #15 four-file setup.
 - ADR-004's 94%/2pp dense criteria are **not** CNN pass/fail gates. No unauthorized public API, dtype, licence or platform policy changes.
+
+## Complete frozen 10-epoch three-seed validation experiment (measured 2026-10-24)
+
+The maintainer executed the predeclared `--validation-only` experiment at training commit `ce1e9975b0d3ca7ca98e1a54548cb9f32be4cf02`, without changing architecture or hyperparameters. **All six complete JSON reports, original manifest, original summary, and original SVG are committed as-is** under [archived CNN validation results](../reports/held_out/mnist/cnn/validation-only/2026-10-24-10epoch-ce1e9975/README.md); a compressed companion archive retains the original training log. Git blob hashes of each extracted report match the originally submitted archive.
+
+- Environment: Manjaro `Linux-6.12.95-1-MANJARO-x86_64-with-glibc2.43`, Rust `rustc 1.95.0 (59807616e 2026-04-14)`, Cargo 1.95.0, release profile. Source SHA-256 values are in the archived manifest and match the earlier dense validation protocol.
+- Configuration: exact 55,000 train / 5,000 stratified validation observations; 10 fixed epochs per model; seeds 1337, 2027, 4242; batch 32, `lr_shift=7`, `momentum_shift=1`, dyadic shift 7; no validation-based early stopping.
+- All six JSON reports record `test_size=0` and `test_evaluated=false`. The official 10k test partition was not loaded, hashed or evaluated in this validation experiment.
+
+| Paired seed | Integer validation | Independent scalar FP32 validation | FP32 − integer | Integer wall | FP32 wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1337 | 96.14% | 97.12% | 0.98 percentage points | 477.68 s | 111.25 s |
+| 2027 | 96.42% | 97.18% | 0.76 pp | 537.54 s | 116.03 s |
+| 4242 | 96.54% | 96.98% | 0.44 pp | 550.99 s | 112.11 s |
+| **Mean** | **96.37%** | **97.09%** | **0.73 pp** | **522.07 s** | **113.13 s** |
+
+All three integer runs reached >96% validation accuracy at epoch 10 and showed sustained improvement over the ten-epoch budget, but this is **not** evidence of a final learning plateau. Mean integer process peak RSS was **410.80 MiB**, FP32 **410.65 MiB**; integer wall time was approximately **4.62×** the deliberately unoptimized scalar FP32 reference on this system. Every reported epoch had zero recorded `extreme_outputs` and `nonfinite_outputs`, but this is **not** a per-operation clipping/overflow or lost-gradient audit (see future research [#37](https://github.com/philsupertramp/integers/issues/37)). The same 5k validation examples were reused across three independently seeded models, not 15k independent observations.
+
+**Boundary:** this is the completed **validation-only** training study. Any future `--final-test` CNN run must be archived separately and honestly labeled as testing on an **already-known MNIST benchmark**, since #15 consumed the official test previously. Do not change the frozen 10-epoch configuration based on those scores.
 
 ## Known limitations
 
