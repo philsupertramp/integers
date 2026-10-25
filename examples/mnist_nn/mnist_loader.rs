@@ -116,7 +116,6 @@ pub fn load_mnist_idx(
     })
 }
 
-
 // Shared pre-baked i8 input mantissas (shift 7). No runtime FP normalization.
 // Validation-only does not read or open the official test bytes.
 fn load_prepared_split(dir: &Path, split: &str, count: usize) -> Dataset {
@@ -125,7 +124,10 @@ fn load_prepared_split(dir: &Path, split: &str, count: usize) -> Dataset {
     assert_eq!(inputs.len(), count * 784, "prepared input count mismatch");
     assert_eq!(labels.len(), count, "prepared label count mismatch");
     assert!(labels.iter().all(|&v| v < 10), "bad MNIST label");
-    let data = inputs.into_iter().map(|v| Dyadic::new(i8::from_ne_bytes([v]) as i32, 7)).collect();
+    let data = inputs
+        .into_iter()
+        .map(|v| Dyadic::new(i8::from_ne_bytes([v]) as i32, 7))
+        .collect();
     let targets = build_targets(&labels, 10, 7);
     Dataset {
         inputs: Tensor::from_vec(data, vec![count, 784]),
