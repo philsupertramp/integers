@@ -54,14 +54,14 @@ class Pi5DatasetTests(unittest.TestCase):
         # A large fixture forces multiple chunks, exercising CRI-safe framing.
         payload = (json.dumps({"schema_version": 1, "runs": [
             {"epoch": i, "confusion": [[i + j] * 10 for j in range(10)]}
-            for i in range(100)]}, indent=2) + "\\n").encode()
+            for i in range(100)]}, indent=2) + "\n").encode()
         output = io.StringIO()
         runner.emit_result_archive(payload, stream=output)
         logs = output.getvalue()
         self.assertGreater(logs.count("BENCHMARK_ARCHIVE_V1_CHUNK="), 1)
         self.assertTrue(all(len(line) < 2048 for line in logs.splitlines()))
         self.assertEqual(runner.extract_result_archive(logs), payload)
-        timed_logs = "".join("2026-10-25T20:00:00Z " + line + "\\n"
+        timed_logs = "".join("2026-10-25T20:00:00Z " + line + "\n"
                              for line in logs.splitlines())
         self.assertEqual(runner.extract_result_archive(timed_logs), payload)
         broken = logs.replace("BENCHMARK_ARCHIVE_V1_CHUNK=0:",
@@ -69,7 +69,7 @@ class Pi5DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "out-of-order"):
             runner.extract_result_archive(broken)
         with self.assertRaisesRegex(ValueError, "incomplete"):
-            runner.extract_result_archive("\\n".join(logs.splitlines()[:-1]))
+            runner.extract_result_archive("\n".join(logs.splitlines()[:-1]))
 
     def test_cli_does_not_implicitly_evaluate_official_test(self):
         with self.assertRaises(SystemExit):
