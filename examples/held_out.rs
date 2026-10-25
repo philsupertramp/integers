@@ -58,6 +58,7 @@ struct Config {
     train_limit: Option<usize>,
     validation_limit: Option<usize>,
     data_dir: PathBuf,
+    prepared_data: bool,
     report: PathBuf,
     smoke: bool,
     ci_sample: bool,
@@ -79,6 +80,7 @@ impl Config {
             batch: 32,
             lr_shift: LR_SHIFT,
             data_dir: PathBuf::from("data/mnist"),
+            prepared_data: false,
             report: PathBuf::from("reports/held_out.json"),
             smoke: false,
             ci_sample: false,
@@ -102,6 +104,11 @@ impl Config {
             }
             if key == "--validation-only" {
                 cfg.validation_only = true;
+                i += 1;
+                continue;
+            }
+            if key == "--prepared-data" {
+                cfg.prepared_data = true;
                 i += 1;
                 continue;
             }
@@ -316,7 +323,9 @@ fn load_data(cfg: &Config) -> ExperimentData {
             }
         }
         Task::Mnist => {
-            let (pool, test) = if cfg.validation_only {
+            let (pool, test) = if cfg.prepared_data {
+                mnist_loader::load_prepared_mnist(&cfg.data_dir, cfg.validation_only)
+            } else if cfg.validation_only {
                 // Only canonical TRAINING IDX paths are constructed here.
                 // No format auto-probe, metadata lookup, file read, or
                 // allocation ever touches the official 10k test partition.
@@ -715,6 +724,7 @@ struct Epoch {
     nonfinite_fp32_params: Option<usize>,
 }
 fn main() {
+    let load_start = Instant::now();
     let cfg = Config::parse();
     let mut data = load_data(&cfg);
     // Validation-only subsampling is performed *after* the canonical stratified
@@ -732,6 +742,8 @@ fn main() {
                 .take(n)
                 .collect();
     }
+    let dataset_loading_ms = load_start.elapsed().as_millis();
+    let model_start = Instant::now();
     let dims = match (cfg.task, cfg.architecture) {
         (Task::Iris, _) => vec![4, 8, 8, 3],
         (Task::Mnist, Architecture::Dense) => vec![784, 128, 128, 10],
@@ -747,6 +759,7 @@ fn main() {
             (model, Fp32Model::Cnn(reference))
         }
     };
+    let model_initialization_ms = model_start.elapsed().as_millis();
     let mut curve = Vec::new();
     let start = Instant::now();
     for epoch in 0..cfg.epochs {
@@ -850,6 +863,7 @@ fn main() {
     // Validation-only Iris/MNIST never reads or evaluates test data.
     // CI sample MNIST never evaluates the official test data. Full runs evaluate it
     // exactly once, after the fixed epoch budget has completed.
+    let evaluation_start = Instant::now();
     let test_correct = if cfg.ci_sample || cfg.validation_only {
         None
     } else {
@@ -859,6 +873,7 @@ fn main() {
             Backend::Fp32 => accuracy_fp32(&mut fp32, &data.test, &test_ids).correct,
         })
     };
+    let test_evaluation_ms = evaluation_start.elapsed().as_millis();
     let total_ms = start.elapsed().as_millis();
     let backend = if cfg.backend == Backend::Integer {
         "integer"
@@ -902,7 +917,7 @@ fn main() {
         format!("{:.6}", pct(n, data.test.len()))
     });
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
         cfg.ci_sample,
         cfg.seed,
@@ -929,6 +944,9 @@ fn main() {
         test_accuracy_json,
         total_ms,
         rss,
+        dataset_loading_ms,
+        model_initialization_ms,
+        test_evaluation_ms,
         epochs.join(","),
     );
     if let Some(parent) = cfg.report.parent() {

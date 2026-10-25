@@ -9,6 +9,7 @@ no backend-specific training transforms, weights or statistics are baked.
 import argparse
 import hashlib
 import json
+import math
 import struct
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def sha256(data: bytes) -> str:
 
 def pixel_to_signed(raw: int) -> int:
     # Nearest integer; ties never occur for p in [0,255] with this mapping.
-    return int((raw * 254 / 255 - 127) + 0.5)
+    return math.floor((raw * 254 / 255 - 127) + 0.5)
 
 
 def normalized_bytes(images: bytes) -> bytes:
