@@ -5,6 +5,8 @@ One independent process per backend ensures VmHWM remains process-local.
 No network, training code, dataset download, or test-set tuning lives here.
 """
 import argparse
+import base64
+import gzip
 import hashlib
 import json
 import os
@@ -15,6 +17,96 @@ import time
 from pathlib import Path
 
 SPLIT_SEED = 81985529216486895
+
+# CRI logging implementations can split very long lines. Bound each chunk
+# below 2 KiB instead of printing an arbitrarily large JSON record in one line.
+ARCHIVE_PREFIX = "BENCHMARK_ARCHIVE_V1_"
+ARCHIVE_CHUNK_LENGTH = 1800
+ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
+
+
+def emit_result_archive(json_bytes: bytes, stream=sys.stdout) -> None:
+    """Write verified, independently recoverable, chunked JSON to pod logs.
+
+    The Job's single container exits, so kubectl exec cannot read files from
+    its ephemeral emptyDir after completion. Kubernetes logs remain readable
+    while the Job Pod is retained. Each chunk is short enough for CRI logs.
+    """
+    if len(json_bytes) > ARCHIVE_MAX_BYTES:
+        raise ValueError("benchmark JSON exceeds log archive size limit")
+    # Assert we only archive a complete JSON document.
+    json.loads(json_bytes)
+    digest = hashlib.sha256(json_bytes).hexdigest()
+    encoded = base64.b64encode(gzip.compress(json_bytes, mtime=0)).decode("ascii")
+    chunks = [encoded[i:i + ARCHIVE_CHUNK_LENGTH]
+              for i in range(0, len(encoded), ARCHIVE_CHUNK_LENGTH)]
+    print(f"{ARCHIVE_PREFIX}BEGIN={len(json_bytes)}:{digest}:{len(chunks)}",
+          file=stream, flush=True)
+    for index, chunk in enumerate(chunks):
+        print(f"{ARCHIVE_PREFIX}CHUNK={index}:{chunk}", file=stream)
+    print(f"{ARCHIVE_PREFIX}END={digest}", file=stream, flush=True)
+
+
+def extract_result_archive(log_lines: str) -> bytes:
+    """Decode a complete archive from ordinary or --timestamps kubectl logs.
+
+    Strictly verify chunk order/count, uncompressed size, SHA256, and JSON
+    validity, rather than silently persisting incomplete/truncated results.
+    """
+    expected = None
+    chunks = []
+    recovered = None
+    for line in log_lines.splitlines():
+        offset = line.find(ARCHIVE_PREFIX)
+        if offset < 0:
+            continue
+        record = line[offset + len(ARCHIVE_PREFIX):].strip()
+        if record.startswith("BEGIN="):
+            if expected is not None:
+                raise ValueError("previous benchmark JSON archive is incomplete")
+            fields = record.removeprefix("BEGIN=").split(":")
+            if len(fields) != 3:
+                raise ValueError("invalid JSON archive header")
+            nbytes, sha256, count = fields
+            expected = (int(nbytes), sha256, int(count))
+            if not 0 <= expected[0] <= ARCHIVE_MAX_BYTES or expected[2] <= 0:
+                raise ValueError("invalid JSON archive length/chunk count")
+            chunks = []
+        elif record.startswith("CHUNK="):
+            if expected is None:
+                raise ValueError("archive chunk without header")
+            index, sep, data = record.removeprefix("CHUNK=").partition(":")
+            if not sep or int(index) != len(chunks):
+                raise ValueError("out-of-order or missing archive chunk")
+            chunks.append(data)
+            if len(chunks) > expected[2]:
+                raise ValueError("unexpected extra archive chunk")
+        elif record.startswith("END="):
+            if expected is None:
+                raise ValueError("archive trailer without header")
+            size, sha256, count = expected
+            if record.removeprefix("END=") != sha256 or len(chunks) != count:
+                raise ValueError("archive trailer/checksum or chunk count mismatch")
+            try:
+                compressed = base64.b64decode("".join(chunks), validate=True)
+                # Bound decompression output before accepting untrusted pod logs.
+                import zlib
+                decompressor = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+                content = decompressor.decompress(compressed, size + 1)
+                content += decompressor.flush()
+            except (ValueError, zlib.error) as exc:
+                raise ValueError("invalid compressed JSON archive") from exc
+            if len(content) != size or hashlib.sha256(content).hexdigest() != sha256:
+                raise ValueError("JSON archive size or SHA256 mismatch")
+            json.loads(content)
+            recovered = content
+            expected = None
+            chunks = []
+    if expected is not None:
+        raise ValueError("incomplete benchmark JSON archive in logs")
+    if recovered is None:
+        raise ValueError("no complete benchmark JSON archive in logs")
+    return recovered
 
 
 def digest(path: Path) -> str:
@@ -169,6 +261,9 @@ def run(args) -> dict:
                        "dataset_loading_ms": r["dataset_loading_ms"], "peak_rss_kb": r["peak_rss_kb"]}
                      for r in records],
     }, sort_keys=True), flush=True)
+    # Emit the complete verified result before the process terminates. This is
+    # the default durable retrieval path for a Job using ephemeral emptyDir.
+    emit_result_archive((args.results_dir / "benchmark-result.json").read_bytes())
     return summary
 
 

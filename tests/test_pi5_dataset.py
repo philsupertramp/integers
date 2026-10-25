@@ -1,6 +1,7 @@
 """Dataset integrity/provenance tests; no MNIST download required."""
 import hashlib
 import json
+import io
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,27 @@ class Pi5DatasetTests(unittest.TestCase):
             (root / "dataset-manifest.json").write_bytes(raw + b" ")
             with self.assertRaisesRegex(ValueError, "manifest SHA256 mismatch"):
                 runner.verify_dataset(root)
+
+    def test_log_archive_roundtrip_and_corruption_detection(self):
+        # A large fixture forces multiple chunks, exercising CRI-safe framing.
+        payload = (json.dumps({"schema_version": 1, "runs": [
+            {"epoch": i, "confusion": [[i + j] * 10 for j in range(10)]}
+            for i in range(100)]}, indent=2) + "\n").encode()
+        output = io.StringIO()
+        runner.emit_result_archive(payload, stream=output)
+        logs = output.getvalue()
+        self.assertGreater(logs.count("BENCHMARK_ARCHIVE_V1_CHUNK="), 1)
+        self.assertTrue(all(len(line) < 2048 for line in logs.splitlines()))
+        self.assertEqual(runner.extract_result_archive(logs), payload)
+        timed_logs = "".join("2026-10-25T20:00:00Z " + line + "\n"
+                             for line in logs.splitlines())
+        self.assertEqual(runner.extract_result_archive(timed_logs), payload)
+        broken = logs.replace("BENCHMARK_ARCHIVE_V1_CHUNK=0:",
+                              "BENCHMARK_ARCHIVE_V1_CHUNK=9:", 1)
+        with self.assertRaisesRegex(ValueError, "out-of-order"):
+            runner.extract_result_archive(broken)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            runner.extract_result_archive("\n".join(logs.splitlines()[:-1]))
 
     def test_cli_does_not_implicitly_evaluate_official_test(self):
         with self.assertRaises(SystemExit):

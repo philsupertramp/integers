@@ -76,7 +76,11 @@ jobs:
             --mount type=bind,src=/tmp/pi5-ci-results,dst=/results \
             -e BENCHMARK_IMAGE=integers-pi5:ci \
             integers-pi5:ci --require-arm64 --validation-only \
-            --epochs 1 --seed 1337 --train-limit 8 --validation-limit 10
+            --epochs 1 --seed 1337 --train-limit 8 --validation-limit 10 \
+            | tee /tmp/pi5-ci.log
+          python3 experiments/extract_pi5_results.py /tmp/pi5-ci.log \
+            --output /tmp/pi5-ci-restored.json
+          cmp /tmp/pi5-ci-restored.json /tmp/pi5-ci-results/benchmark-result.json
           python3 - <<'PY'
           import json
           from pathlib import Path
