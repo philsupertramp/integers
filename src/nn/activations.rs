@@ -31,7 +31,7 @@ impl Module for ReLU {
         self.sample_size = sample_size;
         self.shape_cache = input.shape.to_vec();
         self.mask_bits.clear();
-        self.mask_bits.reserve((sample_size + 63) / 64);
+        self.mask_bits.reserve(sample_size.div_ceil(64));
 
         let mut current_u64 = 0u64;
         let mut bit_pos = 0;
@@ -105,7 +105,7 @@ impl Module for ReLU {
         self.sample_size = sample_size;
         self.shape_cache = batch.shape.clone();
 
-        let bits_per_sample = (sample_size + 63) / 64;
+        let bits_per_sample = sample_size.div_ceil(64);
         self.mask_bits.clear();
         self.mask_bits.reserve(batch_size * bits_per_sample);
 
@@ -151,7 +151,7 @@ impl Module for ReLU {
             "ReLU: batched gradient shape mismatch"
         );
 
-        let bits_per_sample = (self.sample_size + 63) / 64;
+        let bits_per_sample = self.sample_size.div_ceil(64);
         let mut grad_output = Vec::with_capacity(grad.data.len());
 
         for sample_idx in 0..self.batch_size {
