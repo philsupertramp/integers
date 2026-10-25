@@ -387,6 +387,27 @@ fn apply_updates_mean(
     }
 }
 
+// ─── Flatten ──────────────────────────────────────────────────────────────────
+
+/// Pass-through shape bridge (conv → linear). Exists for `summary()` clarity.
+pub struct Flatten;
+impl Module for Flatten {
+    fn training_arithmetic(&self) -> TrainingArithmetic {
+        TrainingArithmetic::IntegerOnly
+    }
+    fn name(&self) -> &'static str {
+        "Flatten"
+    }
+    fn forward(&mut self, x: &TensorView) -> Tensor {
+        x.to_tensor()
+    }
+    fn backward(&mut self, g: &TensorView) -> Tensor {
+        g.to_tensor()
+    }
+    fn update(&mut self, _: u32) {}
+    fn zero_grad(&mut self) {}
+}
+
 #[cfg(test)]
 mod gradient_average_tests {
     use super::{Dyadic, mean_gradient};
@@ -433,25 +454,4 @@ mod gradient_average_tests {
     fn zero_samples_rejected() {
         mean_gradient(Dyadic::new(3, 0), 0);
     }
-}
-
-// ─── Flatten ──────────────────────────────────────────────────────────────────
-
-/// Pass-through shape bridge (conv → linear). Exists for `summary()` clarity.
-pub struct Flatten;
-impl Module for Flatten {
-    fn training_arithmetic(&self) -> TrainingArithmetic {
-        TrainingArithmetic::IntegerOnly
-    }
-    fn name(&self) -> &'static str {
-        "Flatten"
-    }
-    fn forward(&mut self, x: &TensorView) -> Tensor {
-        x.to_tensor()
-    }
-    fn backward(&mut self, g: &TensorView) -> Tensor {
-        g.to_tensor()
-    }
-    fn update(&mut self, _: u32) {}
-    fn zero_grad(&mut self) {}
 }

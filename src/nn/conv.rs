@@ -39,6 +39,7 @@ pub struct Conv2D {
 }
 
 impl Conv2D {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         in_channels: usize,
         out_channels: usize,

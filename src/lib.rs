@@ -253,6 +253,10 @@ impl TrainingReporter {
     ///
     /// `test_acc` — optional test-set accuracy (0.0–100.0).  Pass `None` if
     ///              evaluation is skipped this epoch.
+    ///
+    /// allow(clippy::manual_is_multiple_of) to continue preserving zero-devision behavior
+    /// of modulo.
+    #[allow(clippy::manual_is_multiple_of)]
     pub fn maybe_print(&mut self, epoch: u32, test_acc: Option<f64>) {
         let train_acc = self.train_accuracy();
         if train_acc > self.best_train_acc {
