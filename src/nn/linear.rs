@@ -145,8 +145,8 @@ impl Linear {
         );
         let g_s = grad_output.data.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_features];
-        for j in 0..self.out_features {
-            let gr = if clipped[j] {
+        for (j, &is_clipped) in clipped.iter().enumerate() {
+            let gr = if is_clipped {
                 Dyadic::new(0, grad_output.data[j].s)
             } else {
                 ste_requantize(
@@ -157,13 +157,15 @@ impl Linear {
                 )
             };
             let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
-            for i in 0..self.in_features {
+            for (i, gi_value) in gi.iter_mut().enumerate() {
                 let idx = self.flat(j, i);
+
                 self.grad_w.data[idx] = add(
                     self.grad_w.data[idx],
                     mul(gj, input.data[i], self.quant_shift),
                 );
-                gi[i] = add(gi[i], mul(gj, self.w(j, i), self.quant_shift));
+
+                *gi_value = add(*gi_value, mul(gj, self.w(j, i), self.quant_shift));
             }
             self.grad_b.data[j] = add(self.grad_b.data[j], gj);
         }

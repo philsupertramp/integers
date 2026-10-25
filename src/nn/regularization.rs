@@ -661,15 +661,15 @@ impl Module for BatchNorm2D {
             // Collect all N*H*W values for this channel.
             let mut mu = 0.0f64;
             let mut var = 0.0f64;
-            for s in 0..n {
+            for sample in &decoded {
                 for p in 0..hw {
-                    mu += decoded[s][c * hw + p];
+                    mu += sample[c * hw + p];
                 }
             }
             mu /= n_hw;
-            for s in 0..n {
+            for sample in &decoded {
                 for p in 0..hw {
-                    var += (decoded[s][c * hw + p] - mu).powi(2);
+                    var += (sample[c * hw + p] - mu).powi(2);
                 }
             }
             var /= n_hw;
@@ -720,6 +720,9 @@ impl Module for BatchNorm2D {
             vec![n, self.channels * hw],
         );
 
+        assert_eq!(d_l_dy.len(), n);
+        assert_eq!(self.x_hat_cache.len(), n);
+
         for c in 0..self.channels {
             let gamma_c = self.gamma.data[c].to_f64();
             let inv_std_c = self.inv_std_cache[c];
@@ -727,11 +730,11 @@ impl Module for BatchNorm2D {
             // Sum gradients over all N*H*W positions for γ and β.
             let mut sum_d_l_dy = 0.0f64;
             let mut sum_d_l_dy_xhat = 0.0f64;
-            for s in 0..n {
+            for (sample, x_hat_sample) in d_l_dy.iter().zip(&self.x_hat_cache) {
                 for p in 0..hw {
                     let idx = c * hw + p;
-                    sum_d_l_dy += d_l_dy[s][idx];
-                    sum_d_l_dy_xhat += d_l_dy[s][idx] * self.x_hat_cache[s][idx];
+                    sum_d_l_dy += sample[idx];
+                    sum_d_l_dy_xhat += sample[idx] * x_hat_sample[idx];
                 }
             }
 
@@ -749,13 +752,14 @@ impl Module for BatchNorm2D {
             );
 
             // Full BN backward per spatial position.
-            for s in 0..n {
+            for (s, sample) in d_l_dy.iter().enumerate() {
                 for p in 0..hw {
                     let idx = c * hw + p;
                     let dx = (gamma_c * inv_std_c)
-                        * (d_l_dy[s][idx]
+                        * (sample[idx]
                             - sum_d_l_dy / n_hw
                             - self.x_hat_cache[s][idx] * sum_d_l_dy_xhat / n_hw);
+
                     grad_inputs.data[s * self.channels * hw + idx] =
                         Dyadic::new((dx * scale).round() as i32, self.shift);
                 }
