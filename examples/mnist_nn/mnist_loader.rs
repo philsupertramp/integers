@@ -118,6 +118,7 @@ pub fn load_mnist_idx(
 
 // Shared pre-baked i8 input mantissas (shift 7). No runtime FP normalization.
 // Validation-only does not read or open the official test bytes.
+#[allow(dead_code)] // The shared module is also compiled by older MNIST examples.
 fn load_prepared_split(dir: &Path, split: &str, count: usize) -> Dataset {
     let inputs = std::fs::read(dir.join(format!("{split}-inputs.i8"))).expect("prepared inputs");
     let labels = std::fs::read(dir.join(format!("{split}-labels.u8"))).expect("prepared labels");
@@ -138,6 +139,7 @@ fn load_prepared_split(dir: &Path, split: &str, count: usize) -> Dataset {
     }
 }
 
+#[allow(dead_code)] // Only held_out uses the prepared benchmark format.
 pub fn load_prepared_mnist(dir: &Path, validation_only: bool) -> (Dataset, Dataset) {
     let pool = load_prepared_split(dir, "train", 60000);
     let test = if validation_only {
