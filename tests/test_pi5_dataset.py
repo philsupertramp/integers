@@ -1,0 +1,61 @@
+"""Dataset integrity/provenance tests; no MNIST download required."""
+import importlib.util
+import hashlib
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "experiments"))
+import prepare_pi5_dataset as prep
+import pi5_benchmark as runner
+
+
+class Pi5DatasetTests(unittest.TestCase):
+    def test_shared_input_normalization(self):
+        self.assertEqual(prep.pixel_to_signed(0), -127)
+        self.assertEqual(prep.pixel_to_signed(255), 127)
+        self.assertEqual(prep.normalized_bytes(bytes(range(256))),
+                         bytes((prep.pixel_to_signed(p) & 255) for p in range(256)))
+        self.assertTrue(all(-127 <= prep.pixel_to_signed(p) <= 127 for p in range(256)))
+
+    def test_manifest_and_artifact_corruption_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = {}
+            for name in ("train-inputs.i8", "train-labels.u8", "test-inputs.i8", "test-labels.u8"):
+                content = (name + "\n").encode()
+                (root / name).write_bytes(content)
+                artifacts[name] = {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            manifest = {
+                "schema_version": 1,
+                "splits": {"seed": runner.SPLIT_SEED, "validation_per_class": 500},
+                "preprocessing": {"shift": 7},
+                "artifacts": artifacts,
+            }
+            raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+            (root / "dataset-manifest.json").write_bytes(raw)
+            (root / "dataset-manifest.sha256").write_text(hashlib.sha256(raw).hexdigest() + "\n")
+            _, digest = runner.verify_dataset(root)
+            self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+            (root / "test-labels.u8").write_bytes(b"corrupted")
+            with self.assertRaisesRegex(ValueError, "checksum/size mismatch"):
+                runner.verify_dataset(root)
+            (root / "test-labels.u8").write_bytes(("test-labels.u8\n").encode())
+            (root / "dataset-manifest.json").write_bytes(raw + b" ")
+            with self.assertRaisesRegex(ValueError, "manifest SHA256 mismatch"):
+                runner.verify_dataset(root)
+
+    def test_cli_does_not_implicitly_evaluate_official_test(self):
+        with self.assertRaises(SystemExit):
+            runner.parse_args(["--epochs", "1"])
+        with self.assertRaises(SystemExit):
+            runner.parse_args(["--validation-only", "--final-test"])
+        args = runner.parse_args(["--validation-only"])
+        self.assertEqual((args.train_limit, args.validation_limit), (128, 128))
+
+
+if __name__ == "__main__":
+    unittest.main()
