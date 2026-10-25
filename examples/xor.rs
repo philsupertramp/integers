@@ -2,7 +2,7 @@
 //! For the real examples run `cargo run --example iris` or `cargo run --example mnist`.
 
 use integers::nn::{Linear, ReLU, Sequential};
-use integers::{Dyadic, Tensor, argmax, mse_grad};
+use integers::{Dyadic, Tensor, mse_grad};
 
 const SHIFT: u32 = 7;
 
