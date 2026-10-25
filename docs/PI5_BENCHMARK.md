@@ -267,3 +267,68 @@ cargo check --locked --all-targets
 All ARM64 CI timings are **emulated diagnostics only**. Report actual Pi 5
 training accuracy, duration, process RSS, sensor availability and controlled
 comparison results **after** running the versioned image on the real device.
+
+## 9. Submit all full-development-set seeds with one Indexed Job
+
+Use `deployments/pi5/benchmark-full-validation-indexed.yaml` for the
+**55,000 train / 5,000 validation, 5 epoch**, dense-MLP development-set
+benchmark with seeds 1337, 2027 and 4242. The independent integer and
+FP32 backends run sequentially inside each seed Pod. Kubernetes submits
+all 3 completions at once but starts **only one Pod at a time**
+(`completionMode: Indexed`, `completions: 3`, `parallelism: 1`).
+This avoids overlap between the three heavy benchmark Pods on the same Pi.
+The Kubernetes controller injects `JOB_COMPLETION_INDEX` (0, 1, 2);
+the runner selects the matching seed and rejects missing/out-of-range values.
+The single-run smoke Job above is unchanged.
+
+The experiment stays **validation-only**; the official 10,000 MNIST test
+observations are not opened/evaluated. The 14,400-second Job deadline covers
+the ENTIRE three-seed series, rather than each Pod. With `backoffLimit: 0`,
+a failed seed stops the overall study; preserve logs for diagnosis.
+No TTL is set; Pods/logs survive completion until explicitly removed or
+log retention rotates them.
+
+Replace BOTH image references (`image` and `BENCHMARK_IMAGE`) with the
+same **published ARM64 image digest** built from the commit containing
+`--seed-list`. Confirm Pi node labels and sufficient free resources.
+
+```sh
+NS=default
+kubectl -n "$NS" apply -f deployments/pi5/benchmark-full-validation-indexed.yaml
+kubectl -n "$NS" get job integers-pi5-full-validation -w
+# Separately inspect the three sequential Pods:
+kubectl -n "$NS" get pods -l batch.kubernetes.io/job-name=integers-pi5-full-validation -w
+# Once all three have completed (could be hours):
+kubectl -n "$NS" wait --for=condition=complete \
+  job/integers-pi5-full-validation --timeout=14400s
+```
+
+Then retrieve **all three complete, verified JSON reports and their logs**
+in one command:
+
+```sh
+python3 experiments/collect_pi5_indexed.py \
+  --job integers-pi5-full-validation \
+  --namespace "$NS" \
+  --out-dir pi5-results/full-development
+```
+
+The collector lists only this Job's Pods, resolves each seed from the
+completion-index **annotation** (works without relying on the optional
+index label or Pod name parsing), requires all 3 Pods to have succeeded,
+extracts each checksum-verified log archive, and verifies the paired backend
+seed/index and validation-only 55k/5k protocol. It fails on missing,
+unfinished, duplicate or invalid results rather than silently accepting
+partial experiments. Logs remain subject to cluster retention. Archive them
+before deleting a Pod.
+
+Changing seeds requires changing `completions`, `--seed-list`, and the
+collector's `--seeds` together (the supplied collector specifically
+validates the predeclared 55k/5k development workload). Use a *new Job name*
+for a new experiment: important fields of an existing Kubernetes Job are
+immutable.
+
+Serialization prevents these benchmark Pods competing with **each other**,
+but not with unrelated K3s workloads or the Pi's CPU governor and thermals.
+The integer→FP32 order still requires separate control experiments for
+an order-independent speed comparison; do not infer energy savings.

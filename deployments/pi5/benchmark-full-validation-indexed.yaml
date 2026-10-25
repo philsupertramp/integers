@@ -1,0 +1,75 @@
+# One submission schedules three seed pairs, sequentially, on the same Pi 5.
+# JOB_COMPLETION_INDEX: 0 -> 1337; 1 -> 2027; 2 -> 4242.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: integers-pi5-full-validation
+  labels:
+    app.kubernetes.io/name: integers-pi5-full-validation
+spec:
+  completionMode: Indexed
+  completions: 3
+  parallelism: 1
+  backoffLimit: 0
+  # This is one overall deadline, NOT 4h per seed.
+  activeDeadlineSeconds: 14400
+  # No auto TTL: the completed Pods retain result logs until deletion/rotation.
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: integers-pi5-full-validation
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        benchmark.integers.dev/pi5: "true"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: benchmark
+          # Set the SAME pinned, published image digest in both fields.
+          image: ghcr.io/philsupertramp/integers-benchmark:sha-REPLACE_WITH_FULL_COMMIT_SHA
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BENCHMARK_IMAGE
+              value: ghcr.io/philsupertramp/integers-benchmark:sha-REPLACE_WITH_FULL_COMMIT_SHA
+          args:
+            - --require-arm64
+            - --validation-only
+            - --architecture
+            - dense
+            - --seed-list
+            - "1337,2027,4242"
+            - --epochs
+            - "5"
+            - --batch-size
+            - "32"
+            - --lr-shift
+            - "7"
+            - --train-limit
+            - "55000"
+            - --validation-limit
+            - "5000"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          emptyDir: {}

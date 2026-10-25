@@ -4,6 +4,7 @@ import json
 import io
 import sys
 import tempfile
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments"))
 import prepare_pi5_dataset as prep
 import pi5_benchmark as runner
+import collect_pi5_indexed as collector
 
 
 class Pi5DatasetTests(unittest.TestCase):
@@ -70,6 +72,48 @@ class Pi5DatasetTests(unittest.TestCase):
             runner.extract_result_archive(broken)
         with self.assertRaisesRegex(ValueError, "incomplete"):
             runner.extract_result_archive("\n".join(logs.splitlines()[:-1]))
+
+    def test_indexed_job_seeds(self):
+        seeds = "1337,2027,4242"
+        for i, expected in enumerate((1337, 2027, 4242)):
+            with mock.patch.dict("os.environ", {"JOB_COMPLETION_INDEX": str(i)}):
+                args = runner.parse_args(["--validation-only", "--seed-list", seeds])
+                self.assertEqual(args.seed, expected)
+                self.assertEqual(runner.indexed_seed_metadata(args), {
+                    "job_completion_index": i,
+                    "indexed_job_seeds": [1337, 2027, 4242],
+                })
+        with mock.patch.dict("os.environ", {"JOB_COMPLETION_INDEX": "2"}):
+            self.assertEqual(runner.parse_args(["--validation-only"]).seed, 1337)
+        for index in ("-1", "3", "invalid", ""):
+            with mock.patch.dict("os.environ", {"JOB_COMPLETION_INDEX": index}):
+                with self.assertRaises(SystemExit):
+                    runner.parse_args(["--validation-only", "--seed-list", seeds])
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(SystemExit):
+                runner.parse_args(["--validation-only", "--seed-list", seeds])
+        for bad_seeds in ("1337,1337", "1337,0", "1337,-1", "1337,", "x,2027"):
+            with mock.patch.dict("os.environ", {"JOB_COMPLETION_INDEX": "0"}):
+                with self.assertRaises(SystemExit):
+                    runner.parse_args(["--validation-only", "--seed-list", bad_seeds])
+        with mock.patch.dict("os.environ", {"JOB_COMPLETION_INDEX": "0"}):
+            with self.assertRaises(SystemExit):
+                runner.parse_args(["--validation-only", "--seed", "1337",
+                                   "--seed-list", seeds])
+
+    def test_indexed_collector_pod_validation(self):
+        def pod(index, phase="Succeeded"):
+            return {"metadata": {"name": f"pi-benchmark-{index}-pod",
+                    "annotations": {collector.INDEX_ANNOTATION: str(index)}},
+                    "status": {"phase": phase}}
+        self.assertEqual(collector.indexed_pods(
+            [pod(2), pod(0), pod(1)], [1337, 2027, 4242]),
+            {0: "pi-benchmark-0-pod", 1: "pi-benchmark-1-pod",
+             2: "pi-benchmark-2-pod"})
+        for pods in ([pod(0), pod(1)], [pod(0), pod(0), pod(2)],
+                     [pod(0), pod(1, "Pending"), pod(2)]):
+            with self.assertRaises(ValueError):
+                collector.indexed_pods(pods, [1337, 2027, 4242])
 
     def test_cli_does_not_implicitly_evaluate_official_test(self):
         with self.assertRaises(SystemExit):
