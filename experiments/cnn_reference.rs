@@ -169,8 +169,8 @@ impl Dense {
         assert_eq!(input.len(), self.input, "FP32 dense input shape");
         let mut output = self.params.bias.clone();
         for j in 0..self.output {
-            for i in 0..self.input {
-                output[j] += input[i] * self.params.weights[j * self.input + i];
+            for (i, &value) in input.iter().enumerate().take(self.input) {
+                output[j] += value * self.params.weights[j * self.input + i];
             }
         }
         output
@@ -179,8 +179,8 @@ impl Dense {
         assert_eq!(grad.len(), self.output, "FP32 dense gradient shape");
         let mut dx = vec![0.0; self.input];
         let max_grad = GRAD_CLIP as f32 * 2f32.powi(-(SHIFT as i32));
-        for j in 0..self.output {
-            let g = grad[j].clamp(-max_grad, max_grad);
+        for (j, &grad_j) in grad.iter().enumerate().take(self.output) {
+            let g = grad_j.clamp(-max_grad, max_grad);
             self.params.grad_bias[j] += g;
             for i in 0..self.input {
                 let wi = j * self.input + i;
