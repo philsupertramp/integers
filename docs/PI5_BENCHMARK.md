@@ -170,21 +170,40 @@ Nothing downloads, preprocesses, or accesses the network at runtime;
 `docker run --network none` is used by CI to test this property after the
 image has been built/pulled.
 
-## 6. Retrieve persistent JSON **before deleting the pod**
+## 6. Retrieve complete JSON from logs after Job completion
+
+**The default results volume is an ephemeral `emptyDir`. Once the Job's
+only container exits, `kubectl exec` cannot access its files, even if the
+completed Pod still exists.** Older instructions incorrectly suggested that
+approach. The image now prints a SHA256-verified, gzip-compressed, chunked
+archive of the complete `benchmark-result.json` to standard output after
+the ordinary human-readable `BENCHMARK_RESULT=` summary line. Chunk size
+is deliberately bounded for Kubernetes/CRI log systems. Both validation-only
+and final-test results are included; the archive appears only after both
+backend runs and report verification finish.
 
 ```sh
 NS=default
-POD=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=integers-pi5-benchmark \
-   -o jsonpath='{.items[0].metadata.name}')
 mkdir -p pi5-results
-kubectl -n "$NS" exec "$POD" -c benchmark -- \
-  cat /results/benchmark-result.json > pi5-results/benchmark-result.json
-kubectl -n "$NS" exec "$POD" -c benchmark -- \
-  cat /results/integer-seed-1337.json > pi5-results/integer-seed-1337.json
-kubectl -n "$NS" exec "$POD" -c benchmark -- \
-  cat /results/fp32-seed-1337.json > pi5-results/fp32-seed-1337.json
+kubectl -n "$NS" logs job/integers-pi5-benchmark > pi5-results/job.log
+python3 experiments/extract_pi5_results.py pi5-results/job.log \
+  --output pi5-results/benchmark-result.json
 python3 -m json.tool pi5-results/benchmark-result.json >/dev/null
 ```
+
+The extractor validates chunk count/order, uncompressed size, SHA256 and JSON
+integrity; a truncated Job log is an **error**, never a silent partial result.
+For a complete final result, keep the completed Job Pod and its logs until
+you have archived the output. Logs are not guaranteed persistent forever:
+log rotation/retention policies can remove them. For long-running experiments
+that need stronger retention, mount a real **results PVC** or upload reports
+through a separately authorized collector. The embedded input dataset still
+requires no PVC.
+
+For **older images** (before this archive change), only the compact
+`BENCHMARK_RESULT=` log line survives by default. Full JSON files from a
+finished, single-container Job with only `emptyDir` cannot be retrieved
+using `kubectl exec`. Rerun with the updated image or use a results PVC.
 
 A run emits `benchmark-result.json` (summary and both full records) plus
 one per-backend JSON. The schema and data-integrity tests live in
