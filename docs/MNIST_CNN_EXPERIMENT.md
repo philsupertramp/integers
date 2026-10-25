@@ -1,6 +1,6 @@
 # Issue #35 — reproducible MNIST CNN methodology and status
 
-**Status:** implementation PR #36 and the frozen full 55k/5k, three-seed **10-epoch validation experiment completed and archived** on 2026-10-24. Official MNIST test results are **not** part of this validation-only archive; a separate, explicitly labeled already-known benchmark run may be performed under `--final-test`. This is not a claim of deep-network numerical correctness or hardware efficiency. Base commit: `795129207f8ca1d4be7b8ac4e5f590b91b633017` on `big-refactor`. Architecture and exploratory settings are frozen below before full CNN measurements.
+**Status:** implementation PR #36 and the frozen full 55k/5k, three-seed **10-epoch validation experiment completed and archived** on 2026-10-24. An independently archived **final-test benchmark run** was subsequently completed on 2026-10-25 with the same frozen configuration; both archives are separate. This is an **already-known MNIST benchmark**, not a pristine untouched holdout (the official test was consumed in issue #15). This is not a claim of deep-network numerical correctness or hardware efficiency. Base commit: `795129207f8ca1d4be7b8ac4e5f590b91b633017` on `big-refactor`. Architecture and exploratory settings are frozen below before full CNN measurements.
 
 ## Model and arithmetic
 
@@ -89,8 +89,39 @@ The maintainer executed the predeclared `--validation-only` experiment at traini
 
 All three integer runs reached >96% validation accuracy at epoch 10 and showed sustained improvement over the ten-epoch budget, but this is **not** evidence of a final learning plateau. Mean integer process peak RSS was **410.80 MiB**, FP32 **410.65 MiB**; integer wall time was approximately **4.62×** the deliberately unoptimized scalar FP32 reference on this system. Every reported epoch had zero recorded `extreme_outputs` and `nonfinite_outputs`, but this is **not** a per-operation clipping/overflow or lost-gradient audit (see future research [#37](https://github.com/philsupertramp/integers/issues/37)). The same 5k validation examples were reused across three independently seeded models, not 15k independent observations.
 
-**Boundary:** this is the completed **validation-only** training study. Any future `--final-test` CNN run must be archived separately and honestly labeled as testing on an **already-known MNIST benchmark**, since #15 consumed the official test previously. Do not change the frozen 10-epoch configuration based on those scores.
+**Boundary:** the archived validation experiment is distinct from the [completed CNN final benchmark](../reports/held_out/mnist/cnn/full/2026-10-25-locked-ce1e9975/README.md) and was produced before the latter. The final benchmark used the already-known MNIST test, since #15 had consumed it; do not tune further CNN hyperparameters using those scores.
+
+## Frozen final 10-epoch MNIST benchmark (measured 2026-10-25)
+
+The maintainer subsequently ran the explicitly opt-in `--final-test` CNN protocol with the **same locked architecture, hyperparameters and all three seeds** on original training commit `ce1e9975b0d3ca7ca98e1a54548cb9f32be4cf02`. The complete independent benchmark evidence is committed under [archived CNN final test results](../reports/held_out/mnist/cnn/full/2026-10-25-locked-ce1e9975/README.md), alongside a test-score SVG and losslessly packed original inputs. This was a fresh training pass (rather than reused checkpoints). All ten per-epoch training/validation curves and confusion matrices in the separately submitted final reports match the already archived validation experiment for every seed/backend, while the final reports additionally record the one-time official test score.
+
+- **Dataset:** exactly **55,000 train / 5,000 development validation**, plus **10,000 official MNIST test** images evaluated only after epoch 10. The four canonical source IDX SHA-256 digests are recorded in the archived final `manifest.json`. Models share the 10k test cases across seeds.
+- **Test disclosure:** #15 had already accessed the official MNIST test. This CNN evaluation is **a standardized already-known benchmark** and cannot support a fresh pristine independent generalization claim.
+- **Environment:** Manjaro x86_64, Rust 1.95.0, Cargo 1.95.0, release build, exactly the same training commit. Predeclared seeds 1337/2027/4242, batch 32, `lr_shift=7`, `momentum_shift=1`, same 10-epoch budget, no test-driven epoch or hyperparameter selection.
+
+| Paired seed | Integer official test | Scalar FP32 official test | FP32 − integer | Integer wall | FP32 wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1337 | 96.77% | 97.25% | 0.48 pp | 501.03 s | 117.16 s |
+| 2027 | 96.53% | 97.37% | 0.84 pp | 549.25 s | 117.90 s |
+| 4242 | 96.90% | 97.17% | 0.27 pp | 532.12 s | 111.25 s |
+| **Mean** | **96.73%** | **97.26%** | **0.53 pp** | **527.47 s** | **115.44 s** |
+
+- **Test-versus-validation:** final 10-epoch mean development validation is 96.37% integer and 97.09% FP32; official-test results are respectively +0.37 and +0.17 percentage points. This variation is consistent with different finite sample splits; it does not establish an independent new holdout.
+- **Cost:** mean reported peak process VmHWM was 436.85 MiB integer and 434.10 MiB FP32. Integer training took ~4.57× this **unoptimized independent scalar FP32** baseline on the measured machine, not an intrinsic hardware performance comparison.
+- **Diagnostics:** recorded nonfinite and extreme outputs = 0 in all 60 per-epoch reports; FP32 reports zero nonfinite parameters. Per-operation saturation/rounding-to-zero/gradient loss not instrumented ([research #37](https://github.com/philsupertramp/integers/issues/37)).
+- **Interpretation:** #35 now has both a fully reproducible 55k/5k validation experiment and an explicitly labeled full **already-known official MNIST benchmark**. The sample size is **10k per seed** with shared examples, not 30k independent observations. This is strong evidence for the declared shallow CNN training path, not a claim that deep networks or all integer operators are verified. ADR-004's dense acceptance thresholds are not inherited by CNN.
+
+Reproduction (training/test data downloaded separately; no raw data or model weights committed):
+
+```sh
+python3 experiments/fetch_mnist.py --data-dir data/mnist
+python3 experiments/run_baselines.py \
+  --dataset mnist --architecture cnn --final-test \
+  --epochs 10 --seeds 1337 2027 4242 \
+  --batch-size 32 --lr-shift 7 \
+  --output-dir reports/cnn-final
+```
 
 ## Known limitations
 
-The existing integer kernels allocate intermediate per-layer tensors and caches in the batch path. Without first measuring workload throughput we cannot infer whether this is feasible for the complete dataset. The reference's per-example forward cache allocations are intentionally simple, not performance optimized. Mixed-scale and saturation behavior is covered by historical #12/#14 oracle tests and should be expanded with CNN-specific analytic fixtures; a passing model test alone never proves numerical completeness. CPU/device energy and Raspberry Pi results remain #17/#18 work.
+The existing integer kernels allocate intermediate per-layer tensors and caches in the batch path. Full-dataset runtime and peak RSS on one x86_64 Manjaro host have now been measured for both CNN protocols, but cannot establish memory/throughput feasibility on Raspberry Pi 5 or other hardware. The reference's per-example forward cache allocations are intentionally simple, not performance optimized. Mixed-scale and saturation behavior is covered by historical #12/#14 oracle tests and should be expanded with CNN-specific analytic fixtures; a passing model test alone never proves numerical completeness. CPU/device energy and Raspberry Pi results remain #17/#18 work.
