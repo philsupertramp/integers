@@ -102,7 +102,9 @@ def extract_result_archive(log_lines: str) -> bytes:
             recovered = content
             expected = None
             chunks = []
-    if expected is not None or recovered is None:
+    if expected is not None:
+        raise ValueError("incomplete benchmark JSON archive in logs")
+    if recovered is None:
         raise ValueError("no complete benchmark JSON archive in logs")
     return recovered
 
