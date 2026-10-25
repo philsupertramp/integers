@@ -116,6 +116,46 @@ pub fn load_mnist_idx(
     })
 }
 
+// Shared pre-baked i8 input mantissas (shift 7). No runtime FP normalization.
+// Validation-only does not read or open the official test bytes.
+#[allow(dead_code)] // The shared module is also compiled by older MNIST examples.
+fn load_prepared_split(dir: &Path, split: &str, count: usize) -> Dataset {
+    let inputs = std::fs::read(dir.join(format!("{split}-inputs.i8"))).expect("prepared inputs");
+    let labels = std::fs::read(dir.join(format!("{split}-labels.u8"))).expect("prepared labels");
+    assert_eq!(inputs.len(), count * 784, "prepared input count mismatch");
+    assert_eq!(labels.len(), count, "prepared label count mismatch");
+    assert!(labels.iter().all(|&v| v < 10), "bad MNIST label");
+    let data = inputs
+        .into_iter()
+        .map(|v| Dyadic::new(i8::from_ne_bytes([v]) as i32, 7))
+        .collect();
+    let targets = build_targets(&labels, 10, 7);
+    Dataset {
+        inputs: Tensor::from_vec(data, vec![count, 784]),
+        labels,
+        targets: Tensor::from_vec(targets, vec![count, 10]),
+        n_classes: 10,
+        input_shift: 7,
+    }
+}
+
+#[allow(dead_code)] // Only held_out uses the prepared benchmark format.
+pub fn load_prepared_mnist(dir: &Path, validation_only: bool) -> (Dataset, Dataset) {
+    let pool = load_prepared_split(dir, "train", 60000);
+    let test = if validation_only {
+        Dataset {
+            inputs: Tensor::from_vec(Vec::new(), vec![0, 784]),
+            labels: Vec::new(),
+            targets: Tensor::from_vec(Vec::new(), vec![0, 10]),
+            n_classes: 10,
+            input_shift: 7,
+        }
+    } else {
+        load_prepared_split(dir, "test", 10000)
+    };
+    (pool, test)
+}
+
 // ─── Parquet loader (feature-gated) ───────────────────────────────────────────
 
 /// Load an MNIST split from a single Parquet file using the column reader API.

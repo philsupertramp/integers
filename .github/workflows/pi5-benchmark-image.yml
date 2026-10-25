@@ -1,0 +1,130 @@
+name: Pi 5 benchmark ARM64 image
+
+on:
+  pull_request:
+    branches: [big-refactor]
+    paths:
+      - 'Dockerfile.benchmark'
+      - '.dockerignore'
+      - 'experiments/**'
+      - 'examples/held_out.rs'
+      - 'examples/mnist_nn/mnist_loader.rs'
+      - 'deployments/pi5/**'
+      - 'tests/test_pi5_dataset.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/pi5-benchmark-image.yml'
+  push:
+    branches: [big-refactor]
+    paths:
+      - 'Dockerfile.benchmark'
+      - '.dockerignore'
+      - 'experiments/**'
+      - 'examples/held_out.rs'
+      - 'examples/mnist_nn/mnist_loader.rs'
+      - 'deployments/pi5/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/pi5-benchmark-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build ARM64 and run offline paired fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python dataset/integrity tests
+        run: python3 -m unittest discover -s tests -p 'test_pi5_dataset.py' -v
+      - name: Validate K3s Job YAML and ARM64 placement
+        run: |
+          ruby -ryaml -e '
+            j = YAML.safe_load(File.read(ARGV[0]))
+            abort "must be a Job" unless j["apiVersion"] == "batch/v1" && j["kind"] == "Job"
+            p = j.dig("spec", "template", "spec")
+            abort "wrong architecture" unless p.dig("nodeSelector", "kubernetes.io/arch") == "arm64"
+            abort "Pi label missing" unless p.dig("nodeSelector", "benchmark.integers.dev/pi5") == "true"
+            c = p["containers"].fetch(0)
+            abort "must not be privileged" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
+            abort "results volume missing" unless p["volumes"].any? { |v| v["name"] == "results" }
+          ' deployments/pi5/benchmark-job.yaml
+      - name: Prepare emulation (not Pi hardware)
+        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ARM64 benchmark image (NEVER publish in PR validation)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.benchmark
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: integers-pi5:ci
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+      - name: Record ARM64 local image layer size (not network pull size)
+        run: docker image inspect integers-pi5:ci --format '{{.Size}} bytes'
+      - name: Offline QEMU smoke for integer and independent FP32
+        run: |
+          mkdir -p /tmp/pi5-ci-results
+          chmod 777 /tmp/pi5-ci-results
+          docker run --rm --platform linux/arm64 --network none --read-only \
+            --mount type=bind,src=/tmp/pi5-ci-results,dst=/results \
+            -e BENCHMARK_IMAGE=integers-pi5:ci \
+            integers-pi5:ci --require-arm64 --validation-only \
+            --epochs 1 --seed 1337 --train-limit 8 --validation-limit 10
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r = json.loads(Path('/tmp/pi5-ci-results/benchmark-result.json').read_text())
+          assert len(r['runs']) == 2
+          a, b = r['runs']
+          assert (a['backend'], b['backend']) == ('integer', 'fp32')
+          assert a['train_size'] == b['train_size'] == 8
+          assert a['validation_size'] == b['validation_size'] == 10
+          assert a['test_evaluated'] is b['test_evaluated'] is False
+          assert a['prepared_artifact_sha256'] == b['prepared_artifact_sha256']
+          assert a['dataset_manifest_sha256'] == b['dataset_manifest_sha256']
+          assert all(v['wall_ms'] >= 0 and v['dataset_loading_ms'] >= 0 for v in (a,b))
+          print('Offline ARM64 emulated smoke passed (NOT Pi performance).')
+          PY
+
+  publish:
+    name: Publish GHCR immutable-SHA tag
+    # Never publish a PR / unmerged branch build. workflow_dispatch may be
+    # used only from the already merged big-refactor branch.
+    if: github.ref == 'refs/heads/big-refactor' && github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR using short-lived GITHUB_TOKEN
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish ARM64 image
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.benchmark
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/philsupertramp/integers-benchmark:sha-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+      - name: Report immutable digest
+        run: |
+          echo "Published ghcr.io/philsupertramp/integers-benchmark@${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Digest: ${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
