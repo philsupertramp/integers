@@ -87,7 +87,7 @@ impl Module for Dropout {
             return input.to_tensor();
         }
         self.mask = Self::sample_mask(input.data.len(), self.keep_prob_bits);
-        Self::apply_mask(&input, &self.mask, self.scale, self.quant_shift)
+        Self::apply_mask(input, &self.mask, self.scale, self.quant_shift)
     }
 
     fn backward(&mut self, grad: &TensorView) -> Tensor {
@@ -99,7 +99,7 @@ impl Module for Dropout {
             self.mask.len(),
             "Dropout: missing or incorrect forward mask"
         );
-        Self::apply_mask(&grad, &self.mask, self.scale, self.quant_shift)
+        Self::apply_mask(grad, &self.mask, self.scale, self.quant_shift)
     }
 
     fn forward_batch(&mut self, inputs: &Tensor) -> Tensor {

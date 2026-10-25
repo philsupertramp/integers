@@ -90,7 +90,7 @@ impl Module for ReLU {
 
     /// Forward pass for a batch [B, N]
     fn forward_batch(&mut self, batch: &Tensor) -> Tensor {
-        assert!(batch.shape.len() >= 1, "Expected batched input");
+        assert!(!batch.shape.is_empty(), "Expected batched input");
 
         let batch_size = batch.shape[0];
         assert!(batch_size > 0, "ReLU: empty batch is unsupported");
