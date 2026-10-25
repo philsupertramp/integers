@@ -32,7 +32,7 @@ Formatting and lint diagnostics:
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
-The issue #20 hygiene workflow on `issue-20-rust-hygiene` runs rustfmt, the locked full suite, all-target compilation, and strict library Clippy. During cleanup, strict all-target Clippy is diagnostic-only and is explicitly marked `continue-on-error`; it must become a blocking check only once green on GitHub Actions. Other regression, example-runtime, and feature-smoke workflows remain independent. A failing pre-existing check should be noted, not concealed.
+The issue #20 hygiene workflow on `issue-20-rust-hygiene` runs rustfmt, the locked full suite, all-target compilation, and strict library Clippy. Strict all-target Clippy and rustfmt are blocking checks, enabled after a successful GitHub Actions run on the hygiene branch. Other regression, example-runtime, and feature-smoke workflows remain independent. A failing pre-existing check should be noted, not concealed.
 
 **Toolchain policy:** Rust edition 2024; current development and validation use stable Rust 1.95.0 on x86_64 Linux. An MSRV has not been adopted or tested; do not claim compatibility with an earlier compiler. Hardware priorities are x86_64 correctness and Raspberry Pi 5 AArch64 after parity tests. All default checks are dataset-free; dataset-dependent full MNIST/CIFAR runs are excluded from local fast gates.
 
