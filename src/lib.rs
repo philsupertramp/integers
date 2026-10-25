@@ -258,10 +258,10 @@ impl TrainingReporter {
         if train_acc > self.best_train_acc {
             self.best_train_acc = train_acc;
         }
-        if let Some(ta) = test_acc {
-            if ta > self.best_test_acc {
-                self.best_test_acc = ta;
-            }
+        if let Some(ta) = test_acc
+            && ta > self.best_test_acc
+        {
+            self.best_test_acc = ta;
         }
 
         let is_last = epoch + 1 == self.total_epochs;
@@ -299,7 +299,7 @@ mod tests {
         let t = vec![Dyadic::new(127, 7), Dyadic::new(0, 7)];
         let g = mse_grad(&y, &t);
         assert_eq!(g[0].v, 100 - 127);
-        assert_eq!(g[1].v, -50 - 0);
+        assert_eq!(g[1].v, -50);
     }
 
     #[test]

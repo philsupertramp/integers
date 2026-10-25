@@ -156,11 +156,9 @@ pub fn shuffled_indices(n: usize) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::Tensor;
-    use crate::rng::XorShift64;
 
     #[test]
     fn shuffled_indices_length_and_contents() {
-        let mut rng = XorShift64::new(42);
         let idx = shuffled_indices(10);
         assert_eq!(idx.len(), 10);
         let mut sorted = idx.clone();
@@ -170,7 +168,6 @@ mod tests {
 
     #[test]
     fn shuffled_indices_is_not_identity() {
-        let mut rng = XorShift64::new(42);
         let idx = shuffled_indices(100);
         assert_ne!(
             idx,
