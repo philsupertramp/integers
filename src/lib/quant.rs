@@ -97,7 +97,7 @@ mod tests {
         let col: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let (q, s) = standard_score_quantize(&col);
         assert_eq!(s, 7);
-        assert!(q.iter().all(|&v| v >= -127 && v <= 127));
+        assert!(q.iter().all(|&v| (-127..=127).contains(&v)));
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub struct Dropout {
 
 impl Dropout {
     pub fn new(drop_rate: f32) -> Self {
-        assert!(drop_rate >= 0.0 && drop_rate < 1.0);
+        assert!((0.0..1.0).contains(&drop_rate));
         const SHIFT: u32 = 7;
         let scale_f = 1.0 / (1.0 - drop_rate);
         let mantissa = (scale_f * (1u32 << SHIFT) as f32).round() as i32;
