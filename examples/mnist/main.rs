@@ -32,9 +32,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use integers::data::shuffled_indices;
-use integers::dyadic::{Dyadic, Tensor};
-use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential, Softmax};
-use integers::rng::XorShift64;
+use integers::dyadic::Tensor;
+use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential};
 use integers::{argmax, cross_entropy_grad};
 
 fn main() {
@@ -113,14 +112,12 @@ fn main() {
     // ── Fix the eval subset once so progress is comparable across epochs ───────
     // Using a separate RNG seeded independently so the eval set doesn't depend
     // on how many training shuffles have been performed.
-    let mut eval_rng = XorShift64::new(0xdeadbeef);
     let eval_indices: Vec<usize> = shuffled_indices(test.len())
         .into_iter()
         .take(N_EVAL)
         .collect();
 
     // ── Training loop ─────────────────────────────────────────────────────────
-    let mut train_rng = XorShift64::new(1337);
     let mut perfect_streak = 0u32;
 
     println!(
@@ -254,16 +251,16 @@ fn main() {
     }
     println!("   ← predicted");
     println!("     {}", "─".repeat(50));
-    for r in 0..10 {
+    for (r, row) in conf.iter().enumerate() {
         print!("{r:>3}  |");
-        for c in 0..10 {
+        for (c, &count) in row.iter().enumerate() {
             if r == c {
-                print!("\x1b[1m{:>5}\x1b[0m", conf[r][c]);
+                print!("\x1b[1m{count:>5}\x1b[0m");
             } else {
-                print!("{:>5}", conf[r][c]);
+                print!("{count:>5}");
             }
         }
-        let row_total: usize = conf[r].iter().sum();
-        println!("  {:.1}%", conf[r][r] as f64 / row_total as f64 * 100.0);
+        let row_total: usize = row.iter().sum();
+        println!("  {:.1}%", row[r] as f64 / row_total as f64 * 100.0);
     }
 }
