@@ -31,6 +31,5 @@ jobs:
         run: cargo check --locked --all-targets
       - name: Library Clippy (strict)
         run: cargo clippy --locked --lib -- -D warnings
-      - name: All-target Clippy baseline (issue 20)
-        continue-on-error: true
+      - name: All-target Clippy (strict)
         run: cargo clippy --locked --all-targets -- -D warnings
