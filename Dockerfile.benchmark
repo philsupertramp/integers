@@ -1,7 +1,6 @@
 # Multi-stage, native-target build. Buildx/QEMU can validate ARM64 elsewhere,
 # but only a physical Raspberry Pi 5 run is a hardware measurement.
 FROM rust:1.95-bookworm AS rust-build
-ARG GIT_SHA=unknown
 ARG BENCHMARK_RUSTFLAGS=
 ENV RUSTFLAGS=${BENCHMARK_RUSTFLAGS}
 WORKDIR /app
