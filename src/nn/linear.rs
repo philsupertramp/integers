@@ -178,10 +178,8 @@ impl Linear {
                     mul(gj, input.data[i], self.quant_shift),
                 );
 
-                *gi_value = add_backward_accumulator(
-                    *gi_value,
-                    mul(gj, self.w(j, i), self.quant_shift),
-                );
+                *gi_value =
+                    add_backward_accumulator(*gi_value, mul(gj, self.w(j, i), self.quant_shift));
             }
             self.grad_b.data[j] = add(self.grad_b.data[j], gj);
         }
@@ -338,8 +336,19 @@ mod backward_accumulator_tests {
     fn equal_and_mixed_scale_accumulation_match_reference_and_rng() {
         // Include saturation, zeros, extreme shift distances and
         // rescalings that consume stochastic RNG draws.
-        let values = [i32::MIN, i32::MIN + 1, -8192, -127, -1,
-                      0, 1, 127, 8192, i32::MAX - 1, i32::MAX];
+        let values = [
+            i32::MIN,
+            i32::MIN + 1,
+            -8192,
+            -127,
+            -1,
+            0,
+            1,
+            127,
+            8192,
+            i32::MAX - 1,
+            i32::MAX,
+        ];
         let shifts = [0, 1, 7, 14, 31, 64, 128];
         for &sa in &shifts {
             for &sb in &shifts {
@@ -354,7 +363,10 @@ mod backward_accumulator_tests {
                         let actual = add_backward_accumulator(a, b);
                         let actual_next = rng_next();
                         assert_eq!(actual, expected, "a={a:?} b={b:?}");
-                        assert_eq!(actual_next, expected_next, "RNG diverged for a={a:?} b={b:?}");
+                        assert_eq!(
+                            actual_next, expected_next,
+                            "RNG diverged for a={a:?} b={b:?}"
+                        );
                     }
                 }
             }
@@ -376,17 +388,22 @@ mod backward_accumulator_tests {
                 d(0, grad_output.data[j].s)
             } else {
                 ste_requantize(
-                    grad_output.data[j], output.data[j].v, layer.q_min, layer.q_max
+                    grad_output.data[j],
+                    output.data[j].v,
+                    layer.q_min,
+                    layer.q_max,
                 )
             };
             let gj = d(gr.v.clamp(-layer.grad_clip, layer.grad_clip), gr.s);
             for (i, gi_value) in gi.iter_mut().enumerate() {
                 let idx = j * layer.in_features + i;
                 layer.grad_w.data[idx] = add(
-                    layer.grad_w.data[idx], mul(gj, input.data[i], layer.quant_shift)
+                    layer.grad_w.data[idx],
+                    mul(gj, input.data[i], layer.quant_shift),
                 );
                 *gi_value = add(
-                    *gi_value, mul(gj, layer.weights.data[idx], layer.quant_shift)
+                    *gi_value,
+                    mul(gj, layer.weights.data[idx], layer.quant_shift),
                 );
             }
             layer.grad_b.data[j] = add(layer.grad_b.data[j], gj);
@@ -414,29 +431,50 @@ mod backward_accumulator_tests {
                 let mut grads = Vec::new();
                 for sample in 0..samples {
                     let data = (0..5)
-                        .map(|i| d(((i as i32 + sample as i32) * 17 % 223) - 111,
-                                   if i % 2 == 0 { 7 } else { 10 }))
+                        .map(|i| {
+                            d(
+                                ((i as i32 + sample as i32) * 17 % 223) - 111,
+                                if i % 2 == 0 { 7 } else { 10 },
+                            )
+                        })
                         .collect();
                     inputs.push(Tensor::from_vec(data, vec![5]));
                     outputs.push(Tensor::from_vec(
-                        (0..3).map(|j| d(j as i32 * 11 - 7, 7)).collect(), vec![3]
+                        (0..3).map(|j| d(j as i32 * 11 - 7, 7)).collect(),
+                        vec![3],
                     ));
                     clips.push([sample % 3 == 0, false, sample % 5 == 0]);
                     grads.push(Tensor::from_vec(
-                        (0..3).map(|j| d(sample as i32 * 103 + j as i32 * 1001 - 1024,
-                                          grad_shift)).collect(), vec![3]
+                        (0..3)
+                            .map(|j| d(sample as i32 * 103 + j as i32 * 1001 - 1024, grad_shift))
+                            .collect(),
+                        vec![3],
                     ));
                 }
                 seed_rng(0x17a2_b3c4);
-                let got: Vec<Tensor> = (0..samples).map(|n| fast.backward_one(
-                    &grads[n].view(), &inputs[n].view(), &outputs[n].view(), &clips[n]
-                )).collect();
+                let got: Vec<Tensor> = (0..samples)
+                    .map(|n| {
+                        fast.backward_one(
+                            &grads[n].view(),
+                            &inputs[n].view(),
+                            &outputs[n].view(),
+                            &clips[n],
+                        )
+                    })
+                    .collect();
                 let next_fast = rng_next();
                 seed_rng(0x17a2_b3c4);
-                let expected: Vec<Tensor> = (0..samples).map(|n| reference_backward_one(
-                    &mut reference, &grads[n].view(), &inputs[n].view(),
-                    &outputs[n].view(), &clips[n]
-                )).collect();
+                let expected: Vec<Tensor> = (0..samples)
+                    .map(|n| {
+                        reference_backward_one(
+                            &mut reference,
+                            &grads[n].view(),
+                            &inputs[n].view(),
+                            &outputs[n].view(),
+                            &clips[n],
+                        )
+                    })
+                    .collect();
                 let next_reference = rng_next();
                 assert_eq!(
                     got.iter().map(|t| &t.data).collect::<Vec<_>>(),
