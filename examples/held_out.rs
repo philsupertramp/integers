@@ -776,13 +776,16 @@ impl TrainingProfile {
             + self.update_ns;
         // Unaccounted time includes shuffle, loop and timer overhead.
         let other_ns = wall_ns.saturating_sub(measured);
-        let layers = self.backward_layer_ns
+        let layers = self
+            .backward_layer_ns
             .iter()
             .zip(&self.backward_layer_names)
             .enumerate()
             .map(|(index, (elapsed_ns, name))| {
-                format!("{{\"index\":{},\"name\":\"{}\",\"elapsed_ns\":{}}}",
-                    index, name, elapsed_ns)
+                format!(
+                    "{{\"index\":{},\"name\":\"{}\",\"elapsed_ns\":{}}}",
+                    index, name, elapsed_ns
+                )
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -866,7 +869,8 @@ fn main() {
         let mut profile = TrainingProfile::default();
         if cfg.profile_training && cfg.backend == Backend::Integer {
             profile.backward_layer_ns = vec![0; integer.layers.len()];
-            profile.backward_layer_names = integer.layers.iter().map(|layer| layer.name()).collect();
+            profile.backward_layer_names =
+                integer.layers.iter().map(|layer| layer.name()).collect();
         }
         match cfg.backend {
             Backend::Integer => {
@@ -893,9 +897,7 @@ fn main() {
                                 .collect()
                         });
                         let started = Instant::now();
-                        integer.backward_batch_timed(
-                            &gradient, &mut profile.backward_layer_ns
-                        );
+                        integer.backward_batch_timed(&gradient, &mut profile.backward_layer_ns);
                         profile.backward_ns += started.elapsed().as_nanos();
                         timed(&mut profile.update_ns, || integer.update(cfg.lr_shift));
                     } else {
