@@ -33,6 +33,19 @@ pub struct Linear {
     q_max: i32,
 }
 
+/// Same-scale gradient accumulation in the dense backward hot loop.
+/// When exponents match, add() performs exactly saturating mantissa addition
+/// without RNG draws; otherwise keep the full dyadic alignment path.
+/// No multiplication, arithmetic order, overflow, or RNG-stream changes.
+#[inline(always)]
+fn add_backward_accumulator(a: Dyadic, b: Dyadic) -> Dyadic {
+    if a.s == b.s {
+        Dyadic::new(a.v.saturating_add(b.v), a.s)
+    } else {
+        add(a, b)
+    }
+}
+
 impl Linear {
     pub fn new(
         in_features: usize,
@@ -160,12 +173,15 @@ impl Linear {
             for (i, gi_value) in gi.iter_mut().enumerate() {
                 let idx = self.flat(j, i);
 
-                self.grad_w.data[idx] = add(
+                self.grad_w.data[idx] = add_backward_accumulator(
                     self.grad_w.data[idx],
                     mul(gj, input.data[i], self.quant_shift),
                 );
 
-                *gi_value = add(*gi_value, mul(gj, self.w(j, i), self.quant_shift));
+                *gi_value = add_backward_accumulator(
+                    *gi_value,
+                    mul(gj, self.w(j, i), self.quant_shift),
+                );
             }
             self.grad_b.data[j] = add(self.grad_b.data[j], gj);
         }
@@ -306,5 +322,131 @@ impl Module for Linear {
         self.grad_samples = 0;
         self.grad_w.data.iter_mut().for_each(|g| g.v = 0);
         self.grad_b.data.iter_mut().for_each(|g| g.v = 0);
+    }
+}
+
+#[cfg(test)]
+mod backward_accumulator_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    fn d(v: i32, s: u32) -> Dyadic {
+        Dyadic::new(v, s)
+    }
+
+    #[test]
+    fn equal_and_mixed_scale_accumulation_match_reference_and_rng() {
+        // Include saturation, zeros, extreme shift distances and
+        // rescalings that consume stochastic RNG draws.
+        let values = [i32::MIN, i32::MIN + 1, -8192, -127, -1,
+                      0, 1, 127, 8192, i32::MAX - 1, i32::MAX];
+        let shifts = [0, 1, 7, 14, 31, 64, 128];
+        for &sa in &shifts {
+            for &sb in &shifts {
+                for &av in &values {
+                    for &bv in &values {
+                        let a = d(av, sa);
+                        let b = d(bv, sb);
+                        seed_rng(0x2345_6789);
+                        let expected = add(a, b);
+                        let expected_next = rng_next();
+                        seed_rng(0x2345_6789);
+                        let actual = add_backward_accumulator(a, b);
+                        let actual_next = rng_next();
+                        assert_eq!(actual, expected, "a={a:?} b={b:?}");
+                        assert_eq!(actual_next, expected_next, "RNG diverged for a={a:?} b={b:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Frozen reference (pre-optimization), intentionally uses only add().
+    fn reference_backward_one(
+        layer: &mut Linear,
+        grad_output: &TensorView,
+        input: &TensorView,
+        output: &TensorView,
+        clipped: &[bool],
+    ) -> Tensor {
+        let g_s = grad_output.data.first().map_or(0, |g| g.s);
+        let mut gi = vec![d(0, g_s); layer.in_features];
+        for (j, &is_clipped) in clipped.iter().enumerate() {
+            let gr = if is_clipped {
+                d(0, grad_output.data[j].s)
+            } else {
+                ste_requantize(
+                    grad_output.data[j], output.data[j].v, layer.q_min, layer.q_max
+                )
+            };
+            let gj = d(gr.v.clamp(-layer.grad_clip, layer.grad_clip), gr.s);
+            for (i, gi_value) in gi.iter_mut().enumerate() {
+                let idx = j * layer.in_features + i;
+                layer.grad_w.data[idx] = add(
+                    layer.grad_w.data[idx], mul(gj, input.data[i], layer.quant_shift)
+                );
+                *gi_value = add(
+                    *gi_value, mul(gj, layer.weights.data[idx], layer.quant_shift)
+                );
+            }
+            layer.grad_b.data[j] = add(layer.grad_b.data[j], gj);
+        }
+        layer.grad_samples += 1;
+        Tensor::from_vec(gi, vec![layer.in_features])
+    }
+
+    #[test]
+    fn full_backward_matches_frozen_reference_and_rng_state() {
+        for &samples in &[1usize, 7, 32] {
+            for &grad_shift in &[0u32, 7, 10] {
+                let mut fast = Linear::new(5, 3, 7, 7, 31).with_grad_clip(8192);
+                let mut reference = Linear::new(5, 3, 7, 7, 31).with_grad_clip(8192);
+                // Explicit parameters: independent constructors cannot bias
+                // the two fixed-seed arithmetic executions.
+                for i in 0..15 {
+                    let weight = d((i as i32 * 19 - 132) * 3, 7);
+                    fast.weights.data[i] = weight;
+                    reference.weights.data[i] = weight;
+                }
+                let mut inputs = Vec::new();
+                let mut outputs = Vec::new();
+                let mut clips = Vec::new();
+                let mut grads = Vec::new();
+                for sample in 0..samples {
+                    let data = (0..5)
+                        .map(|i| d(((i as i32 + sample as i32) * 17 % 223) - 111,
+                                   if i % 2 == 0 { 7 } else { 10 }))
+                        .collect();
+                    inputs.push(Tensor::from_vec(data, vec![5]));
+                    outputs.push(Tensor::from_vec(
+                        (0..3).map(|j| d(j as i32 * 11 - 7, 7)).collect(), vec![3]
+                    ));
+                    clips.push([sample % 3 == 0, false, sample % 5 == 0]);
+                    grads.push(Tensor::from_vec(
+                        (0..3).map(|j| d(sample as i32 * 103 + j as i32 * 1001 - 1024,
+                                          grad_shift)).collect(), vec![3]
+                    ));
+                }
+                seed_rng(0x17a2_b3c4);
+                let got: Vec<Tensor> = (0..samples).map(|n| fast.backward_one(
+                    &grads[n].view(), &inputs[n].view(), &outputs[n].view(), &clips[n]
+                )).collect();
+                let next_fast = rng_next();
+                seed_rng(0x17a2_b3c4);
+                let expected: Vec<Tensor> = (0..samples).map(|n| reference_backward_one(
+                    &mut reference, &grads[n].view(), &inputs[n].view(),
+                    &outputs[n].view(), &clips[n]
+                )).collect();
+                let next_reference = rng_next();
+                assert_eq!(
+                    got.iter().map(|t| &t.data).collect::<Vec<_>>(),
+                    expected.iter().map(|t| &t.data).collect::<Vec<_>>()
+                );
+                assert_eq!(fast.grad_w.data, reference.grad_w.data);
+                assert_eq!(fast.grad_b.data, reference.grad_b.data);
+                assert_eq!(fast.grad_samples, reference.grad_samples);
+                assert_eq!(next_fast, next_reference, "stochastic RNG diverged");
+            }
+        }
     }
 }
