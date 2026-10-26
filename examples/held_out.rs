@@ -204,7 +204,8 @@ impl Config {
             "invalid seed, split seed, batch, epochs, or lr shift"
         );
         assert!(
-            !cfg.profile_training || (cfg.architecture == Architecture::Dense && cfg.validation_only),
+            !cfg.profile_training
+                || (cfg.architecture == Architecture::Dense && cfg.validation_only),
             "training profiling requires dense --validation-only mode"
         );
         assert!(
@@ -765,15 +766,26 @@ fn timed<T>(elapsed_ns: &mut u128, operation: impl FnOnce() -> T) -> T {
 
 impl TrainingProfile {
     fn json(&self, wall_ns: u128) -> String {
-        let measured = self.preparation_ns + self.zero_grad_ns + self.forward_ns
-            + self.loss_metrics_ns + self.backward_ns + self.update_ns;
+        let measured = self.preparation_ns
+            + self.zero_grad_ns
+            + self.forward_ns
+            + self.loss_metrics_ns
+            + self.backward_ns
+            + self.update_ns;
         // Unaccounted time includes shuffle, loop and timer overhead.
         let other_ns = wall_ns.saturating_sub(measured);
         format!(
             "{{\"schema\":1,\"clock\":\"Instant\",\"unit\":\"ns\",\"batches\":{},\"samples\":{},\"training_wall_ns\":{},\"preparation_ns\":{},\"zero_grad_ns\":{},\"forward_ns\":{},\"loss_metrics_ns\":{},\"backward_ns\":{},\"update_ns\":{},\"other_ns\":{}}}",
-            self.batches, self.samples, wall_ns, self.preparation_ns,
-            self.zero_grad_ns, self.forward_ns, self.loss_metrics_ns,
-            self.backward_ns, self.update_ns, other_ns
+            self.batches,
+            self.samples,
+            wall_ns,
+            self.preparation_ns,
+            self.zero_grad_ns,
+            self.forward_ns,
+            self.loss_metrics_ns,
+            self.backward_ns,
+            self.update_ns,
+            other_ns
         )
     }
 }
@@ -846,7 +858,8 @@ fn main() {
                     if cfg.profile_training {
                         profile.batches += 1;
                         profile.samples += ids.len();
-                        let (x, t) = timed(&mut profile.preparation_ns, || data.pool.minibatch(ids));
+                        let (x, t) =
+                            timed(&mut profile.preparation_ns, || data.pool.minibatch(ids));
                         timed(&mut profile.zero_grad_ns, || integer.zero_grad());
                         let y = timed(&mut profile.forward_ns, || integer.forward_batch(&x));
                         let gradient: Tensor = timed(&mut profile.loss_metrics_ns, || {
@@ -857,10 +870,14 @@ fn main() {
                             }
                             y.iter()
                                 .zip(t.iter())
-                                .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
+                                .map(|(y, t)| {
+                                    Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec())
+                                })
                                 .collect()
                         });
-                        timed(&mut profile.backward_ns, || integer.backward_batch(&gradient));
+                        timed(&mut profile.backward_ns, || {
+                            integer.backward_batch(&gradient)
+                        });
                         timed(&mut profile.update_ns, || integer.update(cfg.lr_shift));
                     } else {
                         let (x, t) = data.pool.minibatch(ids);
@@ -874,7 +891,9 @@ fn main() {
                         let gradient: Tensor = y
                             .iter()
                             .zip(t.iter())
-                            .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
+                            .map(|(y, t)| {
+                                Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec())
+                            })
                             .collect();
                         integer.backward_batch(&gradient);
                         integer.update(cfg.lr_shift);
@@ -901,7 +920,9 @@ fn main() {
                                 correct += 1;
                             }
                         }
-                        timed(&mut profile.update_ns, || model.update(cfg.lr_shift, ids.len()));
+                        timed(&mut profile.update_ns, || {
+                            model.update(cfg.lr_shift, ids.len())
+                        });
                     } else {
                         fp32.zero_grad();
                         for &idx in ids {
@@ -984,7 +1005,11 @@ fn main() {
             println!(
                 "TRAINING_PROFILE epoch={} backend={} {}",
                 metric.epoch,
-                if cfg.backend == Backend::Integer { "integer" } else { "fp32" },
+                if cfg.backend == Backend::Integer {
+                    "integer"
+                } else {
+                    "fp32"
+                },
                 metric.training_profile_json
             );
         }
