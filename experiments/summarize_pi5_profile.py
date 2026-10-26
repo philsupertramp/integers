@@ -21,7 +21,18 @@ def summarize(report: dict) -> list[dict]:
         elapsed = {key: sum(p[key] for p in profiles) for key in PHASES}
         if sum(elapsed.values()) > wall:
             raise ValueError("reported phase times exceed wall time")
+        layer_stats = {}
+        for profile in profiles:
+            for layer in profile.get("backward_layers", []):
+                key = (layer["index"], layer["name"])
+                layer_stats[key] = layer_stats.get(key, 0) + layer["elapsed_ns"]
         summaries.append({
+            "backward_layers": [
+                {"index": i, "name": name, "seconds": ns / 1e9,
+                 "backward_pct": 100 * ns / elapsed["backward_ns"]
+                 if elapsed["backward_ns"] else 0.0}
+                for (i, name), ns in sorted(layer_stats.items())
+            ],
             "backend": run["backend"],
             "samples": sum(p["samples"] for p in profiles),
             "batches": sum(p["batches"] for p in profiles),
@@ -44,6 +55,12 @@ def main():
         for key in PHASES:
             print(f"  {key:<19} {profile['phase_s'][key]:>9.3f}s"
                   f" {profile['percent'][key]:>6.2f}%")
+        if profile["backward_layers"]:
+            print("  Backward per layer (indexed in forward order):")
+            for layer in profile["backward_layers"]:
+                print(f"    {layer['index']} {layer['name']:<15} "
+                      f"{layer['seconds']:>9.3f}s  "
+                      f"{layer['backward_pct']:>6.2f}% of backward")
     print("\\nNote: per-sample FP32 calls vs per-batch integer calls; "
           "this is high-level attribution, not CPU-cycle or energy profiling.")
 

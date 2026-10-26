@@ -582,3 +582,42 @@ fn successive_batch_forwards_replace_linear_and_conv_caches() {
     conv.update(0);
     assert_eq!(conv.kernels.data[0], d(-5, 0));
 }
+
+#[test]
+fn sequential_backward_layer_timing_preserves_values_and_rng() {
+    use integers::nn::Sequential;
+    use integers::rng::rng_next;
+    fn run(profile: bool) -> (Vec<Dyadic>, Vec<Dyadic>, Vec<Dyadic>, u64, Vec<u128>) {
+        seed_rng(0x4e52);
+        let mut model = Sequential::new();
+        model.add(Linear::new(3, 4, 7, 7, 31).with_grad_clip(8192));
+        model.add(ReLU::new());
+        model.add(Linear::new(4, 2, 7, 7, 31).with_grad_clip(8192));
+        let x = t(&[16, -31, 42, 5, 64, -13, 127, -57, 80], 7, &[3, 3]);
+        let grad = t(&[4, -7, -13, 8, 0, 34], 7, &[3, 2]);
+        // Reseed after constructor draws, to compare exactly the same
+        // stochastic rounding stream across timed vs original methods.
+        seed_rng(0x8e67);
+        model.zero_grad();
+        let output = model.forward_batch(&x);
+        let mut per_layer = vec![0u128; model.layers.len()];
+        let dx = if profile {
+            model.backward_batch_timed(&grad, &mut per_layer)
+        } else {
+            model.backward_batch(&grad)
+        };
+        model.update(7);
+        let updated = model.forward_batch(&x);
+        let next_rng = rng_next();
+        (output.data, dx.data, updated.data, next_rng, per_layer)
+    }
+    let (forward, gradient, update, next, _) = run(false);
+    let (forward_profiled, gradient_profiled, update_profiled, next_profiled, timings) = run(true);
+    assert_eq!(forward, forward_profiled);
+    assert_eq!(gradient, gradient_profiled);
+    assert_eq!(update, update_profiled);
+    assert_eq!(next, next_profiled, "profiling changed the RNG stream");
+    assert_eq!(timings.len(), 3);
+    // Durations can be zero under extremely coarse timer granularity.
+    assert!(timings.iter().all(|&duration| duration < 600_000_000_000));
+}

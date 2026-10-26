@@ -14,6 +14,7 @@ import prepare_pi5_dataset as prep
 import pi5_benchmark as runner
 import collect_pi5_indexed as collector
 import summarize_pi5_profile as profiler
+import compare_pi5_backward as comparison
 
 
 class Pi5DatasetTests(unittest.TestCase):
@@ -132,12 +133,18 @@ class Pi5DatasetTests(unittest.TestCase):
             "forward_ns": 2_000_000, "loss_metrics_ns": 1_000_000,
             "backward_ns": 3_000_000, "update_ns": 1_000_000,
             "other_ns": 1_000_000,
+            "backward_layers": [{"index": 0, "name": "Linear",
+                                 "elapsed_ns": 3_000_000}],
         }}
-        record = {"profile_training": True, "train_size": 8,
+        record = {"backend": "integer", "profile_training": True, "train_size": 8,
                   "batch_size": 32, "learning_curve": [epoch]}
         runner.verify_training_profile(record, True)
         with self.assertRaises(ValueError):
             runner.verify_training_profile(record, False)
+        epoch["training_profile"]["backward_layers"][0]["elapsed_ns"] = 4_000_000
+        with self.assertRaises(ValueError):
+            runner.verify_training_profile(record, True)
+        epoch["training_profile"]["backward_layers"][0]["elapsed_ns"] = 3_000_000
         epoch["training_profile"]["samples"] = 7
         with self.assertRaises(ValueError):
             runner.verify_training_profile(record, True)
@@ -155,12 +162,37 @@ class Pi5DatasetTests(unittest.TestCase):
         summary = profiler.summarize(report)[0]
         self.assertEqual(summary["percent"]["forward_ns"], 60.0)
         self.assertEqual(summary["samples"], 8)
+        profile["backward_layers"] = [{"index": 0, "name": "Linear",
+                                      "elapsed_ns": 20}]
+        summary = profiler.summarize(report)[0]
+        self.assertEqual(summary["backward_layers"][0]["seconds"], 20 / 1e9)
         profile["other_ns"] = 50
         with self.assertRaises(ValueError):
             profiler.summarize(report)
         report["runs"][0]["learning_curve"][0]["training_profile"] = None
         with self.assertRaises(ValueError):
             profiler.summarize(report)
+
+    def test_comparison_requires_same_profile_protocol(self):
+        def sample(backend):
+            return {"backend": backend, "seed": 1337, "validation_only": True,
+                    "test_evaluated": False, "machine": {
+                        "architecture": "aarch64", "hardware_model": "Raspberry Pi 5",
+                        "kernel": "6", "cpu_limit": "2", "memory_limit_bytes": 123
+                    }, "learning_curve": [{"validation_accuracy_pct": 80,
+                        "training_profile": {phase: 10 for phase in
+                            ("training_wall_ns", "backward_ns", "forward_ns",
+                             "update_ns", "preparation_ns")}}],
+                    "peak_rss_kb": 111}
+        baseline = {"dataset_manifest_sha256": "same",
+                    "runs": [sample("integer"), sample("fp32")]}
+        candidate = json.loads(json.dumps(baseline))
+        candidate["runs"][0]["learning_curve"][0]["training_profile"]["backward_ns"] = 9
+        self.assertEqual(comparison.compare(baseline, candidate)[0]
+                         ["timings"]["backward_ns"]["change_pct"], -10)
+        candidate["runs"][0]["seed"] = 2027
+        with self.assertRaisesRegex(ValueError, "seed"):
+            comparison.compare(baseline, candidate)
 
     def test_cli_does_not_implicitly_evaluate_official_test(self):
         with self.assertRaises(SystemExit):

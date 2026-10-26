@@ -83,6 +83,25 @@ jobs:
             abort "image metadata mismatch" unless c["image"] == c["env"].find { |e| e["name"] == "BENCHMARK_IMAGE" }["value"]
             abort "must have read-only root" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
           ' deployments/pi5/benchmark-profile-job.yaml
+      - name: Validate independently runnable optimized profiling Job
+        run: |
+          ruby -ryaml -e '
+            j = YAML.safe_load(File.read(ARGV[0]))
+            abort "invalid Job" unless j["apiVersion"] == "batch/v1" && j["kind"] == "Job"
+            abort "wrong Job identity" unless j.dig("metadata", "name") == "integers-pi5-training-profile-optimized"
+            p = j.dig("spec", "template", "spec")
+            abort "wrong physical target" unless p.dig("nodeSelector", "kubernetes.io/arch") == "arm64" && p.dig("nodeSelector", "benchmark.integers.dev/pi5") == "true"
+            c = p["containers"].first
+            a = c["args"]
+            abort "unexpected experimental settings" unless
+              a.include?("--validation-only") && a.include?("--profile-training") &&
+              !a.include?("--final-test") && a[a.index("--epochs")+1] == "2" &&
+              a[a.index("--seed")+1] == "1337" &&
+              a[a.index("--train-limit")+1] == "8192" &&
+              a[a.index("--validation-limit")+1] == "1042"
+            abort "image references differ" unless c["image"] == c["env"].find { |e| e["name"] == "BENCHMARK_IMAGE" }["value"]
+            abort "must be read-only" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
+          ' deployments/pi5/benchmark-profile-optimized-job.yaml
       - name: Prepare emulation (not Pi hardware)
         uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -123,6 +142,14 @@ jobs:
           assert a['profile_training'] is b['profile_training'] is True
           assert all(epoch['training_profile']['samples'] == 8
                      for backend in (a,b) for epoch in backend['learning_curve'])
+          assert all(epoch['training_profile']['backward_layers'] == []
+                     for epoch in b['learning_curve'])
+          for epoch in a['learning_curve']:
+              layers = epoch['training_profile']['backward_layers']
+              assert [v['index'] for v in layers] == list(range(5))
+              assert [v['name'] for v in layers] == [
+                  'Linear', 'ReLU', 'Linear', 'ReLU', 'Linear']
+              assert sum(v['elapsed_ns'] for v in layers) <= epoch['training_profile']['backward_ns']
           assert a['seed'] == b['seed'] == 2027
           assert a['job_completion_index'] == b['job_completion_index'] == 1
           assert a['indexed_job_seeds'] == b['indexed_job_seeds'] == [1337, 2027, 4242]
