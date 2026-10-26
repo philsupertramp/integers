@@ -136,7 +136,7 @@ class Pi5DatasetTests(unittest.TestCase):
             "backward_layers": [{"index": 0, "name": "Linear",
                                  "elapsed_ns": 3_000_000}],
         }}
-        record = {"profile_training": True, "train_size": 8,
+        record = {"backend": "integer", "profile_training": True, "train_size": 8,
                   "batch_size": 32, "learning_curve": [epoch]}
         runner.verify_training_profile(record, True)
         with self.assertRaises(ValueError):
