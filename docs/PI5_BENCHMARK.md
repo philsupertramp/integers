@@ -375,3 +375,53 @@ are *not* Pi evidence. The profile's self-time includes stopwatch overhead;
 lower-level diagnosis of the dominant phase, follow up with targeted CPU
 sampling (`perf`/flamegraph if permitted) and hardware clock measurements.
 Profile runs do not measure throttling, energy or container peak memory.
+
+## 11. Portable backward accumulation optimization and per-layer attribution (#47)
+
+The `big-refactor` candidate's `Linear::backward_one` now takes a **same
+dyadic scale** fast path for gradient accumulation. When scales match,
+`add(a,b)` is exactly `(a.v.saturating_add(b.v), a.s)` without a rounding
+RNG draw; otherwise the original `add()` is invoked unchanged. Both weight
+gradient and input gradient are still computed in the **same order** with the
+same `mul()` calls. No public gradient return values, clipping, tensor
+precision, or optimizer behavior are removed. A frozen pre-optimization
+backward reference and exhaustive mixed-scale/saturation fixtures check
+bit-identical gradients, accumulators and next RNG state.
+
+With `--profile-training`, integer records also expose
+`training_profile.backward_layers`: array of
+`{index, name, elapsed_ns}`, indexed in *forward layer order*. The model
+executes these timed calls in reverse order. These measurements are
+nested inside `backward_ns` and include timer overhead; **do not sum them
+again when computing total training**. There are five layer positions:
+0 Linear (784→128), 1 ReLU, 2 Linear (128→128), 3 ReLU,
+4 Linear (128→10). The existing FP32 sample-wise reference returns an
+empty backward-layer list. The summary script prints layer attribution when
+available.
+
+To evaluate speed without clobbering the **already collected** physical
+Pi baseline `profile.json` from commit `0539065a97bfe75fbfb7d7c1eb1171527c0bdd28`,
+publish the new ARM64 image from a merged branch and replace both image
+references in `deployments/pi5/benchmark-profile-optimized-job.yaml`
+with the identical immutable digest:
+
+```sh
+kubectl apply -f deployments/pi5/benchmark-profile-optimized-job.yaml
+kubectl wait --for=condition=complete job/integers-pi5-training-profile-optimized --timeout=3600s
+kubectl logs job/integers-pi5-training-profile-optimized > profile-optimized.log
+python3 experiments/extract_pi5_results.py profile-optimized.log \
+  --output profile-optimized.json
+python3 experiments/summarize_pi5_profile.py profile-optimized.json
+python3 experiments/compare_pi5_backward.py profile.json profile-optimized.json
+```
+
+Match the exact seed 1337, 2 epochs, 8192 train / 1042 validation,
+batch 32, LR shift 7, dataset manifest, compiler/release flags, node,
+CPU quota and hardware conditions. The comparison script rejects
+mismatched run settings, wrong backend order and official-test access.
+It reports relative phase timings, accuracy and process RSS rather than
+declaring success automatically. A measured Pi speed improvement still
+requires reproducing across runs and checking thermal/frequency/host
+contention; CI/QEMU timings prove neither acceleration nor power savings.
+If the optimization has no benefit, revert it rather than changing
+semantics for a speculative improvement.
