@@ -8,10 +8,16 @@ WORKDIR /app
 # The temporary library is replaced by the real source below; Cargo rebuilds
 # the real crate while reusing the cached dependency artifacts.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src \
+# Cargo validates all explicit target paths when it parses Cargo.toml,
+# even with --lib. Supply disposable files for those example/bench targets
+# without copying changing application sources into the dependency layer.
+RUN mkdir -p src examples/mnist examples/cifar benches \
     && printf 'pub fn dependency_cache_warmup() {}\n' > src/lib.rs \
+    && touch examples/mnist/main.rs examples/iris.rs \
+             examples/cifar/main.rs examples/mnist_to_parquet.rs \
+             benches/tensor_bench.rs benches/memory_bench.rs \
     && cargo build --locked --release --lib \
-    && rm -rf src
+    && rm -rf src examples benches
 COPY . .
 RUN cargo build --locked --release --example held_out \
     && mkdir -p /build-info \
