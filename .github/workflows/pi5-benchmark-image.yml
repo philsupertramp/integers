@@ -71,6 +71,18 @@ jobs:
             abort "must be read-only" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
             abort "results volume missing" unless p["volumes"].any? { |v| v["name"] == "results" }
           ' deployments/pi5/benchmark-full-validation-indexed.yaml
+      - name: Validate profiling Job is validation-only and Pi-pinned
+        run: |
+          ruby -ryaml -e '
+            j = YAML.safe_load(File.read(ARGV[0]))
+            abort "must be Job" unless j["kind"] == "Job" && j["apiVersion"] == "batch/v1"
+            c = j.dig("spec", "template", "spec", "containers").first
+            p = j.dig("spec", "template", "spec")
+            abort "must target real Pi 5 ARM64" unless p.dig("nodeSelector", "kubernetes.io/arch") == "arm64" && p.dig("nodeSelector", "benchmark.integers.dev/pi5") == "true"
+            abort "must stay validation-only" unless c["args"].include?("--profile-training") && c["args"].include?("--validation-only") && !c["args"].include?("--final-test")
+            abort "image metadata mismatch" unless c["image"] == c["env"].find { |e| e["name"] == "BENCHMARK_IMAGE" }["value"]
+            abort "must have read-only root" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
+          ' deployments/pi5/benchmark-profile-job.yaml
       - name: Prepare emulation (not Pi hardware)
         uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -96,7 +108,7 @@ jobs:
             -e BENCHMARK_IMAGE=integers-pi5:ci \
             -e JOB_COMPLETION_INDEX=1 \
             integers-pi5:ci --require-arm64 --validation-only \
-            --epochs 1 --seed-list 1337,2027,4242 --train-limit 8 --validation-limit 10 \
+            --epochs 1 --seed-list 1337,2027,4242 --profile-training --train-limit 8 --validation-limit 10 \
             | tee /tmp/pi5-ci.log
           python3 experiments/extract_pi5_results.py /tmp/pi5-ci.log \
             --output /tmp/pi5-ci-restored.json
@@ -108,6 +120,9 @@ jobs:
           assert len(r['runs']) == 2
           a, b = r['runs']
           assert (a['backend'], b['backend']) == ('integer', 'fp32')
+          assert a['profile_training'] is b['profile_training'] is True
+          assert all(epoch['training_profile']['samples'] == 8
+                     for backend in (a,b) for epoch in backend['learning_curve'])
           assert a['seed'] == b['seed'] == 2027
           assert a['job_completion_index'] == b['job_completion_index'] == 1
           assert a['indexed_job_seeds'] == b['indexed_job_seeds'] == [1337, 2027, 4242]
@@ -117,7 +132,33 @@ jobs:
           assert a['prepared_artifact_sha256'] == b['prepared_artifact_sha256']
           assert a['dataset_manifest_sha256'] == b['dataset_manifest_sha256']
           assert all(v['wall_ms'] >= 0 and v['dataset_loading_ms'] >= 0 for v in (a,b))
-          print('Offline ARM64 emulated smoke passed (NOT Pi performance).')
+          print('Offline ARM64 emulated profiled smoke passed (NOT Pi performance).')
+          PY
+      - name: Offline QEMU numerical parity, profiled vs unprofiled
+        run: |
+          cp /tmp/pi5-ci-results/benchmark-result.json /tmp/pi5-ci-profiled.json
+          docker run --rm --platform linux/arm64 --network none --read-only \
+            --mount type=bind,src=/tmp/pi5-ci-results,dst=/results \
+            -e BENCHMARK_IMAGE=integers-pi5:ci \
+            -e JOB_COMPLETION_INDEX=1 \
+            integers-pi5:ci --require-arm64 --validation-only \
+            --epochs 1 --seed-list 1337,2027,4242 --train-limit 8 --validation-limit 10 \
+            >/tmp/pi5-ci-unprofiled.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          profiled = json.loads(Path("/tmp/pi5-ci-profiled.json").read_text())
+          plain = json.loads(Path("/tmp/pi5-ci-results/benchmark-result.json").read_text())
+          for a, b in zip(profiled["runs"], plain["runs"]):
+              assert a["backend"] == b["backend"]
+              assert b["profile_training"] is False
+              assert b["learning_curve"][0]["training_profile"] is None
+              for k in ("train_accuracy_pct", "validation_accuracy_pct",
+                        "validation_confusion", "validation_predictions",
+                        "validation_per_class_recall", "max_abs_output",
+                        "nonfinite_outputs", "extreme_outputs"):
+                  assert a["learning_curve"][0][k] == b["learning_curve"][0][k], k
+          print("Profiled/unprofiled output parity passed for both backends.")
           PY
 
   publish:
