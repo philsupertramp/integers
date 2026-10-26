@@ -64,6 +64,7 @@ struct Config {
     ci_sample: bool,
     validation_only: bool,
     final_test: bool,
+    profile_training: bool,
     split_seed: u64,
 }
 impl Config {
@@ -86,6 +87,7 @@ impl Config {
             ci_sample: false,
             validation_only: false,
             final_test: false,
+            profile_training: false,
             split_seed: SPLIT_SEED,
         };
         let mut i = 0;
@@ -114,6 +116,11 @@ impl Config {
             }
             if key == "--final-test" {
                 cfg.final_test = true;
+                i += 1;
+                continue;
+            }
+            if key == "--profile-training" {
+                cfg.profile_training = true;
                 i += 1;
                 continue;
             }
@@ -195,6 +202,10 @@ impl Config {
                 && cfg.epochs > 0
                 && cfg.lr_shift <= 30,
             "invalid seed, split seed, batch, epochs, or lr shift"
+        );
+        assert!(
+            !cfg.profile_training || (cfg.architecture == Architecture::Dense && cfg.validation_only),
+            "training profiling requires dense --validation-only mode"
         );
         assert!(
             !cfg.validation_only || !cfg.ci_sample,
@@ -499,8 +510,8 @@ impl FloatMlp {
             layer.update(lr_shift, samples);
         }
     }
-    fn accumulate(&mut self, input: &[f32], target: &[f32]) -> usize {
-        let activations = self.activations(input);
+    // Shared FP32 arithmetic, split only at stopwatch boundaries.
+    fn loss_and_prediction(activations: &[Vec<f32>], target: &[f32]) -> (usize, Vec<f32>) {
         let result = activations.last().unwrap();
         let pred = result
             .iter()
@@ -509,14 +520,17 @@ impl FloatMlp {
             .unwrap()
             .0;
         assert_eq!(result.len(), target.len());
-        let mut grad: Vec<f32> = result.iter().zip(target).map(|(p, t)| p - t).collect();
+        let grad: Vec<f32> = result.iter().zip(target).map(|(p, t)| p - t).collect();
+        (pred, grad)
+    }
+
+    fn backward_from_activations(&mut self, activations: &[Vec<f32>], mut grad: Vec<f32>) {
         for k in (0..self.layers.len()).rev() {
             let layer = &mut self.layers[k];
             let input_act = &activations[k];
             let mut previous = vec![0.0; layer.input];
-            // Match integer Linear::backward_one: clip the *per-example*
-            // upstream neuron gradient before parameter accumulation,
-            // not the aggregate gradient at optimizer update time.
+            // Match integer Linear::backward_one: clip the per-example
+            // upstream gradient before parameter accumulation.
             let clip = GRAD_CLIP as f32 / (1u32 << SHIFT) as f32;
             for (j, &grad_j) in grad.iter().enumerate().take(layer.output) {
                 let g = grad_j.clamp(-clip, clip);
@@ -536,6 +550,29 @@ impl FloatMlp {
             }
             grad = previous;
         }
+    }
+
+    fn accumulate(&mut self, input: &[f32], target: &[f32]) -> usize {
+        let activations = self.activations(input);
+        let (pred, grad) = Self::loss_and_prediction(&activations, target);
+        self.backward_from_activations(&activations, grad);
+        pred
+    }
+
+    fn accumulate_profiled(
+        &mut self,
+        input: &[f32],
+        target: &[f32],
+        profile: &mut TrainingProfile,
+    ) -> usize {
+        // Dense FP32 calls forward/backward per sample; integer uses batches.
+        let activations = timed(&mut profile.forward_ns, || self.activations(input));
+        let (pred, grad) = timed(&mut profile.loss_metrics_ns, || {
+            Self::loss_and_prediction(&activations, target)
+        });
+        timed(&mut profile.backward_ns, || {
+            self.backward_from_activations(&activations, grad)
+        });
         pred
     }
 }
@@ -707,6 +744,40 @@ fn pct(correct: usize, size: usize) -> f64 {
     100.0 * correct as f64 / size as f64
 }
 
+#[derive(Default)]
+struct TrainingProfile {
+    preparation_ns: u128,
+    zero_grad_ns: u128,
+    forward_ns: u128,
+    loss_metrics_ns: u128,
+    backward_ns: u128,
+    update_ns: u128,
+    batches: usize,
+    samples: usize,
+}
+
+fn timed<T>(elapsed_ns: &mut u128, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = operation();
+    *elapsed_ns += started.elapsed().as_nanos();
+    result
+}
+
+impl TrainingProfile {
+    fn json(&self, wall_ns: u128) -> String {
+        let measured = self.preparation_ns + self.zero_grad_ns + self.forward_ns
+            + self.loss_metrics_ns + self.backward_ns + self.update_ns;
+        // Unaccounted time includes shuffle, loop and timer overhead.
+        let other_ns = wall_ns.saturating_sub(measured);
+        format!(
+            "{{\"schema\":1,\"clock\":\"Instant\",\"unit\":\"ns\",\"batches\":{},\"samples\":{},\"training_wall_ns\":{},\"preparation_ns\":{},\"zero_grad_ns\":{},\"forward_ns\":{},\"loss_metrics_ns\":{},\"backward_ns\":{},\"update_ns\":{},\"other_ns\":{}}}",
+            self.batches, self.samples, wall_ns, self.preparation_ns,
+            self.zero_grad_ns, self.forward_ns, self.loss_metrics_ns,
+            self.backward_ns, self.update_ns, other_ns
+        )
+    }
+}
+
 struct Epoch {
     epoch: usize,
     train_accuracy: f64,
@@ -714,6 +785,7 @@ struct Epoch {
     training_samples: usize,
     elapsed_ms: u128,
     training_ms: u128,
+    training_profile_json: String,
     validation_ms: u128,
     validation_predictions: Vec<usize>,
     validation_confusion: Vec<Vec<usize>>,
@@ -766,43 +838,92 @@ fn main() {
         let epoch_start = Instant::now();
         let order = protocol::epoch_order(&data.train_ids, cfg.seed, epoch);
         let mut correct = 0usize;
+        let mut profile = TrainingProfile::default();
         match cfg.backend {
             Backend::Integer => {
                 integer.set_training(true);
                 for ids in order.chunks(cfg.batch) {
-                    let (x, t) = data.pool.minibatch(ids);
-                    integer.zero_grad();
-                    let y = integer.forward_batch(&x);
-                    for (sample, &idx) in y.iter().zip(ids) {
-                        if argmax(sample.data) == data.pool.labels[idx] as usize {
-                            correct += 1;
+                    if cfg.profile_training {
+                        profile.batches += 1;
+                        profile.samples += ids.len();
+                        let (x, t) = timed(&mut profile.preparation_ns, || data.pool.minibatch(ids));
+                        timed(&mut profile.zero_grad_ns, || integer.zero_grad());
+                        let y = timed(&mut profile.forward_ns, || integer.forward_batch(&x));
+                        let gradient: Tensor = timed(&mut profile.loss_metrics_ns, || {
+                            for (sample, &idx) in y.iter().zip(ids) {
+                                if argmax(sample.data) == data.pool.labels[idx] as usize {
+                                    correct += 1;
+                                }
+                            }
+                            y.iter()
+                                .zip(t.iter())
+                                .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
+                                .collect()
+                        });
+                        timed(&mut profile.backward_ns, || integer.backward_batch(&gradient));
+                        timed(&mut profile.update_ns, || integer.update(cfg.lr_shift));
+                    } else {
+                        let (x, t) = data.pool.minibatch(ids);
+                        integer.zero_grad();
+                        let y = integer.forward_batch(&x);
+                        for (sample, &idx) in y.iter().zip(ids) {
+                            if argmax(sample.data) == data.pool.labels[idx] as usize {
+                                correct += 1;
+                            }
                         }
+                        let gradient: Tensor = y
+                            .iter()
+                            .zip(t.iter())
+                            .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
+                            .collect();
+                        integer.backward_batch(&gradient);
+                        integer.update(cfg.lr_shift);
                     }
-                    let gradient: Tensor = y
-                        .iter()
-                        .zip(t.iter())
-                        .map(|(y, t)| Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec()))
-                        .collect();
-                    integer.backward_batch(&gradient);
-                    integer.update(cfg.lr_shift);
                 }
                 integer.set_training(false);
             }
             Backend::Fp32 => {
                 for ids in order.chunks(cfg.batch) {
-                    fp32.zero_grad();
-                    for &idx in ids {
-                        let x = float_row(&data.pool, idx);
-                        let t = float_target(&data.pool, idx);
-                        if fp32.accumulate(&x, &t) == data.pool.labels[idx] as usize {
-                            correct += 1;
+                    if cfg.profile_training {
+                        profile.batches += 1;
+                        profile.samples += ids.len();
+                        let Fp32Model::Dense(model) = &mut fp32 else {
+                            unreachable!("profiling requires dense MLP");
+                        };
+                        timed(&mut profile.zero_grad_ns, || model.zero_grad());
+                        for &idx in ids {
+                            let (x, t) = timed(&mut profile.preparation_ns, || {
+                                (float_row(&data.pool, idx), float_target(&data.pool, idx))
+                            });
+                            if model.accumulate_profiled(&x, &t, &mut profile)
+                                == data.pool.labels[idx] as usize
+                            {
+                                correct += 1;
+                            }
                         }
+                        timed(&mut profile.update_ns, || model.update(cfg.lr_shift, ids.len()));
+                    } else {
+                        fp32.zero_grad();
+                        for &idx in ids {
+                            let x = float_row(&data.pool, idx);
+                            let t = float_target(&data.pool, idx);
+                            if fp32.accumulate(&x, &t) == data.pool.labels[idx] as usize {
+                                correct += 1;
+                            }
+                        }
+                        fp32.update(cfg.lr_shift, ids.len());
                     }
-                    fp32.update(cfg.lr_shift, ids.len());
                 }
             }
         }
-        let training_ms = epoch_start.elapsed().as_millis();
+        let training_wall_ns = epoch_start.elapsed().as_nanos();
+        let training_ms = training_wall_ns / 1_000_000;
+        let training_profile_json = if cfg.profile_training {
+            assert_eq!(profile.samples, order.len());
+            profile.json(training_wall_ns)
+        } else {
+            "null".to_string()
+        };
         let validation_start = Instant::now();
         let val = match cfg.backend {
             Backend::Integer => accuracy_integer(&mut integer, &data.pool, &data.validation_ids),
@@ -832,6 +953,7 @@ fn main() {
             training_samples: order.len(),
             elapsed_ms: epoch_start.elapsed().as_millis(),
             training_ms,
+            training_profile_json,
             validation_ms,
             validation_predictions: val.predicted_counts,
             validation_confusion: val.confusion,
@@ -858,6 +980,14 @@ fn main() {
             metric.validation_extremes,
             metric.nonfinite_fp32_params
         );
+        if cfg.profile_training {
+            println!(
+                "TRAINING_PROFILE epoch={} backend={} {}",
+                metric.epoch,
+                if cfg.backend == Backend::Integer { "integer" } else { "fp32" },
+                metric.training_profile_json
+            );
+        }
         curve.push(metric);
     }
     // Validation-only Iris/MNIST never reads or evaluates test data.
@@ -906,8 +1036,8 @@ fn main() {
     }
 
     let epochs: Vec<String> = curve.iter().map(|m| format!(
-        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"training_ms\":{},\"validation_ms\":{},\"validation_predictions\":{:?},\"validation_confusion\":{:?},\"validation_per_class_recall\":{},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
-        m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms, m.training_ms, m.validation_ms,
+        "{{\"epoch\":{},\"train_accuracy_pct\":{:.6},\"validation_accuracy_pct\":{:.6},\"training_samples\":{},\"wall_ms\":{},\"training_ms\":{},\"training_profile\":{},\"validation_ms\":{},\"validation_predictions\":{:?},\"validation_confusion\":{:?},\"validation_per_class_recall\":{},\"nonfinite_outputs\":{},\"extreme_outputs\":{},\"max_abs_output\":{:.8},\"nonfinite_fp32_parameters\":{}}}",
+        m.epoch, m.train_accuracy, m.validation_accuracy, m.training_samples, m.elapsed_ms, m.training_ms, m.training_profile_json, m.validation_ms,
         m.validation_predictions, m.validation_confusion, m.validation_per_class_recall_json, m.validation_nonfinite, m.validation_extremes, m.validation_max_abs,
         m.nonfinite_fp32_params.map_or("null".to_string(), |n| n.to_string()),
     )).collect();
@@ -917,7 +1047,7 @@ fn main() {
         format!("{:.6}", pct(n, data.test.len()))
     });
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
         cfg.ci_sample,
         cfg.seed,
@@ -939,6 +1069,7 @@ fn main() {
         data.validation_ids.len(),
         data.test.len(),
         cfg.validation_only,
+        cfg.profile_training,
         test_correct.is_some(),
         test_correct_json,
         test_accuracy_json,
