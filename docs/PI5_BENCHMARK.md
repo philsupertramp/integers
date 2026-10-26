@@ -48,7 +48,7 @@ files, and never fetched at Job startup. License information and attribution:
 The image includes a modification and license notice. Do not transfer the
 dataset's license to the (separately undecided) Rust library licensing policy.
 
-On PR #43's GitHub Actions ARM64/QEMU build (2026-10-25), `docker image inspect .Size` reported **67,416,792 bytes** for the locally loaded image. This is a reproducible CI observation for that image build, **not** compressed GHCR transfer size or measured Pi process memory.
+On PR #43's original GitHub Actions ARM64/QEMU build (2026-10-25), `docker image inspect .Size` reported **67,416,792 bytes** for the locally loaded image. This is a reproducible CI observation for that image build, **not** compressed GHCR transfer size or measured Pi process memory.
 
 Image **compressed registry transfer size** must be measured after publish;
 do not equate it with local `docker inspect .Size`, process RSS, or memory
@@ -63,8 +63,23 @@ docker image inspect ghcr.io/philsupertramp/integers-benchmark@sha256:REPLACE_DI
 
 Workflow: `.github/workflows/pi5-benchmark-image.yml`.
 
+The image pipeline uses GitHub-hosted native `ubuntu-24.04-arm`
+runners for both validation and publication; these are **not** physical
+Raspberry Pi 5 devices, so their timings are not Pi measurements.
+Buildx persists its intermediate layers to the GitHub Actions cache
+(`type=gha,scope=pi5-benchmark-arm64,mode=max`), including the separate
+Rust dependency-warmup layer and checksum-verified prepared MNIST stage.
+The publish job restores this cache rather than recompiling every
+layer through QEMU. Cache population is best-effort and may miss after
+eviction or dependency changes; the first run is a cold build. The
+publish job still performs a separate build, and a cached build is not
+proof of byte-for-byte equivalence to the validation image. Source
+changes recompile the application crate but should reuse dependency
+compilation; Cargo lockfile/toolchain changes invalidate the warmup layer.
+
+
 PRs targeting `big-refactor`: run Python integrity tests, build the ARM64
-image using Buildx/QEMU, and run a **tiny, offline, paired** smoke with
+image using Buildx/QEMU, and run a **tiny, offline, paired** native ARM64 smoke with
 `--network none`. **No PR build pushes.**
 
 A **successful** validation build on a push to `big-refactor` (or explicitly
@@ -261,10 +276,10 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo check --locked --all-targets
-# ARM64 build + offline QEMU smoke runs in the dedicated GH Actions workflow.
+# Native ARM64 build + offline smoke runs in the dedicated GH Actions workflow.
 ```
 
-All ARM64 CI timings are **emulated diagnostics only**. Report actual Pi 5
+All ARM64 CI timings are **hosted ARM64 diagnostics only** (not Pi 5 measurements). Report actual Pi 5
 training accuracy, duration, process RSS, sensor availability and controlled
 comparison results **after** running the versioned image on the real device.
 
