@@ -433,20 +433,20 @@ mod backward_accumulator_tests {
                     let data = (0..5)
                         .map(|i| {
                             d(
-                                ((i as i32 + sample as i32) * 17 % 223) - 111,
+                                ((i + sample as i32) * 17 % 223) - 111,
                                 if i % 2 == 0 { 7 } else { 10 },
                             )
                         })
                         .collect();
                     inputs.push(Tensor::from_vec(data, vec![5]));
                     outputs.push(Tensor::from_vec(
-                        (0..3).map(|j| d(j as i32 * 11 - 7, 7)).collect(),
+                        (0..3).map(|j| d(j * 11 - 7, 7)).collect(),
                         vec![3],
                     ));
                     clips.push([sample % 3 == 0, false, sample % 5 == 0]);
                     grads.push(Tensor::from_vec(
                         (0..3)
-                            .map(|j| d(sample as i32 * 103 + j as i32 * 1001 - 1024, grad_shift))
+                            .map(|j| d(sample as i32 * 103 + j * 1001 - 1024, grad_shift))
                             .collect(),
                         vec![3],
                     ));
