@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "experiments"))
 import prepare_pi5_dataset as prep
 import pi5_benchmark as runner
 import collect_pi5_indexed as collector
+import summarize_pi5_profile as profiler
 
 
 class Pi5DatasetTests(unittest.TestCase):
@@ -114,6 +115,52 @@ class Pi5DatasetTests(unittest.TestCase):
                      [pod(0), pod(1, "Pending"), pod(2)]):
             with self.assertRaises(ValueError):
                 collector.indexed_pods(pods, [1337, 2027, 4242])
+
+    def test_training_profiling_opt_in_and_fail_closed(self):
+        args = runner.parse_args(["--validation-only", "--profile-training",
+                                  "--train-limit", "8", "--validation-limit", "10"])
+        self.assertTrue(args.profile_training)
+        for options in (["--final-test", "--profile-training"],
+                        ["--validation-only", "--architecture", "cnn",
+                         "--profile-training"]):
+            with self.assertRaises(SystemExit):
+                runner.parse_args(options)
+        epoch = {"training_ms": 10, "training_profile": {
+            "schema": 1, "clock": "Instant", "unit": "ns",
+            "batches": 1, "samples": 8, "training_wall_ns": 10_000_000,
+            "preparation_ns": 1_000_000, "zero_grad_ns": 1_000_000,
+            "forward_ns": 2_000_000, "loss_metrics_ns": 1_000_000,
+            "backward_ns": 3_000_000, "update_ns": 1_000_000,
+            "other_ns": 1_000_000,
+        }}
+        record = {"profile_training": True, "train_size": 8,
+                  "batch_size": 32, "learning_curve": [epoch]}
+        runner.verify_training_profile(record, True)
+        with self.assertRaises(ValueError):
+            runner.verify_training_profile(record, False)
+        epoch["training_profile"]["samples"] = 7
+        with self.assertRaises(ValueError):
+            runner.verify_training_profile(record, True)
+        record["profile_training"] = False
+        epoch["training_profile"] = None
+        runner.verify_training_profile(record, False)
+
+    def test_profile_summary_rejects_missing_or_bad_timing(self):
+        profile = {"training_wall_ns": 100, "samples": 8, "batches": 1}
+        profile.update({name: 0 for name in profiler.PHASES})
+        profile["forward_ns"] = 60
+        profile["other_ns"] = 40
+        report = {"runs": [{"backend": "integer",
+                            "learning_curve": [{"training_profile": profile}]}]}
+        summary = profiler.summarize(report)[0]
+        self.assertEqual(summary["percent"]["forward_ns"], 60.0)
+        self.assertEqual(summary["samples"], 8)
+        profile["other_ns"] = 50
+        with self.assertRaises(ValueError):
+            profiler.summarize(report)
+        report["runs"][0]["learning_curve"][0]["training_profile"] = None
+        with self.assertRaises(ValueError):
+            profiler.summarize(report)
 
     def test_cli_does_not_implicitly_evaluate_official_test(self):
         with self.assertRaises(SystemExit):

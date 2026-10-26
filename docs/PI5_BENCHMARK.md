@@ -332,3 +332,46 @@ Serialization prevents these benchmark Pods competing with **each other**,
 but not with unrelated K3s workloads or the Pi's CPU governor and thermals.
 The integer→FP32 order still requires separate control experiments for
 an order-independent speed comparison; do not infer energy savings.
+
+## 10. Opt-in training path profiling (issue #18)
+
+Use `deployments/pi5/benchmark-profile-job.yaml` with the **same published
+ARM64 image digest in both image references**, built from the commit that adds
+`--profile-training`. This runs one fixed seed (1337), 8192 training and
+1042 validation observations, dense MLP, batch 32, 2 epochs, *validation
+only*. It does NOT touch official test data and does NOT change the normal
+unprofiled three-seed Indexed Job. Do not compare profiled wall times to
+unprofiled wall times as if overhead were zero.
+
+```sh
+kubectl apply -f deployments/pi5/benchmark-profile-job.yaml
+kubectl wait --for=condition=complete job/integers-pi5-training-profile --timeout=3600s
+kubectl logs job/integers-pi5-training-profile > pi5-training-profile.log
+python3 experiments/extract_pi5_results.py pi5-training-profile.log \
+  --output pi5-training-profile.json
+python3 experiments/summarize_pi5_profile.py pi5-training-profile.json
+```
+
+Each run's per-epoch JSON includes `training_profile` (null without the
+flag). In opt-in mode it contains `training_wall_ns`, `batches`,
+`samples`, `preparation_ns` (input/target materialization),
+`zero_grad_ns`, `forward_ns`, `loss_metrics_ns` (prediction, loss
+gradient), `backward_ns`, `update_ns` and `other_ns`
+(shuffle, Python-unrelated Rust loop/timer overhead and unaccounted work).
+All timings use Rust `Instant` wall-clock nanoseconds, **not CPU cycles**.
+Integer calls forward/backward **per batch**; the scalar FP32 reference does
+so **per individual sample**, so measured percentages indicate high-level
+where time is spent but do not isolate architecture-specific primitive
+efficiency. No arithmetic, clipping, update schedule or input order is
+modified. The ordinary benchmark path remains uninstrumented.
+
+The launcher refuses missing/malformed profiling records. Its SHA256 archive
+and extractor are unchanged. CI runs the same small synthetic/prepared-data
+fixture both with and without profiling and compares all accuracy predictions
+and confusion matrices exactly, as well as the other numerical metrics.
+Run the benchmark on the actual Pi for performance numbers: QEMU timings
+are *not* Pi evidence. The profile's self-time includes stopwatch overhead;
+`other_ns` is an unassigned residual, not a concrete hotspot. For a
+lower-level diagnosis of the dominant phase, follow up with targeted CPU
+sampling (`perf`/flamegraph if permitted) and hardware clock measurements.
+Profile runs do not measure throttling, energy or container peak memory.

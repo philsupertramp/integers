@@ -138,6 +138,39 @@ def indexed_seed_metadata(args) -> dict:
     }
 
 
+PROFILE_TIMINGS = ("preparation_ns", "zero_grad_ns", "forward_ns",
+                   "loss_metrics_ns", "backward_ns", "update_ns", "other_ns")
+
+
+def verify_training_profile(record: dict, enabled: bool) -> None:
+    """Reject partial/mislabeled profiles; preserve older unprofiled reports."""
+    if enabled and record.get("profile_training") is not True:
+        raise ValueError("Rust runner did not enable requested training profiling")
+    if not enabled and record.get("profile_training", False):
+        raise ValueError("unexpected training profiling in ordinary benchmark")
+    for epoch in record["learning_curve"]:
+        profile = epoch.get("training_profile")
+        if not enabled:
+            if profile is not None:
+                raise ValueError("unexpected per-epoch training profile")
+            continue
+        if not isinstance(profile, dict):
+            raise ValueError("training profile missing for epoch")
+        if (profile.get("schema") != 1 or profile.get("unit") != "ns" or
+                profile.get("clock") != "Instant" or
+                profile.get("samples") != record["train_size"] or
+                profile.get("batches") !=
+                (record["train_size"] + record["batch_size"] - 1) // record["batch_size"]):
+            raise ValueError("training profile metadata mismatch")
+        values = [profile.get(k) for k in PROFILE_TIMINGS]
+        wall = profile.get("training_wall_ns")
+        if (not isinstance(wall, int) or wall < 0 or
+                any(not isinstance(v, int) or v < 0 for v in values) or
+                sum(values) > wall or
+                abs(wall // 1_000_000 - epoch["training_ms"]) > 1):
+            raise ValueError("training profile timing totals inconsistent")
+
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -235,6 +268,8 @@ def run(args) -> dict:
             "--lr-shift", str(args.lr_shift), "--data-dir", str(args.data_dir),
             "--prepared-data", "--report", str(out),
         ]
+        if args.profile_training:
+            command.append("--profile-training")
         if args.validation_only:
             command.append("--validation-only")
             command.extend(["--train-limit", str(args.train_limit),
@@ -249,6 +284,7 @@ def run(args) -> dict:
         record = json.loads(out.read_text())
         if record["backend"] != backend or record["seed"] != args.seed:
             raise ValueError("runner output does not match request")
+        verify_training_profile(record, args.profile_training)
         record["benchmark_schema"] = 1
         record.update(indexed_seed_metadata(args))
         record["git_commit_sha"] = os.environ.get("BENCHMARK_GIT_SHA", "unknown")
@@ -311,6 +347,7 @@ def parse_args(argv=None):
     parser.add_argument("--lr-shift", type=int, default=7)
     parser.add_argument("--validation-only", action="store_true", default=False)
     parser.add_argument("--final-test", action="store_true", default=False)
+    parser.add_argument("--profile-training", action="store_true", default=False)
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--validation-limit", type=int, default=None)
     parser.add_argument("--require-arm64", action="store_true", default=False)
@@ -327,6 +364,8 @@ def parse_args(argv=None):
         args.seed = 1337
     if args.validation_only == args.final_test:
         parser.error("choose exactly one of --validation-only or --final-test")
+    if args.profile_training and (not args.validation_only or args.architecture != "dense"):
+        parser.error("--profile-training requires dense --validation-only")
     if args.final_test and (args.train_limit is not None or args.validation_limit is not None):
         parser.error("sample limits require --validation-only")
     if args.validation_only:
