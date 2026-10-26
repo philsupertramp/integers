@@ -162,6 +162,26 @@ def verify_training_profile(record: dict, enabled: bool) -> None:
                 profile.get("batches") !=
                 (record["train_size"] + record["batch_size"] - 1) // record["batch_size"]):
             raise ValueError("training profile metadata mismatch")
+        layers = profile.get("backward_layers", [])
+        if not isinstance(layers, list):
+            raise ValueError("invalid backward layer profile array")
+        if record["backend"] == "integer" and not layers:
+            raise ValueError("missing integer backward layer attribution")
+        seen = set()
+        layer_total = 0
+        for layer in layers:
+            if not isinstance(layer, dict):
+                raise ValueError("invalid backward layer entry")
+            index = layer.get("index")
+            nanoseconds = layer.get("elapsed_ns")
+            if (not isinstance(index, int) or index in seen or index < 0 or
+                    not isinstance(layer.get("name"), str) or not layer["name"] or
+                    not isinstance(nanoseconds, int) or nanoseconds < 0):
+                raise ValueError("invalid backward layer data")
+            seen.add(index)
+            layer_total += nanoseconds
+        if seen != set(range(len(layers))) or layer_total > profile["backward_ns"]:
+            raise ValueError("backward layer times do not reconcile")
         values = [profile.get(k) for k in PROFILE_TIMINGS]
         wall = profile.get("training_wall_ns")
         if (not isinstance(wall, int) or wall < 0 or

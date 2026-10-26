@@ -132,12 +132,18 @@ class Pi5DatasetTests(unittest.TestCase):
             "forward_ns": 2_000_000, "loss_metrics_ns": 1_000_000,
             "backward_ns": 3_000_000, "update_ns": 1_000_000,
             "other_ns": 1_000_000,
+            "backward_layers": [{"index": 0, "name": "Linear",
+                                 "elapsed_ns": 3_000_000}],
         }}
         record = {"profile_training": True, "train_size": 8,
                   "batch_size": 32, "learning_curve": [epoch]}
         runner.verify_training_profile(record, True)
         with self.assertRaises(ValueError):
             runner.verify_training_profile(record, False)
+        epoch["training_profile"]["backward_layers"][0]["elapsed_ns"] = 4_000_000
+        with self.assertRaises(ValueError):
+            runner.verify_training_profile(record, True)
+        epoch["training_profile"]["backward_layers"][0]["elapsed_ns"] = 3_000_000
         epoch["training_profile"]["samples"] = 7
         with self.assertRaises(ValueError):
             runner.verify_training_profile(record, True)
@@ -155,6 +161,10 @@ class Pi5DatasetTests(unittest.TestCase):
         summary = profiler.summarize(report)[0]
         self.assertEqual(summary["percent"]["forward_ns"], 60.0)
         self.assertEqual(summary["samples"], 8)
+        profile["backward_layers"] = [{"index": 0, "name": "Linear",
+                                      "elapsed_ns": 20}]
+        summary = profiler.summarize(report)[0]
+        self.assertEqual(summary["backward_layers"][0]["seconds"], 20 / 1e9)
         profile["other_ns"] = 50
         with self.assertRaises(ValueError):
             profiler.summarize(report)
