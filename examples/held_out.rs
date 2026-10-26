@@ -755,6 +755,8 @@ struct TrainingProfile {
     update_ns: u128,
     batches: usize,
     samples: usize,
+    backward_layer_ns: Vec<u128>,
+    backward_layer_names: Vec<&'static str>,
 }
 
 fn timed<T>(elapsed_ns: &mut u128, operation: impl FnOnce() -> T) -> T {
@@ -774,8 +776,18 @@ impl TrainingProfile {
             + self.update_ns;
         // Unaccounted time includes shuffle, loop and timer overhead.
         let other_ns = wall_ns.saturating_sub(measured);
+        let layers = self.backward_layer_ns
+            .iter()
+            .zip(&self.backward_layer_names)
+            .enumerate()
+            .map(|(index, (elapsed_ns, name))| {
+                format!("{{\"index\":{},\"name\":\"{}\",\"elapsed_ns\":{}}}",
+                    index, name, elapsed_ns)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "{{\"schema\":1,\"clock\":\"Instant\",\"unit\":\"ns\",\"batches\":{},\"samples\":{},\"training_wall_ns\":{},\"preparation_ns\":{},\"zero_grad_ns\":{},\"forward_ns\":{},\"loss_metrics_ns\":{},\"backward_ns\":{},\"update_ns\":{},\"other_ns\":{}}}",
+            "{{\"schema\":1,\"clock\":\"Instant\",\"unit\":\"ns\",\"batches\":{},\"samples\":{},\"training_wall_ns\":{},\"preparation_ns\":{},\"zero_grad_ns\":{},\"forward_ns\":{},\"loss_metrics_ns\":{},\"backward_ns\":{},\"update_ns\":{},\"other_ns\":{},\"backward_layers\":[{}]}}",
             self.batches,
             self.samples,
             wall_ns,
@@ -785,7 +797,8 @@ impl TrainingProfile {
             self.loss_metrics_ns,
             self.backward_ns,
             self.update_ns,
-            other_ns
+            other_ns,
+            layers
         )
     }
 }
@@ -851,6 +864,10 @@ fn main() {
         let order = protocol::epoch_order(&data.train_ids, cfg.seed, epoch);
         let mut correct = 0usize;
         let mut profile = TrainingProfile::default();
+        if cfg.profile_training && cfg.backend == Backend::Integer {
+            profile.backward_layer_ns = vec![0; integer.layers.len()];
+            profile.backward_layer_names = integer.layers.iter().map(|layer| layer.name()).collect();
+        }
         match cfg.backend {
             Backend::Integer => {
                 integer.set_training(true);
@@ -875,9 +892,11 @@ fn main() {
                                 })
                                 .collect()
                         });
-                        timed(&mut profile.backward_ns, || {
-                            integer.backward_batch(&gradient)
-                        });
+                        let started = Instant::now();
+                        integer.backward_batch_timed(
+                            &gradient, &mut profile.backward_layer_ns
+                        );
+                        profile.backward_ns += started.elapsed().as_nanos();
                         timed(&mut profile.update_ns, || integer.update(cfg.lr_shift));
                     } else {
                         let (x, t) = data.pool.minibatch(ids);
