@@ -68,6 +68,7 @@ mod conv;
 pub use conv::Conv2D;
 
 use crate::dyadic::{Dyadic, Tensor, TensorView, add, stochastic_round};
+use std::time::Instant;
 
 // ─── Module trait ──────────────────────────────────────────────────────────────
 
@@ -227,6 +228,22 @@ impl Sequential {
         let mut g: Tensor = grads.clone();
         for layer in self.layers.iter_mut().rev() {
             g = layer.backward_batch(&g);
+        }
+        g
+    }
+
+    /// Profile individual backward layers, recording time in forward layer
+    /// order. This method calls every layer exactly once and in the same
+    /// sequence as backward_batch; no RNG draws are added, skipped or moved.
+    /// Stopwatch overhead means these figures are diagnostic, not cycle counts.
+    pub fn backward_batch_timed(&mut self, grads: &Tensor, layer_ns: &mut [u128]) -> Tensor {
+        self.check_integer_backend();
+        assert_eq!(layer_ns.len(), self.layers.len(), "layer timing count mismatch");
+        let mut g: Tensor = grads.clone();
+        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            let started = Instant::now();
+            g = layer.backward_batch(&g);
+            layer_ns[index] += started.elapsed().as_nanos();
         }
         g
     }
