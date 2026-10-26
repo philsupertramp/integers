@@ -5,6 +5,14 @@ ARG GIT_SHA=unknown
 ARG BENCHMARK_RUSTFLAGS=
 ENV RUSTFLAGS=${BENCHMARK_RUSTFLAGS}
 WORKDIR /app
+# Compile third-party dependencies separately from frequently changing source.
+# The temporary library is replaced by the real source below; Cargo rebuilds
+# the real crate while reusing the cached dependency artifacts.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src \
+    && printf 'pub fn dependency_cache_warmup() {}\n' > src/lib.rs \
+    && cargo build --locked --release --lib \
+    && rm -rf src
 COPY . .
 RUN cargo build --locked --release --example held_out \
     && mkdir -p /build-info \
