@@ -238,7 +238,11 @@ impl Sequential {
     /// Stopwatch overhead means these figures are diagnostic, not cycle counts.
     pub fn backward_batch_timed(&mut self, grads: &Tensor, layer_ns: &mut [u128]) -> Tensor {
         self.check_integer_backend();
-        assert_eq!(layer_ns.len(), self.layers.len(), "layer timing count mismatch");
+        assert_eq!(
+            layer_ns.len(),
+            self.layers.len(),
+            "layer timing count mismatch"
+        );
         let mut g: Tensor = grads.clone();
         for (index, layer) in self.layers.iter_mut().enumerate().rev() {
             let started = Instant::now();
