@@ -18,7 +18,7 @@
 //! - `rand` is not imported here at all; weight initialization in `nn.rs` still uses it
 ///
 /// Reference: https://blog.godesteem.de/posts/integers-improving-mnist/
-use crate::rng::rng_next;
+use crate::rng::{XorShift64, rng_next};
 
 // ─── Core type ────────────────────────────────────────────────────────────────
 
@@ -112,21 +112,21 @@ pub fn stochastic_round(v: i32, k: u32) -> i32 {
 /// cheap on average without deterministically eliminating rare outcomes.
 /// As with all pseudorandom rounding, unbiasedness assumes uniform draws.
 #[inline]
-fn bernoulli_power_of_two(magnitude: u64, bits: u32) -> bool {
+fn bernoulli_power_of_two_using(magnitude: u64, bits: u32, next: &mut impl FnMut() -> u64) -> bool {
     debug_assert!(bits >= 64);
     let mut extra_bits = bits - 64;
     while extra_bits >= 32 {
-        if (rng_next() >> 32) != 0 {
+        if (next() >> 32) != 0 {
             return false;
         }
         extra_bits -= 32;
     }
-    if extra_bits > 0 && ((rng_next() >> 32) & ((1u64 << extra_bits) - 1)) != 0 {
+    if extra_bits > 0 && ((next() >> 32) & ((1u64 << extra_bits) - 1)) != 0 {
         return false;
     }
     // Compose two 32-bit draws rather than one XorShift64 result: the
     // XorShift64 state/output never equals zero, but a composed draw can.
-    let draw = ((rng_next() >> 32) << 32) | (rng_next() >> 32);
+    let draw = ((next() >> 32) << 32) | (next() >> 32);
     draw < magnitude
 }
 
@@ -136,23 +136,28 @@ fn bernoulli_power_of_two(magnitude: u64, bits: u32) -> bool {
 /// relative to the original i64 value. The rounding itself is unbiased,
 /// including negative values and shifts at/above the word width.
 #[inline]
-pub fn stochastic_round_i64(v: i64, k: u32) -> i32 {
+fn stochastic_round_i64_using(v: i64, k: u32, next: &mut impl FnMut() -> u64) -> i32 {
     let rounded = if k == 0 {
         v
     } else if k < 64 {
         let mask = (1u64 << k) - 1;
-        let threshold = rng_next() & mask;
+        let threshold = next() & mask;
         let floor = v >> k;
         let remainder = (v as u64) & mask;
         floor + i64::from(remainder > threshold)
     } else if v == 0 {
         0
-    } else if bernoulli_power_of_two(v.unsigned_abs(), k) {
+    } else if bernoulli_power_of_two_using(v.unsigned_abs(), k, next) {
         v.signum()
     } else {
         0
     };
     rounded.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+#[inline]
+pub fn stochastic_round_i64(v: i64, k: u32) -> i32 {
+    stochastic_round_i64_using(v, k, &mut rng_next)
 }
 
 // ─── Scale alignment ─────────────────────────────────────────────────────────
@@ -232,16 +237,29 @@ pub fn sub(x1: Dyadic, x2: Dyadic) -> Dyadic {
 /// Reject an unrepresentable negative exponent or exponent overflow rather
 /// than silently changing the decoded numeric value. Mantissa narrowing
 /// saturates to i32; stochastic rounding applies before narrowing.
-pub fn mul(x1: Dyadic, x2: Dyadic, q: u32) -> Dyadic {
+#[inline]
+fn mul_using(x1: Dyadic, x2: Dyadic, q: u32, next: &mut impl FnMut() -> u64) -> Dyadic {
     let output_shift = (x1.s as u64 + x2.s as u64)
         .checked_sub(q as u64)
         .expect("mul: negative output scale");
     let s = u32::try_from(output_shift).expect("mul: output scale overflow");
     let product = (x1.v as i64) * (x2.v as i64);
     Dyadic {
-        v: stochastic_round_i64(product, q),
+        v: stochastic_round_i64_using(product, q, next),
         s,
     }
+}
+
+pub fn mul(x1: Dyadic, x2: Dyadic, q: u32) -> Dyadic {
+    mul_using(x1, x2, q, &mut rng_next)
+}
+
+/// Same multiplication and stochastic-rounding contract, drawing from the
+/// caller's scoped XorShift64 state instead of acquiring TLS per product.
+/// Must only be called from a with_rng_state scope.
+#[inline(always)]
+pub(crate) fn mul_with_rng(x1: Dyadic, x2: Dyadic, q: u32, rng: &mut XorShift64) -> Dyadic {
+    mul_using(x1, x2, q, &mut || rng.next_u64())
 }
 
 /// `x_1 / x_2 = (trunc(v_1 * 2^p / v_2), s_1 + p - s_2)`.
@@ -622,5 +640,51 @@ mod tests {
         let out = ste_requantize(Dyadic::new(42, 4), 200, lo, hi);
         assert_eq!(out.v, 0);
         assert_eq!(out.s, 4);
+    }
+}
+
+#[cfg(test)]
+mod scoped_mul_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng, with_rng_state};
+
+    #[test]
+    fn scoped_multiplication_matches_public_mul_and_rng_stream() {
+        let values = [i32::MIN, -8193, -127, -1, 0, 1, 127, 8193, i32::MAX];
+        let shifts = [0u32, 1, 7, 31, 32, 63, 64, 65, 96, 128];
+        let mut cases = Vec::new();
+        for &q in &shifts {
+            let left_shift = q / 2;
+            let right_shift = q - left_shift;
+            for &a in &values {
+                for &b in &values {
+                    cases.push((Dyadic::new(a, left_shift), Dyadic::new(b, right_shift), q));
+                }
+            }
+        }
+        // A nonzero result exponent, including mixed-scale operands.
+        cases.extend([
+            (Dyadic::new(-127, 7), Dyadic::new(19, 9), 7),
+            (Dyadic::new(i32::MAX, 14), Dyadic::new(i32::MIN, 21), 31),
+            (Dyadic::new(0, 70), Dyadic::new(-1, 61), 64),
+        ]);
+
+        for seed in [1, 0x1234_5678, u64::MAX] {
+            seed_rng(seed);
+            let expected: Vec<_> = cases.iter().map(|&(a, b, q)| mul(a, b, q)).collect();
+            let next_expected = rng_next();
+            seed_rng(seed);
+            let actual: Vec<_> = with_rng_state(|rng| {
+                cases
+                    .iter()
+                    .map(|&(a, b, q)| mul_with_rng(a, b, q, rng))
+                    .collect()
+            });
+            assert_eq!(
+                actual, expected,
+                "different multiplication with seed {seed}"
+            );
+            assert_eq!(rng_next(), next_expected, "RNG diverged with seed {seed}");
+        }
     }
 }

@@ -528,3 +528,29 @@ Offline tests:
 ```sh
 python3 -m unittest discover -s tests -p 'test_pi5_seed_sweep.py' -v
 ```
+
+## 13. Scoped PRNG multiplication investigation (#47)
+
+The portable candidate uses `with_rng_state` inside `Linear::backward_one`
+so its two dyadic products per connection draw from one local XorShift64
+state. `mul_with_rng` shares the **same** exponent checks, exact i64 product,
+stochastic-rounding implementation and i32 saturation as public `mul`.
+The scoped guard commits consumed draws on normal exit or unwind. It does
+**not** discard zero-product draws, change update order, skip input gradients,
+or change the public `Module` API. A single caller thread must not invoke
+other thread-local RNG functions or nest another scope inside this closure.
+
+Run `cargo test --locked --lib` and `cargo test --locked --test dyadic_regression`;
+scoped/unscoped unit oracles assert identical gradients and subsequent RNG
+state, including the large-shift rounding branch. The existing Pi profile
+measures complete backward kernels; this implementation has **no physical Pi
+speed result until a new immutable ARM64 image is published and compared**.
+A PR validation image built on a GitHub-hosted ARM64 runner tests the native
+architecture but is not Raspberry Pi performance evidence.
+
+Use a **new** validation-only K3s Job identity, and compare at least seed 1337
+against commit `44ab8d02943ffe7fa87be4083abdfd9f0a41b0d3` (the original
+same-scale-accumulation change). Pin image digest, dataset manifest and CPU
+settings; capture thermal and clock conditions where possible. Run repeated,
+interleaved A/B comparisons to distinguish optimization from contention and
+thermal drift. Do not merge PR #9 on the basis of this experiment.

@@ -1,8 +1,8 @@
 use crate::dyadic::{
-    Dyadic, Tensor, TensorView, add, mul, requantize, signed_bounds, ste_requantize,
+    Dyadic, Tensor, TensorView, add, mul, mul_with_rng, requantize, signed_bounds, ste_requantize,
 };
 use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
-use crate::rng::rng_range;
+use crate::rng::{rng_range, with_rng_state};
 
 /// Fully-connected affine layer: `y = ℛ(W⊗x ⊕ b)`.
 pub struct Linear {
@@ -158,31 +158,39 @@ impl Linear {
         );
         let g_s = grad_output.data.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_features];
-        for (j, &is_clipped) in clipped.iter().enumerate() {
-            let gr = if is_clipped {
-                Dyadic::new(0, grad_output.data[j].s)
-            } else {
-                ste_requantize(
-                    grad_output.data[j],
-                    output.data[j].v,
-                    self.q_min,
-                    self.q_max,
-                )
-            };
-            let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
-            for (i, gi_value) in gi.iter_mut().enumerate() {
-                let idx = self.flat(j, i);
+        // One TLS access per sample instead of one per dyadic product.
+        // Both mul calls retain their original order. add() aligns to the
+        // finer exponent and never draws RNG; do not introduce nested TLS
+        // draws inside this scope without revisiting its contract.
+        with_rng_state(|rng| {
+            for (j, &is_clipped) in clipped.iter().enumerate() {
+                let gr = if is_clipped {
+                    Dyadic::new(0, grad_output.data[j].s)
+                } else {
+                    ste_requantize(
+                        grad_output.data[j],
+                        output.data[j].v,
+                        self.q_min,
+                        self.q_max,
+                    )
+                };
+                let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
+                for (i, gi_value) in gi.iter_mut().enumerate() {
+                    let idx = self.flat(j, i);
 
-                self.grad_w.data[idx] = add_backward_accumulator(
-                    self.grad_w.data[idx],
-                    mul(gj, input.data[i], self.quant_shift),
-                );
+                    self.grad_w.data[idx] = add_backward_accumulator(
+                        self.grad_w.data[idx],
+                        mul_with_rng(gj, input.data[i], self.quant_shift, rng),
+                    );
 
-                *gi_value =
-                    add_backward_accumulator(*gi_value, mul(gj, self.w(j, i), self.quant_shift));
+                    *gi_value = add_backward_accumulator(
+                        *gi_value,
+                        mul_with_rng(gj, self.w(j, i), self.quant_shift, rng),
+                    );
+                }
+                self.grad_b.data[j] = add(self.grad_b.data[j], gj);
             }
-            self.grad_b.data[j] = add(self.grad_b.data[j], gj);
-        }
+        });
         self.grad_samples = self
             .grad_samples
             .checked_add(1)
@@ -486,5 +494,69 @@ mod backward_accumulator_tests {
                 assert_eq!(next_fast, next_reference, "stochastic RNG diverged");
             }
         }
+    }
+    /// Native-architecture diagnostic; compares the identical frozen reference
+    /// and scoped RNG path on a realistic dense input layer. Not a Pi 5 result
+    /// unless invoked on an actual Pi 5 under controlled conditions.
+    #[test]
+    #[ignore = "run with cargo test --release --lib benchmark_scoped_rng_vs_tls -- --ignored --nocapture"]
+    fn benchmark_scoped_rng_vs_tls() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLES: usize = 64;
+        let mut optimized = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        let mut baseline = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        baseline.weights = optimized.weights.clone();
+        baseline.biases = optimized.biases.clone();
+        let inputs = Tensor::from_vec(
+            (0..784)
+                .map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7))
+                .collect(),
+            vec![784],
+        );
+        let gradients = Tensor::from_vec((0..128).map(|j| d(j % 17 - 8, 7)).collect(), vec![128]);
+        let outputs = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
+        let clipped = vec![false; 128];
+
+        seed_rng(0x1234_5678);
+        let before = Instant::now();
+        let mut baseline_last = None;
+        for _ in 0..SAMPLES {
+            baseline_last = Some(black_box(reference_backward_one(
+                &mut baseline,
+                &gradients.view(),
+                &inputs.view(),
+                &outputs.view(),
+                &clipped,
+            )));
+        }
+        let baseline_time = before.elapsed();
+        let next_baseline = rng_next();
+
+        seed_rng(0x1234_5678);
+        let before = Instant::now();
+        let mut optimized_last = None;
+        for _ in 0..SAMPLES {
+            optimized_last = Some(black_box(optimized.backward_one(
+                &gradients.view(),
+                &inputs.view(),
+                &outputs.view(),
+                &clipped,
+            )));
+        }
+        let optimized_time = before.elapsed();
+        let next_optimized = rng_next();
+
+        assert_eq!(baseline_last.unwrap().data, optimized_last.unwrap().data);
+        assert_eq!(baseline.grad_w.data, optimized.grad_w.data);
+        assert_eq!(baseline.grad_b.data, optimized.grad_b.data);
+        assert_eq!(next_baseline, next_optimized);
+        println!(
+            "Linear 784x128 backward, {SAMPLES} samples: legacy_TLS={:?}, scoped_RNG={:?}, ratio={:.3}x (native host diagnostic, not Pi 5 proof)",
+            baseline_time,
+            optimized_time,
+            baseline_time.as_secs_f64() / optimized_time.as_secs_f64()
+        );
     }
 }

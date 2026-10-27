@@ -13,6 +13,9 @@ on:
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
       - 'tests/test_pi5_dataset.py'
+      - 'src/lib/dyadic.rs'
+      - 'src/lib/rng.rs'
+      - 'src/nn/linear.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/pi5-benchmark-image.yml'
@@ -27,6 +30,9 @@ on:
       - 'examples/held_out.rs'
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
+      - 'src/lib/dyadic.rs'
+      - 'src/lib/rng.rs'
+      - 'src/nn/linear.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/pi5-benchmark-image.yml'
@@ -195,6 +201,10 @@ jobs:
                   assert a["learning_curve"][0][k] == b["learning_curve"][0][k], k
           print("Profiled/unprofiled output parity passed for both backends.")
           PY
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native ARM64 scoped/legacy backward microbenchmark (diagnostic)
+        run: cargo test --locked --release --lib benchmark_scoped_rng_vs_tls -- --ignored --nocapture
 
   publish:
     name: Publish GHCR immutable-SHA tag
