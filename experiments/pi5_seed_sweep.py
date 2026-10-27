@@ -315,21 +315,30 @@ def summary_markdown(summary: dict) -> str:
             f"| {i['validation_accuracy_pct']:.3f} "
             f"| {f['validation_accuracy_pct']:.3f} |")
     lines.extend(["", "## Mean ± sample SD across distinct initializations", ""])
+    def mean_sd(metric, unit="", signed=False):
+        format_code = "+.3f" if signed else ".3f"
+        mean = format(metric["mean"], format_code)
+        deviation = (f" ± {metric['sample_sd']:.3f}" if
+                     metric["sample_sd"] is not None else " (SD n/a)")
+        return f"{mean}{deviation}{unit}"
+
     for backend, group in summary["aggregate"].items():
         lines.append(
-            f"- {backend}: train {group['phase_s']['training_wall_ns']['mean']:.3f}s"
-            f", backward {group['phase_s']['backward_ns']['mean']:.3f}s"
-            f", validation {group['validation_accuracy_pct']['mean']:.3f}%"
+            f"- {backend}: train {mean_sd(group['phase_s']['training_wall_ns'], 's')}"
+            f", backward {mean_sd(group['phase_s']['backward_ns'], 's')}"
+            f", validation {mean_sd(group['validation_accuracy_pct'], '%')}"
+            f", process peak RSS {mean_sd(group['peak_process_rss_kb'], ' kB')}"
             f" (n={len(summary['seeds'])})")
     lines.extend(["", "## Integer backward layers (mean time per run)", ""])
     for layer in summary["backward_layers"]:
-        lines.append(f"- {layer['index']} {layer['name']}: {layer['seconds']['mean']:.3f}s")
+        lines.append(f"- {layer['index']} {layer['name']}: "
+                     f"{mean_sd(layer['seconds'], 's')}")
     if "paired_baseline" in summary:
         lines.extend(["", "## Same-seed paired changes vs baseline", ""])
         for backend, phases in summary["paired_baseline"].items():
             for phase, values in phases.items():
-                lines.append(f"- {backend} {phase}: {values['mean']:+.2f}% mean "
-                             "(negative means faster)")
+                lines.append(f"- {backend} {phase}: {mean_sd(values, '%', signed=True)}"
+                             " (negative means faster)")
     lines.extend([
         "",
         "Timing is instrumented wall time, not CPU cycles or energy.",
