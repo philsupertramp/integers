@@ -288,14 +288,23 @@ def summarize_sweep(reports: list[dict], seeds: list[int],
         "dataset_manifest_sha256": reports[0]["dataset_manifest_sha256"],
     }
     if baselines is not None:
-        summary["paired_baseline"] = {
-            backend: {phase: stats([
-                row["compared"][backend]["timings"][phase]["change_pct"]
-                for row in rows])
-                for phase in ("training_wall_ns", "backward_ns",
-                              "forward_ns", "update_ns", "preparation_ns")}
-            for backend in ("integer", "fp32")
-        }
+        summary["paired_baseline"] = {}
+        for backend in ("integer", "fp32"):
+            matched = [row["compared"][backend] for row in rows]
+            summary["paired_baseline"][backend] = {
+                "timing_change_pct": {
+                    phase: stats([entry["timings"][phase]["change_pct"]
+                                  for entry in matched])
+                    for phase in ("training_wall_ns", "backward_ns",
+                                  "forward_ns", "update_ns", "preparation_ns")
+                },
+                "validation_change_pp": stats([
+                    entry["validation_after_pct"] - entry["validation_before_pct"]
+                    for entry in matched]),
+                "peak_rss_change_kb": stats([
+                    entry["peak_process_rss_after_kb"]
+                    - entry["peak_process_rss_before_kb"] for entry in matched]),
+            }
     return summary
 
 
@@ -345,10 +354,14 @@ def summary_markdown(summary: dict) -> str:
                      f"{mean_sd(layer['seconds'], 's')}")
     if "paired_baseline" in summary:
         lines.extend(["", "## Same-seed paired changes vs baseline", ""])
-        for backend, phases in summary["paired_baseline"].items():
-            for phase, values in phases.items():
+        for backend, comparison in summary["paired_baseline"].items():
+            for phase, values in comparison["timing_change_pct"].items():
                 lines.append(f"- {backend} {phase}: {mean_sd(values, '%', signed=True)}"
                              " (negative means faster)")
+            lines.append(f"- {backend} validation change: "
+                         f"{mean_sd(comparison['validation_change_pp'], ' pp', signed=True)}")
+            lines.append(f"- {backend} peak process RSS change: "
+                         f"{mean_sd(comparison['peak_rss_change_kb'], ' kB', signed=True)}")
     lines.extend([
         "",
         "Timing is instrumented wall time, not CPU cycles or energy.",
