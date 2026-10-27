@@ -203,7 +203,11 @@ class Pi5SeedSweepTests(unittest.TestCase):
                                              Path(root) / "paired", "kubectl",
                                              baseline_dir)
             self.assertEqual(result["paired_baseline"]["integer"]
-                             ["backward_ns"]["mean"], 0)
+                             ["timing_change_pct"]["backward_ns"]["mean"], 0)
+            self.assertEqual(result["paired_baseline"]["integer"]
+                             ["validation_change_pp"]["mean"], 0)
+            self.assertEqual(result["paired_baseline"]["integer"]
+                             ["peak_rss_change_kb"]["mean"], 0)
             (baseline_dir / "seed-2027.json").unlink()
             with mock.patch.object(sweep.subprocess, "run", command):
                 with self.assertRaises(FileNotFoundError):
