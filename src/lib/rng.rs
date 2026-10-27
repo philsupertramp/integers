@@ -74,6 +74,33 @@ pub fn rng_range(n: u32) -> u32 {
     })
 }
 
+/// Run a sequence of draws against one local copy of the thread-local PRNG.
+///
+/// This removes repeated TLS Cell loads/stores from arithmetic hot loops while
+/// preserving the exact XorShift64 draw order. The closure MUST draw only via
+/// its provided state (and must not call rng_next/rng_range or nest this scope).
+/// The guard commits consumed draws even if the closure unwinds.
+#[inline]
+pub(crate) fn with_rng_state<R>(f: impl FnOnce(&mut XorShift64) -> R) -> R {
+    struct CommitOnDrop<'a> {
+        cell: &'a Cell<XorShift64>,
+        local: XorShift64,
+    }
+    impl Drop for CommitOnDrop<'_> {
+        fn drop(&mut self) {
+            self.cell.set(self.local);
+        }
+    }
+
+    RNG.with(|cell| {
+        let mut state = CommitOnDrop {
+            cell,
+            local: cell.get(),
+        };
+        f(&mut state.local)
+    })
+}
+
 /// Seed the thread-local RNG.  Call this at the start of each thread if you
 /// need reproducible stochastic rounding (e.g. in tests).
 pub fn seed_rng(s: u64) {
@@ -110,6 +137,33 @@ mod tests {
             let v = rng.gen_range(10);
             assert!(v < 10);
         }
+    }
+
+    #[test]
+    fn scoped_rng_matches_tls_draws_and_the_following_state() {
+        seed_rng(0x1234_5678);
+        let expected: Vec<_> = (0..1024).map(|_| rng_next()).collect();
+        let next_expected = rng_next();
+        seed_rng(0x1234_5678);
+        let actual = with_rng_state(|rng| (0..1024).map(|_| rng.next_u64()).collect::<Vec<_>>());
+        assert_eq!(actual, expected);
+        assert_eq!(rng_next(), next_expected);
+    }
+
+    #[test]
+    fn scoped_rng_commits_draws_on_unwind() {
+        seed_rng(0x1234_5678);
+        let _ = rng_next();
+        let next_expected = rng_next();
+        seed_rng(0x1234_5678);
+        let panic_result = std::panic::catch_unwind(|| {
+            with_rng_state(|rng| {
+                let _ = rng.next_u64();
+                panic!("intentional panic after drawing");
+            });
+        });
+        assert!(panic_result.is_err());
+        assert_eq!(rng_next(), next_expected);
     }
 
     #[test]

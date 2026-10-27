@@ -1,8 +1,9 @@
 use crate::dyadic::{
-    Dyadic, Tensor, TensorView, add, mul, requantize, signed_bounds, ste_requantize,
+    Dyadic, Tensor, TensorView, add, mul, mul_with_rng, requantize, signed_bounds,
+    ste_requantize,
 };
 use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
-use crate::rng::rng_range;
+use crate::rng::{rng_range, with_rng_state};
 
 /// Fully-connected affine layer: `y = ℛ(W⊗x ⊕ b)`.
 pub struct Linear {
@@ -158,31 +159,37 @@ impl Linear {
         );
         let g_s = grad_output.data.first().map_or(0, |g| g.s);
         let mut gi = vec![Dyadic::new(0, g_s); self.in_features];
-        for (j, &is_clipped) in clipped.iter().enumerate() {
-            let gr = if is_clipped {
-                Dyadic::new(0, grad_output.data[j].s)
-            } else {
-                ste_requantize(
-                    grad_output.data[j],
-                    output.data[j].v,
-                    self.q_min,
-                    self.q_max,
-                )
-            };
-            let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
-            for (i, gi_value) in gi.iter_mut().enumerate() {
-                let idx = self.flat(j, i);
+        // One TLS access per sample instead of one per dyadic product.
+        // Both mul calls retain their original order. add() aligns to the
+        // finer exponent and never draws RNG; do not introduce nested TLS
+        // draws inside this scope without revisiting its contract.
+        with_rng_state(|rng| {
+            for (j, &is_clipped) in clipped.iter().enumerate() {
+                let gr = if is_clipped {
+                    Dyadic::new(0, grad_output.data[j].s)
+                } else {
+                    ste_requantize(
+                        grad_output.data[j],
+                        output.data[j].v,
+                        self.q_min,
+                        self.q_max,
+                    )
+                };
+                let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
+                for (i, gi_value) in gi.iter_mut().enumerate() {
+                    let idx = self.flat(j, i);
 
-                self.grad_w.data[idx] = add_backward_accumulator(
-                    self.grad_w.data[idx],
-                    mul(gj, input.data[i], self.quant_shift),
-                );
+                    self.grad_w.data[idx] = add_backward_accumulator(
+                        self.grad_w.data[idx],
+                        mul_with_rng(gj, input.data[i], self.quant_shift, rng),
+                    );
 
-                *gi_value =
-                    add_backward_accumulator(*gi_value, mul(gj, self.w(j, i), self.quant_shift));
+                    *gi_value =
+                        add_backward_accumulator(*gi_value, mul_with_rng(gj, self.w(j, i), self.quant_shift, rng));
+                }
+                self.grad_b.data[j] = add(self.grad_b.data[j], gj);
             }
-            self.grad_b.data[j] = add(self.grad_b.data[j], gj);
-        }
+        });
         self.grad_samples = self
             .grad_samples
             .checked_add(1)
