@@ -515,10 +515,7 @@ mod backward_accumulator_tests {
                 .collect(),
             vec![784],
         );
-        let gradients = Tensor::from_vec(
-            (0..128).map(|j| d(j % 17 - 8, 7)).collect(),
-            vec![128],
-        );
+        let gradients = Tensor::from_vec((0..128).map(|j| d(j % 17 - 8, 7)).collect(), vec![128]);
         let outputs = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
         let clipped = vec![false; 128];
 
