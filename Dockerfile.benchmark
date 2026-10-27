@@ -1,10 +1,26 @@
 # Multi-stage, native-target build. Buildx/QEMU can validate ARM64 elsewhere,
 # but only a physical Raspberry Pi 5 run is a hardware measurement.
 FROM rust:1.95-bookworm AS rust-build
-ARG GIT_SHA=unknown
 ARG BENCHMARK_RUSTFLAGS=
 ENV RUSTFLAGS=${BENCHMARK_RUSTFLAGS}
 WORKDIR /app
+# Compile third-party dependencies separately from frequently changing source.
+# The temporary library is replaced by the real source below; Cargo rebuilds
+# the real crate while reusing the cached dependency artifacts.
+COPY Cargo.toml Cargo.lock ./
+# Cargo validates all explicit target paths when it parses Cargo.toml,
+# even with --lib. Supply disposable files for those example/bench targets
+# without copying changing application sources into the dependency layer.
+# Remove only the dummy crate's compiled artifacts after warmup, not cached
+# third-party dependencies, so Cargo must rebuild the real project library.
+RUN mkdir -p src examples/mnist examples/cifar benches \
+    && printf 'pub fn dependency_cache_warmup() {}\n' > src/lib.rs \
+    && touch examples/mnist/main.rs examples/iris.rs \
+             examples/cifar/main.rs examples/mnist_to_parquet.rs \
+             benches/tensor_bench.rs benches/memory_bench.rs \
+    && cargo build --locked --release --lib \
+    && cargo clean --release -p integers \
+    && rm -rf src examples benches
 COPY . .
 RUN cargo build --locked --release --example held_out \
     && mkdir -p /build-info \

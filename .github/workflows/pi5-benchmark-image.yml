@@ -34,7 +34,7 @@ permissions:
 jobs:
   validate:
     name: Build ARM64 and run offline paired fixture
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
@@ -102,15 +102,17 @@ jobs:
             abort "image references differ" unless c["image"] == c["env"].find { |e| e["name"] == "BENCHMARK_IMAGE" }["value"]
             abort "must be read-only" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
           ' deployments/pi5/benchmark-profile-optimized-job.yaml
-      - name: Prepare emulation (not Pi hardware)
-        uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Build ARM64 benchmark image (NEVER publish in PR validation)
+      - name: Build native ARM64 benchmark image (NEVER publish in PR validation)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.benchmark
           platforms: linux/arm64
+          # Persist intermediate stages across ephemeral runners, including
+          # the Rust dependencies and checksum-verified dataset preparation.
+          cache-from: type=gha,scope=pi5-benchmark-arm64
+          cache-to: type=gha,mode=max,scope=pi5-benchmark-arm64
           push: false
           load: true
           tags: integers-pi5:ci
@@ -118,7 +120,7 @@ jobs:
             GIT_SHA=${{ github.sha }}
       - name: Record ARM64 local image layer size (not network pull size)
         run: docker image inspect integers-pi5:ci --format '{{.Size}} bytes'
-      - name: Offline QEMU smoke for integer and independent FP32
+      - name: Offline ARM64 smoke for integer and independent FP32
         run: |
           mkdir -p /tmp/pi5-ci-results
           chmod 777 /tmp/pi5-ci-results
@@ -159,9 +161,9 @@ jobs:
           assert a['prepared_artifact_sha256'] == b['prepared_artifact_sha256']
           assert a['dataset_manifest_sha256'] == b['dataset_manifest_sha256']
           assert all(v['wall_ms'] >= 0 and v['dataset_loading_ms'] >= 0 for v in (a,b))
-          print('Offline ARM64 emulated profiled smoke passed (NOT Pi performance).')
+          print('Offline native ARM64 profiled smoke passed (NOT Pi performance).')
           PY
-      - name: Offline QEMU numerical parity, profiled vs unprofiled
+      - name: Offline ARM64 numerical parity, profiled vs unprofiled
         run: |
           cp /tmp/pi5-ci-results/benchmark-result.json /tmp/pi5-ci-profiled.json
           docker run --rm --platform linux/arm64 --network none --read-only \
@@ -194,13 +196,12 @@ jobs:
     # used only from the already merged big-refactor branch.
     if: github.ref == 'refs/heads/big-refactor' && github.event_name != 'pull_request'
     needs: validate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Login to GHCR using short-lived GITHUB_TOKEN
         uses: docker/login-action@v3
@@ -215,6 +216,10 @@ jobs:
           context: .
           file: Dockerfile.benchmark
           platforms: linux/arm64
+          # Persist intermediate stages across ephemeral runners, including
+          # the Rust dependencies and checksum-verified dataset preparation.
+          cache-from: type=gha,scope=pi5-benchmark-arm64
+          cache-to: type=gha,mode=max,scope=pi5-benchmark-arm64
           push: true
           tags: ghcr.io/philsupertramp/integers-benchmark:sha-${{ github.sha }}
           build-args: |
