@@ -7,6 +7,8 @@ on:
       - 'Dockerfile.benchmark'
       - '.dockerignore'
       - 'experiments/**'
+      # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
+      - '!experiments/pi5_seed_sweep.py'
       - 'examples/held_out.rs'
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
@@ -20,6 +22,8 @@ on:
       - 'Dockerfile.benchmark'
       - '.dockerignore'
       - 'experiments/**'
+      # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
+      - '!experiments/pi5_seed_sweep.py'
       - 'examples/held_out.rs'
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
