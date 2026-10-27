@@ -197,7 +197,7 @@ def verify_report(raw: bytes, seed: int, index: int,
             "validation_only": True, "profile_training": True,
             "test_evaluated": False, "test_size": 0,
             "test_accuracy_pct": None,
-            "architecture_kind": "dense",
+            "architecture_kind": "dense_mlp",
         }.items():
             if run.get(key) != expected:
                 raise ValueError(f"seed {seed} {run['backend']}: wrong {key}")
