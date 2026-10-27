@@ -562,5 +562,4 @@ mod backward_accumulator_tests {
             baseline_time.as_secs_f64() / optimized_time.as_secs_f64()
         );
     }
-
 }
