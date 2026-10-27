@@ -511,12 +511,12 @@ mod backward_accumulator_tests {
         baseline.biases = optimized.biases.clone();
         let inputs = Tensor::from_vec(
             (0..784)
-                .map(|i| d(if i % 3 == 0 { 0 } else { i as i32 % 255 - 127 }, 7))
+                .map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7))
                 .collect(),
             vec![784],
         );
         let gradients = Tensor::from_vec(
-            (0..128).map(|j| d(j as i32 % 17 - 8, 7)).collect(),
+            (0..128).map(|j| d(j % 17 - 8, 7)).collect(),
             vec![128],
         );
         let outputs = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
