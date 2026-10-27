@@ -280,6 +280,11 @@ def summarize_sweep(reports: list[dict], seeds: list[int],
         "schema_version": 1, "seeds": seeds, "per_seed": rows,
         "aggregate": grouped, "backward_layers": layers,
         "image_reference": reports[0]["runs"][0]["image_reference"],
+        "git_commit_sha": reports[0]["runs"][0]["git_commit_sha"],
+        "rustc": reports[0]["runs"][0]["rustc"],
+        "build_options": reports[0]["runs"][0]["build_options"],
+        "machine": {key: reports[0]["runs"][0]["machine"].get(key)
+                    for key in MACHINE_FIELDS},
         "dataset_manifest_sha256": reports[0]["dataset_manifest_sha256"],
     }
     if baselines is not None:
@@ -299,6 +304,11 @@ def summary_markdown(summary: dict) -> str:
         "# Pi 5 profile seed sweep",
         "",
         f"Image: {summary['image_reference']}",
+        f"Git commit: {summary['git_commit_sha']}",
+        f"Compiler: {summary['rustc']}",
+        f"Build: {summary['build_options']}",
+        f"Device: {summary['machine'].get('hardware_model')}",
+        f"CPU quota: {summary['machine'].get('cpu_limit')}",
         f"Dataset manifest SHA256: {summary['dataset_manifest_sha256']}",
         f"Seeds: {', '.join(map(str, summary['seeds']))}",
         "",
