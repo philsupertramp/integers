@@ -195,6 +195,9 @@ jobs:
                   assert a["learning_curve"][0][k] == b["learning_curve"][0][k], k
           print("Profiled/unprofiled output parity passed for both backends.")
           PY
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native ARM64 scoped/legacy backward microbenchmark (diagnostic)
+        run: cargo test --locked --release --lib benchmark_scoped_rng_vs_tls -- --ignored --nocapture
 
   publish:
     name: Publish GHCR immutable-SHA tag

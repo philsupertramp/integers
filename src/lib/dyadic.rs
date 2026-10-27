@@ -112,11 +112,7 @@ pub fn stochastic_round(v: i32, k: u32) -> i32 {
 /// cheap on average without deterministically eliminating rare outcomes.
 /// As with all pseudorandom rounding, unbiasedness assumes uniform draws.
 #[inline]
-fn bernoulli_power_of_two_using(
-    magnitude: u64,
-    bits: u32,
-    next: &mut impl FnMut() -> u64,
-) -> bool {
+fn bernoulli_power_of_two_using(magnitude: u64, bits: u32, next: &mut impl FnMut() -> u64) -> bool {
     debug_assert!(bits >= 64);
     let mut extra_bits = bits - 64;
     while extra_bits >= 32 {
@@ -684,7 +680,10 @@ mod scoped_mul_tests {
                     .map(|&(a, b, q)| mul_with_rng(a, b, q, rng))
                     .collect()
             });
-            assert_eq!(actual, expected, "different multiplication with seed {seed}");
+            assert_eq!(
+                actual, expected,
+                "different multiplication with seed {seed}"
+            );
             assert_eq!(rng_next(), next_expected, "RNG diverged with seed {seed}");
         }
     }
