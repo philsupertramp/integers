@@ -38,8 +38,10 @@ jobs:
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
-      - name: Python dataset/integrity tests
-        run: python3 -m unittest discover -s tests -p 'test_pi5_dataset.py' -v
+      - name: Python dataset/integrity and multi-seed sweep tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_pi5_dataset.py' -v
+          python3 -m unittest discover -s tests -p 'test_pi5_seed_sweep.py' -v
       - name: Validate K3s Job YAML and ARM64 placement
         run: |
           ruby -ryaml -e '
