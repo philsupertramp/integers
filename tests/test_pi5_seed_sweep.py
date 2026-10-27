@@ -41,7 +41,7 @@ def record(backend, seed, index, image=IMAGE):
         "test_accuracy_pct": None, "profile_training": True,
         "image_reference": image, "git_commit_sha": "deadbeef",
         "build_options": "release; locked", "rustc": "rustc 1.95",
-        "architecture_kind": "dense", "architecture": [784, 128, 128, 10],
+        "architecture_kind": "dense_mlp", "architecture": [784, 128, 128, 10],
         "dataset_manifest_sha256": "manifest", "dataset_splits": {"seed": 7},
         "prepared_artifact_sha256": {"train": "hash"}, "split_seed": 7,
         "quantization_shift": 7, "output_bits": 31,
