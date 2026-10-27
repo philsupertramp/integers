@@ -1,0 +1,28 @@
+name: Pi 5 seed sweep tooling
+
+on:
+  pull_request:
+    branches: [big-refactor]
+    paths:
+      - 'experiments/pi5_seed_sweep.py'
+      - 'tests/test_pi5_seed_sweep.py'
+      - '.github/workflows/pi5-seed-sweep-tools.yml'
+  push:
+    branches: [big-refactor]
+    paths:
+      - 'experiments/pi5_seed_sweep.py'
+      - 'tests/test_pi5_seed_sweep.py'
+      - '.github/workflows/pi5-seed-sweep-tools.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline full seed-sweep orchestration, archive and comparison tests
+        run: python3 -m unittest discover -s tests -p 'test_pi5_seed_sweep.py' -v
+      - name: CLI syntax check
+        run: python3 -m py_compile experiments/pi5_seed_sweep.py

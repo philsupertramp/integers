@@ -441,7 +441,95 @@ contention; CI/QEMU timings prove neither acceleration nor power savings.
 If the optimization has no benefit, revert it rather than changing
 semantics for a speculative improvement.
 
-## 12. Scoped PRNG multiplication investigation (#47)
+
+## 12. Fast multi-seed optimization profiles: one submit, one collect
+
+This is a **separate, reusable** profiled seed-sweep runner and does not
+modify the 55k/5k full-development Indexed Job. It is intended for repeated
+performance investigations such as the scoped-RNG Linear backward experiment.
+It reuses the existing indexed-image CLI and checksummed
+`BENCHMARK_ARCHIVE_V1` Pod logs. Python standard library + local kubectl
+are sufficient: no new Kubernetes service, RBAC permissions or PVC.
+
+**Publish an immutable ARM64 image first.** PR-only validation builds are
+not published: the image must be published through the protected
+big-refactor workflow after merging the candidate. Use the digest from
+the publication summary (not a mutable commit tag or the example below).
+
+Submit a 5-seed, validation-only, instrumented dense training sweep:
+
+```sh
+python3 experiments/pi5_seed_sweep.py submit \
+  --job integers-pi5-rng-sweep-a \
+  --namespace default \
+  --image ghcr.io/philsupertramp/integers-benchmark@sha256:REPLACE_64_HEX_DIGEST \
+  --seeds 1337,2026,2027,4242,42069 \
+  --epochs 2 --train-limit 8192 --validation-limit 1042 \
+  --batch-size 32 --lr-shift 7
+kubectl -n default get job integers-pi5-rng-sweep-a -w
+```
+
+The script creates an Indexed Job with **all five completions scheduled
+immediately but `parallelism: 1`**. This avoids benchmark Pods
+running against each other on the Pi; it does not control unrelated cluster
+workloads. Each seed runs integer then FP32 within a Pod. Node selectors
+require a labelled physical Pi 5 and ARM64. A single global deadline scales
+with the number of seeds (3600 seconds per seed in the overall Job budget);
+Pods and logs are intentionally retained. Existing Job names are never
+overwritten: submission uses `kubectl create`, not `apply`.
+To inspect the complete Job without creating anything, append `--dry-run`.
+
+After all completions succeed, **one command** retrieves every seed's raw
+Pod log, verifies its gzip/base64 SHA256 archive against its JSON report,
+enforces same-image/dataset/compiler and experiment configuration, and emits
+aggregates with mean and sample standard deviation:
+
+```sh
+python3 experiments/pi5_seed_sweep.py collect \
+  --job integers-pi5-rng-sweep-a --namespace default \
+  --out-dir pi5-results/rng-sweep-a
+cat pi5-results/rng-sweep-a/summary.md
+```
+
+Output files are `seed-<seed>.log`, `seed-<seed>.json`,
+`summary.json`, and `summary.md`. The report includes
+individual seed accuracy, phase durations, backward layer attribution,
+mean/sample-SD across initializations, process RSS, image identity and
+dataset-manifest SHA256. The collector discovers seed order, experimental
+dimensions and image from the **actual Job spec**, so there is no second
+`--seeds` argument to accidentally mismatch. It rejects unfinished,
+missing, duplicate or failed Pods; mismatched ownership or seeds;
+truncated/bad archives; test-set access; non-Pi hosts; parameter drift; and
+existing output directories. No files are saved for a partially verified set.
+
+For **seed-matched paired comparisons**, run another sweep with identical
+seeds/configuration and a different published image and Job name, then pass
+the original sweep output as baseline:
+
+```sh
+python3 experiments/pi5_seed_sweep.py collect \
+  --job integers-pi5-rng-sweep-b \
+  --out-dir pi5-results/rng-sweep-b \
+  --baseline-dir pi5-results/rng-sweep-a
+```
+
+This additionally reports mean per-seed percentage changes for training,
+backward, forward, updates and preparation, using the existing
+`compare_pi5_backward.py` protocol gate. Baseline files must exist
+for **every** matching seed. This is **not** an interleaved randomized A/B
+test: distinct seeds estimate initialization sensitivity; genuine hardware
+speed claims still need repeated seed-matched runs with temperature, clock,
+governor and contention measurements. Profiled and unprofiled durations
+must not be treated as interchangeable. No official MNIST test images are
+opened in this workflow.
+
+Offline tests:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_pi5_seed_sweep.py' -v
+```
+
+## 13. Scoped PRNG multiplication investigation (#47)
 
 The portable candidate uses `with_rng_state` inside `Linear::backward_one`
 so its two dyadic products per connection draw from one local XorShift64

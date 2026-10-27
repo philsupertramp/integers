@@ -7,6 +7,8 @@ on:
       - 'Dockerfile.benchmark'
       - '.dockerignore'
       - 'experiments/**'
+      # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
+      - '!experiments/pi5_seed_sweep.py'
       - 'examples/held_out.rs'
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
@@ -23,6 +25,8 @@ on:
       - 'Dockerfile.benchmark'
       - '.dockerignore'
       - 'experiments/**'
+      # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
+      - '!experiments/pi5_seed_sweep.py'
       - 'examples/held_out.rs'
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
@@ -44,8 +48,10 @@ jobs:
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
-      - name: Python dataset/integrity tests
-        run: python3 -m unittest discover -s tests -p 'test_pi5_dataset.py' -v
+      - name: Python dataset/integrity and multi-seed sweep tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_pi5_dataset.py' -v
+          python3 -m unittest discover -s tests -p 'test_pi5_seed_sweep.py' -v
       - name: Validate K3s Job YAML and ARM64 placement
         run: |
           ruby -ryaml -e '
@@ -195,6 +201,7 @@ jobs:
                   assert a["learning_curve"][0][k] == b["learning_curve"][0][k], k
           print("Profiled/unprofiled output parity passed for both backends.")
           PY
+
       - uses: dtolnay/rust-toolchain@stable
       - name: Native ARM64 scoped/legacy backward microbenchmark (diagnostic)
         run: cargo test --locked --release --lib benchmark_scoped_rng_vs_tls -- --ignored --nocapture
