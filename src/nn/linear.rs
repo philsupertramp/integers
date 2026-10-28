@@ -571,7 +571,6 @@ mod backward_accumulator_tests {
     }
 }
 
-
 #[cfg(test)]
 mod forward_scoped_rng_tests {
     use super::*;
@@ -614,7 +613,11 @@ mod forward_scoped_rng_tests {
                     }
                     for (j, bias) in layer.biases.data.iter_mut().enumerate() {
                         *bias = Dyadic::new(
-                            if j % 3 == 0 { i32::MAX } else { (j * 5) as i32 - 20 },
+                            if j % 3 == 0 {
+                                i32::MAX
+                            } else {
+                                (j * 5) as i32 - 20
+                            },
                             q + (j % 2) as u32,
                         );
                     }
@@ -622,14 +625,16 @@ mod forward_scoped_rng_tests {
                         .map(|sample| {
                             Tensor::from_vec(
                                 (0..n_in)
-                                    .map(|i| Dyadic::new(
-                                        if (i + sample) % 7 == 0 {
-                                            0
-                                        } else {
-                                            ((i * 43 + sample * 7) % 255) as i32 - 127
-                                        },
-                                        q + ((i + sample) % 2) as u32,
-                                    ))
+                                    .map(|i| {
+                                        Dyadic::new(
+                                            if (i + sample) % 7 == 0 {
+                                                0
+                                            } else {
+                                                ((i * 43 + sample * 7) % 255) as i32 - 127
+                                            },
+                                            q + ((i + sample) % 2) as u32,
+                                        )
+                                    })
                                     .collect(),
                                 vec![n_in],
                             )
@@ -637,27 +642,35 @@ mod forward_scoped_rng_tests {
                         .collect();
                     let seed = 0x1357_2468_9abc_def0;
                     seed_rng(seed);
-                    let fast: Vec<_> = inputs.iter()
+                    let fast: Vec<_> = inputs
+                        .iter()
                         .map(|x| layer.forward_one(&x.view()))
                         .collect();
                     let fast_next = rng_next();
 
                     seed_rng(seed);
-                    let reference: Vec<_> = inputs.iter()
+                    let reference: Vec<_> = inputs
+                        .iter()
                         .map(|x| reference_forward_one(&layer, &x.view()))
                         .collect();
                     let reference_next = rng_next();
 
-                    for (i, ((out, clips), (expected, expected_clips))) in fast
-                        .iter().zip(reference.iter()).enumerate()
+                    for (i, ((out, clips), (expected, expected_clips))) in
+                        fast.iter().zip(reference.iter()).enumerate()
                     {
-                        assert_eq!(out.data, expected.data,
-                            "forward output sample={i} dims={n_in}x{n_out} q={q} bits={bits}");
-                        assert_eq!(clips, expected_clips,
-                            "clipping sample={i} dims={n_in}x{n_out} q={q} bits={bits}");
+                        assert_eq!(
+                            out.data, expected.data,
+                            "forward output sample={i} dims={n_in}x{n_out} q={q} bits={bits}"
+                        );
+                        assert_eq!(
+                            clips, expected_clips,
+                            "clipping sample={i} dims={n_in}x{n_out} q={q} bits={bits}"
+                        );
                     }
-                    assert_eq!(fast_next, reference_next,
-                        "forward RNG dims={n_in}x{n_out} q={q} bits={bits}");
+                    assert_eq!(
+                        fast_next, reference_next,
+                        "forward RNG dims={n_in}x{n_out} q={q} bits={bits}"
+                    );
 
                     // Public batch entry point must preserve both sample order
                     // and per-sample clipping caches, including next RNG state.
@@ -677,8 +690,10 @@ mod forward_scoped_rng_tests {
                         );
                         assert_eq!(&layer.clip_batch_cache[i], clips);
                     }
-                    assert_eq!(batch_next, reference_next,
-                        "batch RNG dims={n_in}x{n_out} q={q} bits={bits}");
+                    assert_eq!(
+                        batch_next, reference_next,
+                        "batch RNG dims={n_in}x{n_out} q={q} bits={bits}"
+                    );
                 }
             }
         }
@@ -688,9 +703,13 @@ mod forward_scoped_rng_tests {
     fn forward_single_entry_point_keeps_output_and_cache() {
         let mut layer = Linear::new(5, 3, 7, 7, 8);
         let input = Tensor::from_vec(
-            vec![Dyadic::new(0, 7), Dyadic::new(-127, 7),
-                 Dyadic::new(127, 7), Dyadic::new(1, 7),
-                 Dyadic::new(-2, 7)],
+            vec![
+                Dyadic::new(0, 7),
+                Dyadic::new(-127, 7),
+                Dyadic::new(127, 7),
+                Dyadic::new(1, 7),
+                Dyadic::new(-2, 7),
+            ],
             vec![5],
         );
         seed_rng(127);
@@ -719,10 +738,16 @@ mod forward_scoped_rng_tests {
         let mut layer = Linear::new(784, 128, 7, 7, 31);
         let inputs = Tensor::from_vec(
             (0..784)
-                .map(|i| Dyadic::new(
-                    if i % 3 == 0 { 0 } else { (i % 255) as i32 - 127 },
-                    7,
-                ))
+                .map(|i| {
+                    Dyadic::new(
+                        if i % 3 == 0 {
+                            0
+                        } else {
+                            (i % 255) as i32 - 127
+                        },
+                        7,
+                    )
+                })
                 .collect(),
             vec![784],
         );
@@ -735,7 +760,8 @@ mod forward_scoped_rng_tests {
         let mut baseline_last = None;
         for _ in 0..SAMPLES {
             baseline_last = Some(black_box(reference_forward_one(
-                black_box(&layer), black_box(&inputs.view()),
+                black_box(&layer),
+                black_box(&inputs.view()),
             )));
         }
         let baseline_time = before.elapsed();
@@ -757,7 +783,8 @@ mod forward_scoped_rng_tests {
         assert_eq!(next_baseline, next_optimized);
         println!(
             "Linear 784x128 forward, {SAMPLES} samples: legacy_TLS={:?}, scoped_RNG={:?}, ratio={:.3}x (native host diagnostic, not Pi 5 proof)",
-            baseline_time, optimized_time,
+            baseline_time,
+            optimized_time,
             baseline_time.as_secs_f64() / optimized_time.as_secs_f64()
         );
     }
