@@ -272,12 +272,7 @@ pub(crate) fn mul_with_rng(x1: Dyadic, x2: Dyadic, q: u32, rng: &mut XorShift64)
 /// so execute the original operation and discard its value instead.
 /// This must be called inside a with_rng_state scope.
 #[inline(always)]
-pub(crate) fn discard_mul_with_rng(
-    x1: Dyadic,
-    x2: Dyadic,
-    q: u32,
-    rng: &mut XorShift64,
-) {
+pub(crate) fn discard_mul_with_rng(x1: Dyadic, x2: Dyadic, q: u32, rng: &mut XorShift64) {
     if q >= 64 {
         let _ = mul_with_rng(x1, x2, q, rng);
         return;
