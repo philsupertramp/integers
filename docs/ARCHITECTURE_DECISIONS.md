@@ -65,3 +65,30 @@
 - Link architecture-dependent changes to [#10](https://github.com/philsupertramp/integers/issues/10) and any relevant acceptance-gate issues. Record actual validation results, including failures; no undocumented reinterpretation of dyadic scale or integer-only semantics.
 - No direct pushes to `master`. No merge of [PR #9](https://github.com/philsupertramp/integers/pull/9) without subsequent explicit approval. Use reviewable branches/PRs.
 - The first approved record lives in [foundation PR #22](https://github.com/philsupertramp/integers/pull/22) against legacy `master`; this adapted copy is proposed for `big-refactor` through [#25](https://github.com/philsupertramp/integers/issues/25). Neither copy approves merging PR #9 or waiving its correctness and integration gates.
+
+## Training policy #56 — default elision of unused input-gradient draws (2026-10-29)
+
+**Maintainer direction:** Optimize the existing public training path as its
+default behavior, **not** as a new user-facing feature gate. The
+`Sequential::backward_batch_discard_input_grad` contract means
+model-input gradients are already unused. The first `Linear` may
+elide those products and the associated stochastic RNG draws.
+The ordinary `backward_batch` API must still return complete
+input gradients; intermediate layers must still propagate
+gradients required by earlier trainable parameters.
+
+**Numerical consequence:** Eliminating unneeded draws intentionally
+changes later stochastic-rounding choices, so exact fixed-seed
+prediction/parameter parity is no longer required across this
+training optimization. The integer arithmetic and gradient
+formula contracts in ADR-002 remain unchanged.
+
+**Activation gate:** Merge PR #57 only after independent arithmetic
+oracles, held-out multi-seed non-inferiority, and actual Pi
+ABBA/BAAB speed validation. A hosted ARM64 microbenchmark is
+not physical Pi evidence. The previously merged conservative
+implementation remains the immutable control image until then.
+
+**Scope:** Operational behavior within the existing
+`big-refactor` candidate, **not** approval of a stable public
+release policy under pending ADR-005, and not approval to merge PR #9.
