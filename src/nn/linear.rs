@@ -1051,7 +1051,6 @@ mod discarded_input_gradient_tests {
         assert_eq!(full_rng, fast_rng, "RNG after multiple updates");
     }
 
-
     /// Experimental upper bound: skip the entire unused input-gradient product
     /// AND its RNG draw. This intentionally changes subsequent stochastic
     /// rounding; no training-quality equivalence is asserted. Keep this
@@ -1110,10 +1109,7 @@ mod discarded_input_gradient_tests {
                 .collect(),
             vec![784],
         );
-        let grad = Tensor::from_vec(
-            (0..128).map(|i| d(i % 17 - 8, 7)).collect(),
-            vec![128],
-        );
+        let grad = Tensor::from_vec((0..128).map(|i| d(i % 17 - 8, 7)).collect(), vec![128]);
         let outputs = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
         let clipped = vec![false; 128];
 
