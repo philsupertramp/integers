@@ -209,6 +209,8 @@ jobs:
         run: cargo test --locked --release --lib benchmark_forward_scoped_rng_vs_tls -- --ignored --nocapture
       - name: Native ARM64 first-layer unused input-gradient diagnostic
         run: cargo test --locked --release --lib benchmark_discard_unused_input_grad -- --ignored --nocapture
+      - name: Experimental native ARM64 upper bound without unused RNG draws
+        run: cargo test --locked --release --lib benchmark_relaxed_rng_elision -- --ignored --nocapture
 
   publish:
     name: Publish GHCR immutable-SHA tag
