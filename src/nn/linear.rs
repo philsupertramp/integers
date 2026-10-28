@@ -117,15 +117,25 @@ impl Linear {
         );
         let mut out = Vec::with_capacity(self.out_features);
         let mut clipped = Vec::with_capacity(self.out_features);
-        for j in 0..self.out_features {
-            let mut acc = self.biases.data[j];
-            for i in 0..self.in_features {
-                acc = add(acc, mul(self.w(j, i), input.data[i], self.quant_shift));
+        // Keep the original output/feature traversal and one stochastic draw
+        // per dyadic product (including zero products at q > 0). add() only
+        // aligns to the finer exponent, and requantize(acc, acc.s, ...) does
+        // not draw RNG. No global TLS RNG calls may be introduced inside
+        // this scoped closure without revisiting the state-commit contract.
+        with_rng_state(|rng| {
+            for j in 0..self.out_features {
+                let mut acc = self.biases.data[j];
+                for i in 0..self.in_features {
+                    acc = add(
+                        acc,
+                        mul_with_rng(self.w(j, i), input.data[i], self.quant_shift, rng),
+                    );
+                }
+                let (y, was_clipped) = requantize(acc, acc.s, self.q_min, self.q_max);
+                out.push(y);
+                clipped.push(was_clipped);
             }
-            let (y, was_clipped) = requantize(acc, acc.s, self.q_min, self.q_max);
-            out.push(y);
-            clipped.push(was_clipped);
-        }
+        });
         (Tensor::from_vec(out, vec![self.out_features]), clipped)
     }
 
@@ -556,6 +566,198 @@ mod backward_accumulator_tests {
             "Linear 784x128 backward, {SAMPLES} samples: legacy_TLS={:?}, scoped_RNG={:?}, ratio={:.3}x (native host diagnostic, not Pi 5 proof)",
             baseline_time,
             optimized_time,
+            baseline_time.as_secs_f64() / optimized_time.as_secs_f64()
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod forward_scoped_rng_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    // Frozen pre-scoping forward path: uses the public mul() with TLS state
+    // acquisition for every product, in the exact original traversal order.
+    fn reference_forward_one(layer: &Linear, input: &TensorView) -> (Tensor, Vec<bool>) {
+        assert_eq!(input.data.len(), layer.in_features);
+        let mut out = Vec::with_capacity(layer.out_features);
+        let mut clipped = Vec::with_capacity(layer.out_features);
+        for j in 0..layer.out_features {
+            let mut acc = layer.biases.data[j];
+            for i in 0..layer.in_features {
+                acc = add(acc, mul(layer.w(j, i), input.data[i], layer.quant_shift));
+            }
+            let (y, was_clipped) = requantize(acc, acc.s, layer.q_min, layer.q_max);
+            out.push(y);
+            clipped.push(was_clipped);
+        }
+        (Tensor::from_vec(out, vec![layer.out_features]), clipped)
+    }
+
+    #[test]
+    fn forward_one_matches_frozen_reference_outputs_clips_and_rng() {
+        // Exercise zero products, saturation, negative mantissas, mixed
+        // exponents, q=0/no draws, and q >= 64/rare-event draw paths.
+        for &(n_in, n_out) in &[(1usize, 1usize), (5, 3), (64, 32)] {
+            for &q in &[0u32, 7, 31, 64, 128] {
+                for &bits in &[4u32, 8, 31] {
+                    let mut layer = Linear::new(n_in, n_out, 7, q, bits);
+                    for (idx, weight) in layer.weights.data.iter_mut().enumerate() {
+                        let mantissa = match idx % 11 {
+                            0 => 0,
+                            1 => i32::MAX,
+                            2 => i32::MIN,
+                            _ => ((idx * 17 % 251) as i32) - 125,
+                        };
+                        *weight = Dyadic::new(mantissa, q + (idx % 3) as u32);
+                    }
+                    for (j, bias) in layer.biases.data.iter_mut().enumerate() {
+                        *bias = Dyadic::new(
+                            if j % 3 == 0 { i32::MAX } else { (j * 5) as i32 - 20 },
+                            q + (j % 2) as u32,
+                        );
+                    }
+                    let inputs: Vec<Tensor> = (0..17usize)
+                        .map(|sample| {
+                            Tensor::from_vec(
+                                (0..n_in)
+                                    .map(|i| Dyadic::new(
+                                        if (i + sample) % 7 == 0 {
+                                            0
+                                        } else {
+                                            ((i * 43 + sample * 7) % 255) as i32 - 127
+                                        },
+                                        q + ((i + sample) % 2) as u32,
+                                    ))
+                                    .collect(),
+                                vec![n_in],
+                            )
+                        })
+                        .collect();
+                    let seed = 0x1357_2468_9abc_def0;
+                    seed_rng(seed);
+                    let fast: Vec<_> = inputs.iter()
+                        .map(|x| layer.forward_one(&x.view()))
+                        .collect();
+                    let fast_next = rng_next();
+
+                    seed_rng(seed);
+                    let reference: Vec<_> = inputs.iter()
+                        .map(|x| reference_forward_one(&layer, &x.view()))
+                        .collect();
+                    let reference_next = rng_next();
+
+                    for (i, ((out, clips), (expected, expected_clips))) in fast
+                        .iter().zip(reference.iter()).enumerate()
+                    {
+                        assert_eq!(out.data, expected.data,
+                            "forward output sample={i} dims={n_in}x{n_out} q={q} bits={bits}");
+                        assert_eq!(clips, expected_clips,
+                            "clipping sample={i} dims={n_in}x{n_out} q={q} bits={bits}");
+                    }
+                    assert_eq!(fast_next, reference_next,
+                        "forward RNG dims={n_in}x{n_out} q={q} bits={bits}");
+
+                    // Public batch entry point must preserve both sample order
+                    // and per-sample clipping caches, including next RNG state.
+                    let batched = Tensor::from_vec(
+                        inputs.iter().flat_map(|x| x.data.iter().copied()).collect(),
+                        vec![inputs.len(), n_in],
+                    );
+                    seed_rng(seed);
+                    let result = layer.forward_batch(&batched);
+                    let batch_next = rng_next();
+                    assert_eq!(result.shape, vec![inputs.len(), n_out]);
+                    for (i, (expected, clips)) in reference.iter().enumerate() {
+                        assert_eq!(
+                            &result.data[i * n_out..(i + 1) * n_out],
+                            &expected.data,
+                            "batch output sample={i} q={q} bits={bits}",
+                        );
+                        assert_eq!(&layer.clip_batch_cache[i], clips);
+                    }
+                    assert_eq!(batch_next, reference_next,
+                        "batch RNG dims={n_in}x{n_out} q={q} bits={bits}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forward_single_entry_point_keeps_output_and_cache() {
+        let mut layer = Linear::new(5, 3, 7, 7, 8);
+        let input = Tensor::from_vec(
+            vec![Dyadic::new(0, 7), Dyadic::new(-127, 7),
+                 Dyadic::new(127, 7), Dyadic::new(1, 7),
+                 Dyadic::new(-2, 7)],
+            vec![5],
+        );
+        seed_rng(127);
+        let (expected, clips) = reference_forward_one(&layer, &input.view());
+        let next_reference = rng_next();
+
+        seed_rng(127);
+        let result = layer.forward(&input.view());
+        let next_fast = rng_next();
+        assert_eq!(result.data, expected.data);
+        assert_eq!(layer.input_cache.data, input.data);
+        assert_eq!(layer.output_cache.data, expected.data);
+        assert_eq!(layer.clip_cache, clips);
+        assert_eq!(next_fast, next_reference);
+    }
+
+    /// Host-only, identical-binary diagnostic of the original TLS path and
+    /// optimized path. Do not infer physical Pi speedup from ARM64 CI runners.
+    #[test]
+    #[ignore = "run with cargo test --release --lib benchmark_forward_scoped_rng_vs_tls -- --ignored --nocapture"]
+    fn benchmark_forward_scoped_rng_vs_tls() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLES: usize = 64;
+        let mut layer = Linear::new(784, 128, 7, 7, 31);
+        let inputs = Tensor::from_vec(
+            (0..784)
+                .map(|i| Dyadic::new(
+                    if i % 3 == 0 { 0 } else { (i % 255) as i32 - 127 },
+                    7,
+                ))
+                .collect(),
+            vec![784],
+        );
+        for (i, bias) in layer.biases.data.iter_mut().enumerate() {
+            *bias = Dyadic::new((i % 13) as i32 - 6, 7);
+        }
+
+        seed_rng(0x1234_5678);
+        let before = Instant::now();
+        let mut baseline_last = None;
+        for _ in 0..SAMPLES {
+            baseline_last = Some(black_box(reference_forward_one(
+                black_box(&layer), black_box(&inputs.view()),
+            )));
+        }
+        let baseline_time = before.elapsed();
+        let next_baseline = rng_next();
+
+        seed_rng(0x1234_5678);
+        let before = Instant::now();
+        let mut optimized_last = None;
+        for _ in 0..SAMPLES {
+            optimized_last = Some(black_box(layer.forward_one(black_box(&inputs.view()))));
+        }
+        let optimized_time = before.elapsed();
+        let next_optimized = rng_next();
+
+        let (baseline_out, baseline_clips) = baseline_last.unwrap();
+        let (optimized_out, optimized_clips) = optimized_last.unwrap();
+        assert_eq!(baseline_out.data, optimized_out.data);
+        assert_eq!(baseline_clips, optimized_clips);
+        assert_eq!(next_baseline, next_optimized);
+        println!(
+            "Linear 784x128 forward, {SAMPLES} samples: legacy_TLS={:?}, scoped_RNG={:?}, ratio={:.3}x (native host diagnostic, not Pi 5 proof)",
+            baseline_time, optimized_time,
             baseline_time.as_secs_f64() / optimized_time.as_secs_f64()
         );
     }
