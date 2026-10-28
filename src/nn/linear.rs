@@ -1138,6 +1138,12 @@ mod discarded_input_gradient_tests {
         }
         let relaxed_time = begin.elapsed();
 
+        // Keep both accumulated gradient buffers observable to the optimizer:
+        // this diagnostic must compare actual training work, not dead code.
+        black_box(&conservative.grad_w.data);
+        black_box(&conservative.grad_b.data);
+        black_box(&relaxed.grad_w.data);
+        black_box(&relaxed.grad_b.data);
         assert_eq!(conservative.grad_samples, relaxed.grad_samples);
         // No equality requirement on the gradient mantissas or following
         // RNG state; that is the variable under experimental investigation.
