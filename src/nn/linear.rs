@@ -1,5 +1,5 @@
 use crate::dyadic::{
-    Dyadic, Tensor, TensorView, add, mul, mul_with_rng, requantize, signed_bounds, ste_requantize,
+    Dyadic, Tensor, TensorView, add, mul_with_rng, requantize, signed_bounds, ste_requantize,
 };
 use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
 use crate::rng::{rng_range, with_rng_state};
@@ -344,6 +344,7 @@ impl Module for Linear {
 #[cfg(test)]
 mod backward_accumulator_tests {
     use super::*;
+    use crate::dyadic::mul;
     use crate::rng::{rng_next, seed_rng};
 
     fn d(v: i32, s: u32) -> Dyadic {
@@ -574,6 +575,7 @@ mod backward_accumulator_tests {
 #[cfg(test)]
 mod forward_scoped_rng_tests {
     use super::*;
+    use crate::dyadic::mul;
     use crate::rng::{rng_next, seed_rng};
 
     // Frozen pre-scoping forward path: uses the public mul() with TLS state
@@ -743,7 +745,7 @@ mod forward_scoped_rng_tests {
                         if i % 3 == 0 {
                             0
                         } else {
-                            (i % 255) as i32 - 127
+                            (i % 255) - 127
                         },
                         7,
                     )
