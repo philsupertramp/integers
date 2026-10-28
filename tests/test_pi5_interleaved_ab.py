@@ -29,6 +29,9 @@ def fixture(plan, trial, version=None):
         for _ in range(2):
             epoch = copy.deepcopy(run["learning_curve"][0])
             epoch["validation_accuracy_pct"] = 79.0 if backend == "integer" else 80.0
+            epoch["nonfinite_outputs"] = 0
+            epoch["extreme_outputs"] = 0
+            epoch["nonfinite_fp32_parameters"] = 0 if backend == "fp32" else None
             profile = epoch["training_profile"]
             profile["samples"] = 8192
             profile["batches"] = 256
