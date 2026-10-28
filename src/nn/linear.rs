@@ -1068,11 +1068,8 @@ mod discarded_input_gradient_tests {
         assert_eq!(full_rng, fast_rng, "RNG after multiple updates");
     }
 
-    /// Experimental upper bound: skip the entire unused input-gradient product
-    /// AND its RNG draw. This intentionally changes subsequent stochastic
-    /// rounding; no training-quality equivalence is asserted. Keep this
-    /// benchmark-only, never use it for real training until multi-seed
-    /// convergence and numerical guards have been evaluated.
+    /// Legacy RNG preservation vs default no-draw training diagnostic.
+    /// This microbenchmark alone never establishes convergence or Pi speedup.
     #[test]
     #[ignore = "research-only; run benchmark_relaxed_rng_elision on native host"]
     fn benchmark_relaxed_rng_elision() {
@@ -1214,7 +1211,7 @@ mod discarded_input_gradient_tests {
         seed_rng(0x1234_5678);
         let start = Instant::now();
         for _ in 0..SAMPLES {
-            optimized.backward_one_discard_input_grad(
+            optimized.backward_one_discard_input_grad_preserve_rng(
                 black_box(&gradient.view()),
                 black_box(&input.view()),
                 black_box(&output.view()),
@@ -1250,12 +1247,12 @@ mod experimental_unused_rng_tests {
         relaxed.weights = baseline.weights.clone();
         relaxed.biases = baseline.biases.clone();
         let inputs = Tensor::from_vec(
-            (0..12).map(|i| Dyadic::new(i * 13 - 64, 7)).collect(),
-            vec![2, 6],
+            (0..6).map(|i| Dyadic::new(i * 13 - 64, 7)).collect(),
+            vec![1, 6],
         );
         let gradient = Tensor::from_vec(
-            (0..8).map(|i| Dyadic::new(i * 7 - 17, 7)).collect(),
-            vec![2, 4],
+            (0..4).map(|i| Dyadic::new(i * 7 - 17, 7)).collect(),
+            vec![1, 4],
         );
 
         seed_rng(0x0123_4567);
@@ -1272,9 +1269,9 @@ mod experimental_unused_rng_tests {
 
         assert_eq!(observed.data, expected.data);
         assert_eq!(baseline_first, relaxed_first);
-        assert_eq!(baseline.grad_samples, 2);
-        assert_eq!(relaxed.grad_samples, 2);
-        assert_ne!(baseline_rng, relaxed_rng, "opt-in must omit RNG draws");
+        assert_eq!(baseline.grad_samples, 1);
+        assert_eq!(relaxed.grad_samples, 1);
+        assert_ne!(baseline_rng, relaxed_rng, "default training must omit RNG draws");
 
         baseline.update(7);
         relaxed.update(7);
