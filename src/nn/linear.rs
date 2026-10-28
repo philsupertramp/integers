@@ -1051,6 +1051,108 @@ mod discarded_input_gradient_tests {
         assert_eq!(full_rng, fast_rng, "RNG after multiple updates");
     }
 
+
+    /// Experimental upper bound: skip the entire unused input-gradient product
+    /// AND its RNG draw. This intentionally changes subsequent stochastic
+    /// rounding; no training-quality equivalence is asserted. Keep this
+    /// benchmark-only, never use it for real training until multi-seed
+    /// convergence and numerical guards have been evaluated.
+    #[test]
+    #[ignore = "research-only; run benchmark_relaxed_rng_elision on native host"]
+    fn benchmark_relaxed_rng_elision() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn relaxed_backward_one(
+            layer: &mut Linear,
+            grad_output: &TensorView,
+            input: &TensorView,
+            output: &TensorView,
+            clipped: &[bool],
+        ) {
+            with_rng_state(|rng| {
+                for (j, &is_clipped) in clipped.iter().enumerate() {
+                    let gr = if is_clipped {
+                        Dyadic::new(0, grad_output.data[j].s)
+                    } else {
+                        ste_requantize(
+                            grad_output.data[j],
+                            output.data[j].v,
+                            layer.q_min,
+                            layer.q_max,
+                        )
+                    };
+                    let gj = Dyadic::new(gr.v.clamp(-layer.grad_clip, layer.grad_clip), gr.s);
+                    for i in 0..layer.in_features {
+                        let idx = layer.flat(j, i);
+                        layer.grad_w.data[idx] = add_backward_accumulator(
+                            layer.grad_w.data[idx],
+                            mul_with_rng(gj, input.data[i], layer.quant_shift, rng),
+                        );
+                        // Only the unused input-gradient multiply is removed.
+                        // RNG divergence is expected and is NOT a correctness
+                        // requirement for this experimental upper bound.
+                    }
+                    layer.grad_b.data[j] = add(layer.grad_b.data[j], gj);
+                }
+            });
+            layer.grad_samples += 1;
+        }
+
+        const SAMPLES: usize = 64;
+        let mut conservative = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        let mut relaxed = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        relaxed.weights = conservative.weights.clone();
+        relaxed.biases = conservative.biases.clone();
+        let inputs = Tensor::from_vec(
+            (0..784)
+                .map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7))
+                .collect(),
+            vec![784],
+        );
+        let grad = Tensor::from_vec(
+            (0..128).map(|i| d(i % 17 - 8, 7)).collect(),
+            vec![128],
+        );
+        let outputs = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
+        let clipped = vec![false; 128];
+
+        seed_rng(0x1234_5678);
+        let begin = Instant::now();
+        for _ in 0..SAMPLES {
+            conservative.backward_one_discard_input_grad(
+                black_box(&grad.view()),
+                black_box(&inputs.view()),
+                black_box(&outputs.view()),
+                black_box(&clipped),
+            );
+        }
+        let conservative_time = begin.elapsed();
+
+        seed_rng(0x1234_5678);
+        let begin = Instant::now();
+        for _ in 0..SAMPLES {
+            relaxed_backward_one(
+                &mut relaxed,
+                black_box(&grad.view()),
+                black_box(&inputs.view()),
+                black_box(&outputs.view()),
+                black_box(&clipped),
+            );
+        }
+        let relaxed_time = begin.elapsed();
+
+        assert_eq!(conservative.grad_samples, relaxed.grad_samples);
+        // No equality requirement on the gradient mantissas or following
+        // RNG state; that is the variable under experimental investigation.
+        println!(
+            "Linear 784x128 backward, {SAMPLES} samples: preserve_rng={:?}, skip_unused_rng={:?}, ratio={:.3}x (experimental native-host upper bound; NO convergence claim)",
+            conservative_time,
+            relaxed_time,
+            conservative_time.as_secs_f64() / relaxed_time.as_secs_f64()
+        );
+    }
+
     #[test]
     fn public_backward_still_produces_full_input_gradients() {
         let mut linear = Linear::new(6, 4, 7, 7, 8);
