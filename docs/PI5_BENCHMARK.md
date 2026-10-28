@@ -601,3 +601,66 @@ thermal state, clocks, scheduling and contention across interleaved
 measurements. Candidate image is published **after** merging to
 `big-refactor`, never by PR validation. The official test
 set must remain unevaluated.
+
+## 15. Training-only first-layer input-gradient elision (#47, PR #53)
+
+### Why this work is unused
+
+The first layer receives input pixels that are not trainable parameters.
+`Sequential::backward_batch` used to compute their gradients anyway;
+the training loop then discarded the result. Only the **first** layer may
+omit the input gradient: intermediate layers still need it for earlier
+trainable parameters. Public backward methods remain unchanged.
+
+The new explicit opt-in `backward_batch_discard_input_grad` plus
+timed equivalent skips the unused input-gradient tensor allocation and
+accumulation for the first `Linear` only. The conservative
+implementation preserves the original XorShift64 draws: shifts 1–63
+consume one draw even on zero products; q=0 consumes none; q>=64 falls
+back to actual multiplication because draw count depends on the product.
+Parameter gradients, optimizer updates and following RNG remain equal.
+
+Frozen backward oracle tests cover shifts 0,1,7,31,63,64,128; signed
+extremes; mixed scales; saturation; multiple minibatches; optimizer
+momentum; and repeated multi-layer training.
+
+Native ARM64 release-mode *diagnostic* (not physical Pi performance):
+
+```sh
+cargo test --locked --release --lib benchmark_discard_unused_input_grad -- --ignored --nocapture
+```
+
+### Numerical differences are allowed with evidence
+
+Exact seeded-output matching is **not** mandatory for future training
+optimizations. The experimental no-draw variant entirely skips the
+discarded multiplication's RNG consumption and may change subsequent
+weight-gradient stochastic rounding, model updates and training
+trajectories. It is currently **benchmark-only**, not used by training:
+
+```sh
+cargo test --locked --release --lib benchmark_relaxed_rng_elision -- --ignored --nocapture
+```
+
+This upper bound measures potential **speed**, not model quality.
+Before allowing production numerical divergence, validate the revised
+rounding policy and compare paired multi-seed training curves, held-out
+validation accuracy and class recall, instability diagnostics, integer
+and FP32 timings. Set non-inferiority thresholds **before** examining
+outcomes; do not require any particular seed to reproduce identical
+predictions, but require comparable or better overall quality and
+performance. Do not tune against the official test set.
+
+### Real Pi validation protocol
+
+The previous five-seed Pi 5 baseline is commit
+`b0ce98372e500a6b621abc0007e46ca2861fc4ab` and image
+`sha256:2c8f32322dcb4916c38b09f3123fb4e0043a009f094881be99d395aa33c8adf9`.
+Integer means: 32.555 s training, 10.792 s forward,
+20.720 s backward, 17.616 s first Linear backward.
+Match original image dataset manifest and seeds
+1337,2026,2027,4242,42069; train/validation 8192/1042,
+two epochs, batch32, lr shift7, 2-core quota. Use immutable
+post-merge image and per-seed comparison, preferably repeated
+interleaved A/B trials with temperature, clocks, throttling and
+contention measurements. Never merge PR #9 because of a benchmark.

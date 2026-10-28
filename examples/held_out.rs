@@ -897,7 +897,10 @@ fn main() {
                                 .collect()
                         });
                         let started = Instant::now();
-                        integer.backward_batch_timed(&gradient, &mut profile.backward_layer_ns);
+                        integer.backward_batch_timed_discard_input_grad(
+                            &gradient,
+                            &mut profile.backward_layer_ns,
+                        );
                         profile.backward_ns += started.elapsed().as_nanos();
                         timed(&mut profile.update_ns, || integer.update(cfg.lr_shift));
                     } else {
@@ -916,7 +919,7 @@ fn main() {
                                 Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec())
                             })
                             .collect();
-                        integer.backward_batch(&gradient);
+                        integer.backward_batch_discard_input_grad(&gradient);
                         integer.update(cfg.lr_shift);
                     }
                 }

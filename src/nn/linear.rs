@@ -1,5 +1,6 @@
 use crate::dyadic::{
-    Dyadic, Tensor, TensorView, add, mul_with_rng, requantize, signed_bounds, ste_requantize,
+    Dyadic, Tensor, TensorView, add, discard_mul_with_rng, mul_with_rng, requantize, signed_bounds,
+    ste_requantize,
 };
 use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
 use crate::rng::{rng_range, with_rng_state};
@@ -207,6 +208,73 @@ impl Linear {
             .expect("Linear: sample counter overflow");
         Tensor::from_vec(gi, vec![self.in_features])
     }
+
+    /// Training-only variant: the model input is not trainable, so the first
+    /// layer's input gradient would be thrown away by the caller.
+    ///
+    /// Preserve *every* weight gradient, bias gradient, mask, error and
+    /// stochastic RNG draw in the same j/i traversal order as backward_one.
+    /// Only the discarded input-gradient multiplication/accumulation is
+    /// elided; discard_mul_with_rng handles its exact RNG contract.
+    fn backward_one_discard_input_grad(
+        &mut self,
+        grad_output: &TensorView,
+        input: &TensorView,
+        output: &TensorView,
+        clipped: &[bool],
+    ) {
+        assert_eq!(
+            grad_output.data.len(),
+            self.out_features,
+            "Linear: output gradient count mismatch"
+        );
+        assert_eq!(
+            input.data.len(),
+            self.in_features,
+            "Linear: missing or invalid forward cache"
+        );
+        assert_eq!(
+            output.data.len(),
+            self.out_features,
+            "Linear: missing output cache"
+        );
+        assert_eq!(
+            clipped.len(),
+            self.out_features,
+            "Linear: missing saturation cache"
+        );
+
+        with_rng_state(|rng| {
+            for (j, &is_clipped) in clipped.iter().enumerate() {
+                let gr = if is_clipped {
+                    Dyadic::new(0, grad_output.data[j].s)
+                } else {
+                    ste_requantize(
+                        grad_output.data[j],
+                        output.data[j].v,
+                        self.q_min,
+                        self.q_max,
+                    )
+                };
+                let gj = Dyadic::new(gr.v.clamp(-self.grad_clip, self.grad_clip), gr.s);
+                for i in 0..self.in_features {
+                    let idx = self.flat(j, i);
+                    self.grad_w.data[idx] = add_backward_accumulator(
+                        self.grad_w.data[idx],
+                        mul_with_rng(gj, input.data[i], self.quant_shift, rng),
+                    );
+                    // This result is unused, but the corresponding product
+                    // must still consume the exact original RNG stream.
+                    discard_mul_with_rng(gj, self.w(j, i), self.quant_shift, rng);
+                }
+                self.grad_b.data[j] = add(self.grad_b.data[j], gj);
+            }
+        });
+        self.grad_samples = self
+            .grad_samples
+            .checked_add(1)
+            .expect("Linear: sample counter overflow");
+    }
 }
 
 impl Module for Linear {
@@ -310,6 +378,43 @@ impl Module for Linear {
             .zip(clips.iter())
             .map(|((g, (inp, out)), clipped)| self.backward_one(&g, &inp, &out, clipped))
             .collect()
+    }
+
+    fn backward_batch_discard_input_grad(&mut self, grads: &Tensor) {
+        let n = self
+            .input_batch_cache
+            .shape
+            .first()
+            .copied()
+            .expect("Linear: missing batch forward cache");
+        assert!(grads.shape.len() >= 2, "Linear: expected batched gradients");
+        assert_eq!(grads.shape[0], n, "Linear: gradient batch size mismatch");
+        assert_eq!(
+            grads.shape[1..].iter().product::<usize>(),
+            self.out_features,
+            "Linear: gradient feature shape mismatch"
+        );
+        assert_eq!(
+            grads.data.len(),
+            n * self.out_features,
+            "Linear: gradient buffer mismatch"
+        );
+        assert_eq!(
+            self.clip_batch_cache.len(),
+            n,
+            "Linear: missing batch saturation cache"
+        );
+
+        let inputs = std::mem::take(&mut self.input_batch_cache);
+        let outputs = std::mem::take(&mut self.output_batch_cache);
+        let clips = std::mem::take(&mut self.clip_batch_cache);
+        for ((g, (inp, out)), clipped) in grads
+            .iter()
+            .zip(inputs.iter().zip(outputs.iter()))
+            .zip(clips.iter())
+        {
+            self.backward_one_discard_input_grad(&g, &inp, &out, clipped);
+        }
     }
 
     fn update(&mut self, lr: u32) {
@@ -779,6 +884,337 @@ mod forward_scoped_rng_tests {
             baseline_time,
             optimized_time,
             baseline_time.as_secs_f64() / optimized_time.as_secs_f64()
+        );
+    }
+}
+
+#[cfg(test)]
+mod discarded_input_gradient_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    fn d(v: i32, s: u32) -> Dyadic {
+        Dyadic::new(v, s)
+    }
+
+    #[test]
+    fn discarded_first_layer_gradient_preserves_parameters_and_rng_after_update() {
+        // q >= 64 exercises the product-dependent RNG fallback, including
+        // zero products; q=0 tests zero draws, and q=63 the one-draw boundary.
+        for &q in &[0u32, 1, 7, 31, 63, 64, 128] {
+            for &(n_in, n_out) in &[(5usize, 3usize), (16, 8)] {
+                for &samples in &[1usize, 7] {
+                    for &bits in &[4u32, 31] {
+                        let mut full = Linear::new(n_in, n_out, 7, q, bits)
+                            .with_grad_clip(8192)
+                            .with_momentum(1);
+                        for (idx, w) in full.weights.data.iter_mut().enumerate() {
+                            *w = d(
+                                match idx % 17 {
+                                    0 => i32::MAX,
+                                    1 => i32::MIN,
+                                    2 => 0,
+                                    _ => (idx % 253) as i32 - 126,
+                                },
+                                q + (idx % 2) as u32,
+                            );
+                        }
+                        for (j, b) in full.biases.data.iter_mut().enumerate() {
+                            *b = d(if j % 4 == 0 { i32::MAX } else { 0 }, q);
+                        }
+                        let mut optimized = Linear::new(n_in, n_out, 7, q, bits)
+                            .with_grad_clip(8192)
+                            .with_momentum(1);
+                        optimized.weights = full.weights.clone();
+                        optimized.biases = full.biases.clone();
+
+                        let inputs = Tensor::from_vec(
+                            (0..samples * n_in)
+                                .map(|i| {
+                                    d(
+                                        if i % 7 == 0 {
+                                            0
+                                        } else {
+                                            (i % 201) as i32 - 100
+                                        },
+                                        q + (i % 2) as u32,
+                                    )
+                                })
+                                .collect(),
+                            vec![samples, n_in],
+                        );
+                        let grads = Tensor::from_vec(
+                            (0..samples * n_out)
+                                .map(|i| {
+                                    d(
+                                        if i % 5 == 0 {
+                                            i32::MIN
+                                        } else {
+                                            (i % 47) as i32 - 23
+                                        },
+                                        q,
+                                    )
+                                })
+                                .collect(),
+                            vec![samples, n_out],
+                        );
+
+                        let seed = 0x1bad_b002_1234_5678;
+                        seed_rng(seed);
+                        let full_outputs = full.forward_batch(&inputs);
+                        let _unused_grad = full.backward_batch(&grads);
+                        let full_grads = (full.grad_w.data.clone(), full.grad_b.data.clone());
+                        let full_samples = full.grad_samples;
+                        full.update(7);
+                        let full_next_rng = rng_next();
+
+                        seed_rng(seed);
+                        let fast_outputs = optimized.forward_batch(&inputs);
+                        optimized.backward_batch_discard_input_grad(&grads);
+                        let fast_grads =
+                            (optimized.grad_w.data.clone(), optimized.grad_b.data.clone());
+                        let fast_samples = optimized.grad_samples;
+                        optimized.update(7);
+                        let fast_next_rng = rng_next();
+
+                        let label =
+                            format!("q={q} size={n_in}x{n_out} samples={samples} bits={bits}");
+                        assert_eq!(full_outputs.data, fast_outputs.data, "{label}: forward");
+                        assert_eq!(full_grads, fast_grads, "{label}: parameter gradients");
+                        assert_eq!(full_samples, fast_samples, "{label}: sample count");
+                        assert_eq!(
+                            full.weights.data, optimized.weights.data,
+                            "{label}: updated weights"
+                        );
+                        assert_eq!(
+                            full.biases.data, optimized.biases.data,
+                            "{label}: updated biases"
+                        );
+                        assert_eq!(
+                            full.vel_w.data, optimized.vel_w.data,
+                            "{label}: weight momentum"
+                        );
+                        assert_eq!(
+                            full.vel_b.data, optimized.vel_b.data,
+                            "{label}: bias momentum"
+                        );
+                        assert_eq!(full_next_rng, fast_next_rng, "{label}: RNG stream");
+                    }
+                }
+            }
+        }
+    }
+
+    fn model(seed: u64) -> crate::nn::Sequential {
+        seed_rng(seed);
+        let mut seq = crate::nn::Sequential::new();
+        seq.add(Linear::new(6, 4, 7, 7, 8).with_momentum(1));
+        seq.add(crate::nn::ReLU::new());
+        seq.add(Linear::new(4, 3, 7, 7, 8).with_momentum(1));
+        seq
+    }
+
+    #[test]
+    fn sequential_training_and_timed_path_preserve_predictions_and_rng_across_steps() {
+        let mut full = model(1337);
+        let mut optimized = model(1337);
+        let input = Tensor::from_vec((0..42).map(|i| d(i % 23 - 11, 7)).collect(), vec![7, 6]);
+        let grads = Tensor::from_vec((0..21).map(|i| d(i % 19 - 9, 7)).collect(), vec![7, 3]);
+        seed_rng(0x1234_5678);
+        let mut expected = Vec::new();
+        for _ in 0..4 {
+            full.zero_grad();
+            expected.push(full.forward_batch(&input).data);
+            let _ = full.backward_batch(&grads);
+            full.update(7);
+        }
+        let expected_after = full.forward_batch(&input).data;
+        let full_rng = rng_next();
+
+        seed_rng(0x1234_5678);
+        let mut actual = Vec::new();
+        for step in 0..4 {
+            optimized.zero_grad();
+            actual.push(optimized.forward_batch(&input).data);
+            if step % 2 == 0 {
+                let mut layer_ns = [0u128; 3];
+                optimized.backward_batch_timed_discard_input_grad(&grads, &mut layer_ns);
+            } else {
+                optimized.backward_batch_discard_input_grad(&grads);
+            }
+            optimized.update(7);
+        }
+        let actual_after = optimized.forward_batch(&input).data;
+        let fast_rng = rng_next();
+        assert_eq!(expected, actual, "predictions during training");
+        assert_eq!(expected_after, actual_after, "predictions after updates");
+        assert_eq!(full_rng, fast_rng, "RNG after multiple updates");
+    }
+
+    /// Experimental upper bound: skip the entire unused input-gradient product
+    /// AND its RNG draw. This intentionally changes subsequent stochastic
+    /// rounding; no training-quality equivalence is asserted. Keep this
+    /// benchmark-only, never use it for real training until multi-seed
+    /// convergence and numerical guards have been evaluated.
+    #[test]
+    #[ignore = "research-only; run benchmark_relaxed_rng_elision on native host"]
+    fn benchmark_relaxed_rng_elision() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn relaxed_backward_one(
+            layer: &mut Linear,
+            grad_output: &TensorView,
+            input: &TensorView,
+            output: &TensorView,
+            clipped: &[bool],
+        ) {
+            with_rng_state(|rng| {
+                for (j, &is_clipped) in clipped.iter().enumerate() {
+                    let gr = if is_clipped {
+                        Dyadic::new(0, grad_output.data[j].s)
+                    } else {
+                        ste_requantize(
+                            grad_output.data[j],
+                            output.data[j].v,
+                            layer.q_min,
+                            layer.q_max,
+                        )
+                    };
+                    let gj = Dyadic::new(gr.v.clamp(-layer.grad_clip, layer.grad_clip), gr.s);
+                    for i in 0..layer.in_features {
+                        let idx = layer.flat(j, i);
+                        layer.grad_w.data[idx] = add_backward_accumulator(
+                            layer.grad_w.data[idx],
+                            mul_with_rng(gj, input.data[i], layer.quant_shift, rng),
+                        );
+                        // Only the unused input-gradient multiply is removed.
+                        // RNG divergence is expected and is NOT a correctness
+                        // requirement for this experimental upper bound.
+                    }
+                    layer.grad_b.data[j] = add(layer.grad_b.data[j], gj);
+                }
+            });
+            layer.grad_samples += 1;
+        }
+
+        const SAMPLES: usize = 64;
+        let mut conservative = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        let mut relaxed = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        relaxed.weights = conservative.weights.clone();
+        relaxed.biases = conservative.biases.clone();
+        let inputs = Tensor::from_vec(
+            (0..784)
+                .map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7))
+                .collect(),
+            vec![784],
+        );
+        let grad = Tensor::from_vec((0..128).map(|i| d(i % 17 - 8, 7)).collect(), vec![128]);
+        let outputs = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
+        let clipped = vec![false; 128];
+
+        seed_rng(0x1234_5678);
+        let begin = Instant::now();
+        for _ in 0..SAMPLES {
+            conservative.backward_one_discard_input_grad(
+                black_box(&grad.view()),
+                black_box(&inputs.view()),
+                black_box(&outputs.view()),
+                black_box(&clipped),
+            );
+        }
+        let conservative_time = begin.elapsed();
+
+        seed_rng(0x1234_5678);
+        let begin = Instant::now();
+        for _ in 0..SAMPLES {
+            relaxed_backward_one(
+                &mut relaxed,
+                black_box(&grad.view()),
+                black_box(&inputs.view()),
+                black_box(&outputs.view()),
+                black_box(&clipped),
+            );
+        }
+        let relaxed_time = begin.elapsed();
+
+        // Keep both accumulated gradient buffers observable to the optimizer:
+        // this diagnostic must compare actual training work, not dead code.
+        black_box(&conservative.grad_w.data);
+        black_box(&conservative.grad_b.data);
+        black_box(&relaxed.grad_w.data);
+        black_box(&relaxed.grad_b.data);
+        assert_eq!(conservative.grad_samples, relaxed.grad_samples);
+        // No equality requirement on the gradient mantissas or following
+        // RNG state; that is the variable under experimental investigation.
+        println!(
+            "Linear 784x128 backward, {SAMPLES} samples: preserve_rng={:?}, skip_unused_rng={:?}, ratio={:.3}x (experimental native-host upper bound; NO convergence claim)",
+            conservative_time,
+            relaxed_time,
+            conservative_time.as_secs_f64() / relaxed_time.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn public_backward_still_produces_full_input_gradients() {
+        let mut linear = Linear::new(6, 4, 7, 7, 8);
+        let inputs = Tensor::from_vec(vec![d(2, 7); 12], vec![2, 6]);
+        let grads = Tensor::from_vec(vec![d(3, 7); 8], vec![2, 4]);
+        linear.forward_batch(&inputs);
+        let input_grads = linear.backward_batch(&grads);
+        assert_eq!(input_grads.shape, vec![2, 6]);
+        assert_eq!(input_grads.data.len(), 12);
+    }
+
+    #[test]
+    #[ignore = "run with cargo test --release --lib benchmark_discard_unused_input_grad -- --ignored --nocapture"]
+    fn benchmark_discard_unused_input_grad() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLES: usize = 64;
+        let mut full = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        let mut optimized = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        optimized.weights = full.weights.clone();
+        optimized.biases = full.biases.clone();
+        let input = Tensor::from_vec(
+            (0..784)
+                .map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7))
+                .collect(),
+            vec![784],
+        );
+        let gradient = Tensor::from_vec((0..128).map(|j| d(j % 17 - 8, 7)).collect(), vec![128]);
+        let output = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
+        let clipped = vec![false; 128];
+        seed_rng(0x1234_5678);
+        let start = Instant::now();
+        for _ in 0..SAMPLES {
+            black_box(full.backward_one(&gradient.view(), &input.view(), &output.view(), &clipped));
+        }
+        let full_time = start.elapsed();
+        let next_full = rng_next();
+
+        seed_rng(0x1234_5678);
+        let start = Instant::now();
+        for _ in 0..SAMPLES {
+            optimized.backward_one_discard_input_grad(
+                black_box(&gradient.view()),
+                black_box(&input.view()),
+                black_box(&output.view()),
+                black_box(&clipped),
+            );
+        }
+        let fast_time = start.elapsed();
+        let next_fast = rng_next();
+        assert_eq!(full.grad_w.data, optimized.grad_w.data);
+        assert_eq!(full.grad_b.data, optimized.grad_b.data);
+        assert_eq!(full.grad_samples, optimized.grad_samples);
+        assert_eq!(next_full, next_fast);
+        println!(
+            "Linear 784x128 backward, {SAMPLES} samples: full_input_gradient={:?}, discard_unused={:?}, ratio={:.3}x (native-host diagnostic, NOT physical Pi 5 performance)",
+            full_time,
+            fast_time,
+            full_time.as_secs_f64() / fast_time.as_secs_f64(),
         );
     }
 }

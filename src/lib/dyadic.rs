@@ -262,6 +262,34 @@ pub(crate) fn mul_with_rng(x1: Dyadic, x2: Dyadic, q: u32, rng: &mut XorShift64)
     mul_using(x1, x2, q, &mut || rng.next_u64())
 }
 
+/// Consume precisely the stochastic draws that an unused dyadic product
+/// would have consumed, without calculating its mantissa for 0 <= q < 64.
+///
+/// This is only for a caller that intentionally discards the **value** of
+/// the multiplication (e.g. the input gradients of the first training layer).
+/// We still validate its output scale just as mul_using does, even for q=0.
+/// For q >= 64 the number of draws depends on the product and PRNG state,
+/// so execute the original operation and discard its value instead.
+/// This must be called inside a with_rng_state scope.
+#[inline(always)]
+pub(crate) fn discard_mul_with_rng(x1: Dyadic, x2: Dyadic, q: u32, rng: &mut XorShift64) {
+    if q >= 64 {
+        let _ = mul_with_rng(x1, x2, q, rng);
+        return;
+    }
+
+    let output_shift = (x1.s as u64 + x2.s as u64)
+        .checked_sub(q as u64)
+        .expect("mul: negative output scale");
+    let _ = u32::try_from(output_shift).expect("mul: output scale overflow");
+    // stochastic_round_i64_using consumes exactly one draw for 1..64
+    // regardless of the product (including zero and saturation).
+    // q=0 is exact and consumes none.
+    if q != 0 {
+        rng.next_u64();
+    }
+}
+
 /// `x_1 / x_2 = (trunc(v_1 * 2^p / v_2), s_1 + p - s_2)`.
 ///
 /// Division truncates toward zero (not stochastic or nearest rounding).
