@@ -1,0 +1,71 @@
+# Issue #47: identical Pi 5 workload to the pre-optimization profile.
+# New Job name keeps the original baseline Job/Pod logs intact.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: integers-pi5-training-profile-optimized
+  labels:
+    app.kubernetes.io/name: integers-pi5-training-profile-optimized
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: integers-pi5-training-profile-optimized
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        benchmark.integers.dev/pi5: "true"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: benchmark
+          # Pin the same published SHA256 image digest in both places.
+          image: ghcr.io/philsupertramp/integers-benchmark:sha-REPLACE_WITH_FULL_COMMIT_SHA
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BENCHMARK_IMAGE
+              value: ghcr.io/philsupertramp/integers-benchmark:sha-REPLACE_WITH_FULL_COMMIT_SHA
+          args:
+            - --require-arm64
+            - --validation-only
+            - --profile-training
+            - --architecture
+            - dense
+            - --seed
+            - "1337"
+            - --epochs
+            - "2"
+            - --batch-size
+            - "32"
+            - --lr-shift
+            - "7"
+            - --train-limit
+            - "8192"
+            - --validation-limit
+            - "1042"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: results
+              mountPath: /results
+      volumes:
+        - name: results
+          emptyDir: {}

@@ -1,0 +1,34 @@
+name: Candidate bundled example runtime smoke
+
+on:
+  pull_request:
+    branches: [big-refactor]
+  push:
+    branches: [big-refactor]
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: XOR built-in data (complete short experiment)
+        run: cargo run --locked --example xor
+      - name: Iris bundled TSV train/test (runtime smoke, not accuracy gate)
+        run: cargo run --locked --example iris
+      - name: Iris explicit train/test paths must select distinct inputs
+        run: |
+          cargo run --locked --example iris -- data/iris_train.tsv data/iris_test.tsv | tee /tmp/integers-iris-example.log
+          grep -F "Loading Iris test dataset from 'data/iris_test.tsv'" /tmp/integers-iris-example.log
+      - name: Iris rejects an ambiguous train-only path
+        run: |
+          set +e
+          cargo run --locked --example iris -- data/iris_train.tsv > /tmp/integers-iris-usage.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/integers-iris-usage.log
+          test "$status" -eq 2

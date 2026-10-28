@@ -1,0 +1,254 @@
+name: Pi 5 benchmark ARM64 image
+
+on:
+  pull_request:
+    branches: [big-refactor]
+    paths:
+      - 'Dockerfile.benchmark'
+      - '.dockerignore'
+      - 'experiments/**'
+      # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
+      - '!experiments/pi5_seed_sweep.py'
+      - '!experiments/pi5_interleaved_ab.py'
+      - 'examples/held_out.rs'
+      - 'examples/mnist_nn/mnist_loader.rs'
+      - 'deployments/pi5/**'
+      - 'tests/test_pi5_dataset.py'
+      - 'src/lib/dyadic.rs'
+      - 'src/lib/rng.rs'
+      - 'src/nn/linear.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/pi5-benchmark-image.yml'
+  push:
+    branches: [big-refactor]
+    paths:
+      - 'Dockerfile.benchmark'
+      - '.dockerignore'
+      - 'experiments/**'
+      # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
+      - '!experiments/pi5_seed_sweep.py'
+      - '!experiments/pi5_interleaved_ab.py'
+      - 'examples/held_out.rs'
+      - 'examples/mnist_nn/mnist_loader.rs'
+      - 'deployments/pi5/**'
+      - 'src/lib/dyadic.rs'
+      - 'src/lib/rng.rs'
+      - 'src/nn/linear.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/pi5-benchmark-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build ARM64 and run offline paired fixture
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python dataset/integrity and multi-seed sweep tests
+        run: |
+          python3 -m unittest discover -s tests -p 'test_pi5_dataset.py' -v
+          python3 -m unittest discover -s tests -p 'test_pi5_seed_sweep.py' -v
+      - name: Validate K3s Job YAML and ARM64 placement
+        run: |
+          ruby -ryaml -e '
+            j = YAML.safe_load(File.read(ARGV[0]))
+            abort "must be a Job" unless j["apiVersion"] == "batch/v1" && j["kind"] == "Job"
+            p = j.dig("spec", "template", "spec")
+            abort "wrong architecture" unless p.dig("nodeSelector", "kubernetes.io/arch") == "arm64"
+            abort "Pi label missing" unless p.dig("nodeSelector", "benchmark.integers.dev/pi5") == "true"
+            c = p["containers"].fetch(0)
+            abort "must not be privileged" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
+            abort "results volume missing" unless p["volumes"].any? { |v| v["name"] == "results" }
+          ' deployments/pi5/benchmark-job.yaml
+      - name: Validate serial indexed full development Job
+        run: |
+          ruby -ryaml -e '
+            j = YAML.safe_load(File.read(ARGV[0]))
+            abort "not Job" unless j["apiVersion"] == "batch/v1" && j["kind"] == "Job"
+            s = j.fetch("spec")
+            abort "not serial three-index Job" unless s["completionMode"] == "Indexed" && s["completions"] == 3 && s["parallelism"] == 1
+            abort "deadline too short" unless s["activeDeadlineSeconds"] >= 7200
+            p = s.dig("template", "spec")
+            abort "incorrect node selector" unless p.dig("nodeSelector", "kubernetes.io/arch") == "arm64" && p.dig("nodeSelector", "benchmark.integers.dev/pi5") == "true"
+            c = p["containers"].first
+            a = c["args"]
+            abort "official test not isolated" unless a.include?("--validation-only") && !a.include?("--final-test")
+            abort "wrong seeds" unless a[a.index("--seed-list") + 1] == "1337,2027,4242"
+            abort "not full development" unless a[a.index("--train-limit") + 1] == "55000" && a[a.index("--validation-limit") + 1] == "5000"
+            abort "image metadata differs" unless c["image"] == c["env"].find { |e| e["name"] == "BENCHMARK_IMAGE" }["value"]
+            abort "must be read-only" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
+            abort "results volume missing" unless p["volumes"].any? { |v| v["name"] == "results" }
+          ' deployments/pi5/benchmark-full-validation-indexed.yaml
+      - name: Validate profiling Job is validation-only and Pi-pinned
+        run: |
+          ruby -ryaml -e '
+            j = YAML.safe_load(File.read(ARGV[0]))
+            abort "must be Job" unless j["kind"] == "Job" && j["apiVersion"] == "batch/v1"
+            c = j.dig("spec", "template", "spec", "containers").first
+            p = j.dig("spec", "template", "spec")
+            abort "must target real Pi 5 ARM64" unless p.dig("nodeSelector", "kubernetes.io/arch") == "arm64" && p.dig("nodeSelector", "benchmark.integers.dev/pi5") == "true"
+            abort "must stay validation-only" unless c["args"].include?("--profile-training") && c["args"].include?("--validation-only") && !c["args"].include?("--final-test")
+            abort "image metadata mismatch" unless c["image"] == c["env"].find { |e| e["name"] == "BENCHMARK_IMAGE" }["value"]
+            abort "must have read-only root" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
+          ' deployments/pi5/benchmark-profile-job.yaml
+      - name: Validate independently runnable optimized profiling Job
+        run: |
+          ruby -ryaml -e '
+            j = YAML.safe_load(File.read(ARGV[0]))
+            abort "invalid Job" unless j["apiVersion"] == "batch/v1" && j["kind"] == "Job"
+            abort "wrong Job identity" unless j.dig("metadata", "name") == "integers-pi5-training-profile-optimized"
+            p = j.dig("spec", "template", "spec")
+            abort "wrong physical target" unless p.dig("nodeSelector", "kubernetes.io/arch") == "arm64" && p.dig("nodeSelector", "benchmark.integers.dev/pi5") == "true"
+            c = p["containers"].first
+            a = c["args"]
+            abort "unexpected experimental settings" unless
+              a.include?("--validation-only") && a.include?("--profile-training") &&
+              !a.include?("--final-test") && a[a.index("--epochs")+1] == "2" &&
+              a[a.index("--seed")+1] == "1337" &&
+              a[a.index("--train-limit")+1] == "8192" &&
+              a[a.index("--validation-limit")+1] == "1042"
+            abort "image references differ" unless c["image"] == c["env"].find { |e| e["name"] == "BENCHMARK_IMAGE" }["value"]
+            abort "must be read-only" unless c.dig("securityContext", "readOnlyRootFilesystem") == true
+          ' deployments/pi5/benchmark-profile-optimized-job.yaml
+      - uses: docker/setup-buildx-action@v3
+      - name: Build native ARM64 benchmark image (NEVER publish in PR validation)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.benchmark
+          platforms: linux/arm64
+          # Persist intermediate stages across ephemeral runners, including
+          # the Rust dependencies and checksum-verified dataset preparation.
+          cache-from: type=gha,scope=pi5-benchmark-arm64
+          cache-to: type=gha,mode=max,scope=pi5-benchmark-arm64
+          push: false
+          load: true
+          tags: integers-pi5:ci
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+      - name: Record ARM64 local image layer size (not network pull size)
+        run: docker image inspect integers-pi5:ci --format '{{.Size}} bytes'
+      - name: Offline ARM64 smoke for integer and independent FP32
+        run: |
+          mkdir -p /tmp/pi5-ci-results
+          chmod 777 /tmp/pi5-ci-results
+          docker run --rm --platform linux/arm64 --network none --read-only \
+            --mount type=bind,src=/tmp/pi5-ci-results,dst=/results \
+            -e BENCHMARK_IMAGE=integers-pi5:ci \
+            -e JOB_COMPLETION_INDEX=1 \
+            integers-pi5:ci --require-arm64 --validation-only \
+            --epochs 1 --seed-list 1337,2027,4242 --profile-training --train-limit 8 --validation-limit 10 \
+            | tee /tmp/pi5-ci.log
+          python3 experiments/extract_pi5_results.py /tmp/pi5-ci.log \
+            --output /tmp/pi5-ci-restored.json
+          cmp /tmp/pi5-ci-restored.json /tmp/pi5-ci-results/benchmark-result.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r = json.loads(Path('/tmp/pi5-ci-results/benchmark-result.json').read_text())
+          assert len(r['runs']) == 2
+          a, b = r['runs']
+          assert (a['backend'], b['backend']) == ('integer', 'fp32')
+          assert a['profile_training'] is b['profile_training'] is True
+          assert all(epoch['training_profile']['samples'] == 8
+                     for backend in (a,b) for epoch in backend['learning_curve'])
+          assert all(epoch['training_profile']['backward_layers'] == []
+                     for epoch in b['learning_curve'])
+          for epoch in a['learning_curve']:
+              layers = epoch['training_profile']['backward_layers']
+              assert [v['index'] for v in layers] == list(range(5))
+              assert [v['name'] for v in layers] == [
+                  'Linear', 'ReLU', 'Linear', 'ReLU', 'Linear']
+              assert sum(v['elapsed_ns'] for v in layers) <= epoch['training_profile']['backward_ns']
+          assert a['seed'] == b['seed'] == 2027
+          assert a['job_completion_index'] == b['job_completion_index'] == 1
+          assert a['indexed_job_seeds'] == b['indexed_job_seeds'] == [1337, 2027, 4242]
+          assert a['train_size'] == b['train_size'] == 8
+          assert a['validation_size'] == b['validation_size'] == 10
+          assert a['test_evaluated'] is b['test_evaluated'] is False
+          assert a['prepared_artifact_sha256'] == b['prepared_artifact_sha256']
+          assert a['dataset_manifest_sha256'] == b['dataset_manifest_sha256']
+          assert all(v['wall_ms'] >= 0 and v['dataset_loading_ms'] >= 0 for v in (a,b))
+          print('Offline native ARM64 profiled smoke passed (NOT Pi performance).')
+          PY
+      - name: Offline ARM64 numerical parity, profiled vs unprofiled
+        run: |
+          cp /tmp/pi5-ci-results/benchmark-result.json /tmp/pi5-ci-profiled.json
+          docker run --rm --platform linux/arm64 --network none --read-only \
+            --mount type=bind,src=/tmp/pi5-ci-results,dst=/results \
+            -e BENCHMARK_IMAGE=integers-pi5:ci \
+            -e JOB_COMPLETION_INDEX=1 \
+            integers-pi5:ci --require-arm64 --validation-only \
+            --epochs 1 --seed-list 1337,2027,4242 --train-limit 8 --validation-limit 10 \
+            >/tmp/pi5-ci-unprofiled.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          profiled = json.loads(Path("/tmp/pi5-ci-profiled.json").read_text())
+          plain = json.loads(Path("/tmp/pi5-ci-results/benchmark-result.json").read_text())
+          for a, b in zip(profiled["runs"], plain["runs"]):
+              assert a["backend"] == b["backend"]
+              assert b["profile_training"] is False
+              assert b["learning_curve"][0]["training_profile"] is None
+              for k in ("train_accuracy_pct", "validation_accuracy_pct",
+                        "validation_confusion", "validation_predictions",
+                        "validation_per_class_recall", "max_abs_output",
+                        "nonfinite_outputs", "extreme_outputs"):
+                  assert a["learning_curve"][0][k] == b["learning_curve"][0][k], k
+          print("Profiled/unprofiled output parity passed for both backends.")
+          PY
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native ARM64 scoped/legacy backward microbenchmark (diagnostic)
+        run: cargo test --locked --release --lib benchmark_scoped_rng_vs_tls -- --ignored --nocapture
+      - name: Native ARM64 scoped/legacy forward microbenchmark (diagnostic)
+        run: cargo test --locked --release --lib benchmark_forward_scoped_rng_vs_tls -- --ignored --nocapture
+      - name: Native ARM64 first-layer unused input-gradient diagnostic
+        run: cargo test --locked --release --lib benchmark_discard_unused_input_grad -- --ignored --nocapture
+      - name: Experimental native ARM64 upper bound without unused RNG draws
+        run: cargo test --locked --release --lib benchmark_relaxed_rng_elision -- --ignored --nocapture
+
+  publish:
+    name: Publish GHCR immutable-SHA tag
+    # Never publish a PR / unmerged branch build. workflow_dispatch may be
+    # used only from the already merged big-refactor branch.
+    if: github.ref == 'refs/heads/big-refactor' && github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR using short-lived GITHUB_TOKEN
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish ARM64 image
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.benchmark
+          platforms: linux/arm64
+          # Persist intermediate stages across ephemeral runners, including
+          # the Rust dependencies and checksum-verified dataset preparation.
+          cache-from: type=gha,scope=pi5-benchmark-arm64
+          cache-to: type=gha,mode=max,scope=pi5-benchmark-arm64
+          push: true
+          tags: ghcr.io/philsupertramp/integers-benchmark:sha-${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+      - name: Report immutable digest
+        run: |
+          echo "Published ghcr.io/philsupertramp/integers-benchmark@${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Digest: ${{ steps.publish.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

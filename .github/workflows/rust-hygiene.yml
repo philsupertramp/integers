@@ -1,0 +1,35 @@
+name: Rust hygiene candidate
+
+on:
+  push:
+    branches: [issue-20-rust-hygiene]
+  pull_request:
+    branches: [big-refactor]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Compiler and target information
+        run: |
+          rustc --version
+          cargo --version
+          rustup show active-toolchain
+          rustc -vV
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Full regression suite
+        run: cargo test --locked
+      - name: All targets compile
+        run: cargo check --locked --all-targets
+      - name: Library Clippy (strict)
+        run: cargo clippy --locked --lib -- -D warnings
+      - name: All-target Clippy (strict)
+        run: cargo clippy --locked --all-targets -- -D warnings
