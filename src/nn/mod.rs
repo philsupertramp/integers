@@ -127,6 +127,14 @@ pub trait Module {
         let _ = self.backward_batch(grads);
     }
 
+    /// Experimental opt-in: omit RNG draws for unused first-layer input
+    /// gradients. This deliberately changes subsequent stochastic rounding
+    /// and MUST be checked against multi-seed held-out convergence.
+    /// Default fallback remains the conservative path for non-Linear layers.
+    fn backward_batch_discard_input_grad_relaxed_rng(&mut self, grads: &Tensor) {
+        self.backward_batch_discard_input_grad(grads);
+    }
+
     // ── Parameter management ──────────────────────────────────────────────────
 
     /// One optimiser step: `params -= lr * velocity`.
@@ -256,6 +264,42 @@ impl Sequential {
             } else {
                 g = layer.backward_batch(&g);
             }
+        }
+    }
+
+    /// Research-only policy for dense models with non-trainable inputs.
+    /// All intermediate layers still compute their full input gradients.
+    /// The first layer may omit random draws for its unused input gradients,
+    /// deliberately changing the subsequent random-number sequence.
+    pub fn backward_batch_discard_input_grad_relaxed_rng(&mut self, grads: &Tensor) {
+        self.check_integer_backend();
+        let mut g = grads.clone();
+        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            if index == 0 {
+                layer.backward_batch_discard_input_grad_relaxed_rng(&g);
+            } else {
+                g = layer.backward_batch(&g);
+            }
+        }
+    }
+
+    /// Profile the same relaxed-RNG algorithm with per-layer timers.
+    pub fn backward_batch_timed_discard_input_grad_relaxed_rng(
+        &mut self,
+        grads: &Tensor,
+        layer_ns: &mut [u128],
+    ) {
+        self.check_integer_backend();
+        assert_eq!(layer_ns.len(), self.layers.len(), "layer timing count mismatch");
+        let mut g = grads.clone();
+        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            let started = Instant::now();
+            if index == 0 {
+                layer.backward_batch_discard_input_grad_relaxed_rng(&g);
+            } else {
+                g = layer.backward_batch(&g);
+            }
+            layer_ns[index] += started.elapsed().as_nanos();
         }
     }
 
