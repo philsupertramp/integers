@@ -664,3 +664,110 @@ two epochs, batch32, lr shift7, 2-core quota. Use immutable
 post-merge image and per-seed comparison, preferably repeated
 interleaved A/B trials with temperature, clocks, throttling and
 contention measurements. Never merge PR #9 because of a benchmark.
+
+## 16. Interleaved physical Pi A/B gate (#54)
+
+### Why we are doing this
+
+The post-PR #52 and post-PR #53 sweeps used the same five MNIST seeds
+but ran at different times; they do not establish a confidence interval
+for a *hardware* speedup. For PR #53 we therefore preregister a paired,
+**single-device mirrored ABBA/BAAB experiment** using only immutable images:
+
+- A: PR #52, commit `b0ce98372e500a6b621abc0007e46ca2861fc4ab`,
+  `ghcr.io/philsupertramp/integers-benchmark@sha256:2c8f32322dcb4916c38b09f3123fb4e0043a009f094881be99d395aa33c8adf9`
+- B: PR #53, commit `cb36399f7bbacb6239490a0ff8fad50c06347c1f`,
+  `ghcr.io/philsupertramp/integers-benchmark@sha256:1345a53c6976736524894cf7bb07f7ff5cb8392e8afdcb14a374b4db8a699bcc`
+
+Both images contain the **same release binary compiler and benchmark runner**
+and the same pinned MNIST dataset manifest
+`8042b6e40973be57d479b8eb3673f39b89f1cdb11e05db3ab74fecd814023a5d`.
+Keep 8192 training / 1042 validation, batch32, two epochs, lr shift7,
+2-CPU quota and 3 GiB memory limit. Do **not** evaluate official test data.
+
+### Execute on a machine with `kubectl` access to the actual Pi cluster
+
+Run from a checkout containing `experiments/pi5_interleaved_ab.py`
+(e.g. this PR's branch). No image build, privileged Pod, or namespace
+mutation beyond creating new benchmark Jobs is required. Use a **fresh**
+short lowercase run ID for each experiment; existing Jobs/results are
+never deleted, reused without validation, or overwritten.
+
+```sh
+python3 experiments/pi5_interleaved_ab.py plan \
+  --run-id ab52-53-01 --namespace default --dir pi5-results/ab52-53-01
+
+# Inspect the immutable 20-trial plan before running.
+cat pi5-results/ab52-53-01/plan.json
+
+# Runs the serial Jobs, waits, validates each archived report and prints
+# comparison results. Repeat this exact command after an interruption:
+python3 experiments/pi5_interleaved_ab.py run \
+  --dir pi5-results/ab52-53-01
+
+# Offline recomputation (no cluster access):
+python3 experiments/pi5_interleaved_ab.py analyze \
+  --dir pi5-results/ab52-53-01
+```
+
+The tool generates exactly twenty independent one-seed Jobs:
+`ABBA` for seeds 1337, 2027, 42069, and `BAAB` for 2026, 4242.
+Each Job runs **both** integer and independent FP32 comparisons in the
+existing order, and finishes before the next is created.
+The tool preserves per-trial `seed-*.json`, `seed-*.log`, `summary.*`
+and `trial.json` including Job/Pod/node UIDs. Source SHA, image digest,
+cross-arm hardware, dataset, model configuration and numerical validity
+are validated before a complete paired report is written. The 20 Jobs
+remain in K3s so failure investigation is possible; no automatic cleanup.
+
+On any failure, the CLI exits nonzero. The already verified trials
+are retained. Fix the underlying cause or allocate a new run ID;
+never change the plan after creation. A repeat `run` checks existing
+Kubernetes Jobs and validated local artifacts before proceeding.
+If the cluster is unavailable, `plan` and `analyze` still work.
+
+### Analysis and preregistered acceptance
+
+For each seed, average the two A and two B observations **within that
+seed**. Across the five seed-block ratios B/A, report geometric mean and
+the two-sided Student-t 95% confidence interval for mean log(B/A),
+df=4. This estimates a version change while balancing linear drift
+within each block; it is **not** a guarantee against nonlinear DVFS,
+scheduler noise or environmental confounding.
+
+Performance gate passes only if:
+
+- Geometric mean integer training B/A <=0.95 (**>=5%** improvement)
+  **and** 95% CI upper bound <1.00;
+- Mean integer final validation accuracy B−A >=−1.0 percentage point,
+  and no individual seed loses more than 3.0 percentage points;
+- No nonfinite/extreme model outputs or nonfinite FP32 parameters,
+  no test-set access, consistent pinning and exactly one physical Pi node;
+- FP32 negative-control training drift <=5% in magnitude; no
+  seed's integer peak process RSS rises by more than 10%.
+
+A failure is labeled **inconclusive or regressed**, not silently converted
+into an optimization success. The report also includes per-phase
+forward/backward/first Linear, training and FP32 drift. Accuracy is
+allowed to differ per seed if the overall quality gate is satisfied.
+
+The immutable old images record CPU temperature at process boundaries;
+they do **not** record CPU frequency, actual throttling or energy.
+The new analyzer marks those fields `not_measured` rather than
+inventing data. If the negative control or temperature reveals drift,
+repeat with another run ID and investigate contention; obtain cgroup
+throttling and continuous CPU-frequency telemetry in a **separate**
+monitoring change before making claims about energy efficiency.
+These five seed-blocks are a focused engineering gate, not a
+large-scale proof of cross-device performance generalization.
+
+### Keep tooling CI cheap
+
+```sh
+python3 -m unittest discover -s tests -p 'test_pi5_interleaved_ab.py' -v
+python3 -m py_compile experiments/pi5_interleaved_ab.py
+```
+
+The dedicated seed-sweep tooling workflow checks these offline.
+A real physical Pi result must be supplied from the completed cluster
+run. It cannot be inferred from GitHub-hosted ARM64 CI.
