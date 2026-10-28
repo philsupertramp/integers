@@ -1,5 +1,6 @@
 """Offline validity and quality-gate tests for research RNG-elision evaluation."""
 import copy
+import hashlib
 import json
 import sys
 import tempfile
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 import evaluate_rng_elision as eva
 
 
-def sample(seed, relaxed, accuracy=79):
+def sample(seed, accuracy=79):
     # 1,042 examples, 100 per class except class 0 with 142 examples.
     mat = []
     for j in range(10):
@@ -40,7 +41,7 @@ def sample(seed, relaxed, accuracy=79):
         } for epoch in (1, 2)]
     return {
         "schema": 1, "dataset": "mnist", "backend": "integer",
-        "seed": seed, "experimental_skip_unused_rng": relaxed,
+        "seed": seed,
         "validation_only": True, "test_evaluated": False,
         "test_size": 0, "test_accuracy_pct": None, "epochs": 2,
         "split_seed": 1, "architecture_kind": "dense_mlp",
@@ -56,8 +57,8 @@ def sample(seed, relaxed, accuracy=79):
 def populated(root):
     root.mkdir(parents=True)
     for seed in eva.SEEDS:
-        for arm, relaxed in (("a", False), ("b", True)):
-            (root / f"seed-{seed}-{arm}.json").write_text(json.dumps(sample(seed, relaxed)))
+        for arm in ("a", "b"):
+            (root / f"seed-{seed}-{arm}.json").write_text(json.dumps(sample(seed)))
 
 
 class ExperimentalQualityTests(unittest.TestCase):
@@ -94,13 +95,13 @@ class ExperimentalQualityTests(unittest.TestCase):
             self.assertEqual(result["gate"]["status"], "regressed")
             self.assertLess(result["final_validation_change_pp"]["worst"], -3)
 
-    def test_wrong_policy_or_test_access_fails_closed(self):
+    def test_wrong_backend_or_test_access_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "quality"
             populated(root)
             path = root / "seed-1337-b.json"
             original = json.loads(path.read_text())
-            for field, value in (("experimental_skip_unused_rng", False),
+            for field, value in (("backend", "fp32"),
                                  ("test_evaluated", True),
                                  ("test_size", 10000)):
                 broken = copy.deepcopy(original)
@@ -111,6 +112,23 @@ class ExperimentalQualityTests(unittest.TestCase):
             path.write_text(json.dumps(original))
             path.unlink()
             with self.assertRaises(FileNotFoundError):
+                eva.analyze(root)
+
+    def test_artifact_provenance_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "quality"
+            populated(root)
+            checksums = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                         for p in root.glob("seed-*.json")}
+            (root / "provenance.json").write_text(json.dumps({
+                "images": {"A": "baseline-digest", "B": "candidate-digest"},
+                "sha256_by_file": checksums,
+            }))
+            result = eva.analyze(root)
+            self.assertEqual(result["image_provenance"]["B"], "candidate-digest")
+            victim = root / "seed-1337-b.json"
+            victim.write_bytes(victim.read_bytes() + b" ")
+            with self.assertRaisesRegex(ValueError, "checksum"):
                 eva.analyze(root)
 
     def test_inconsistent_accuracy_or_protocol_fails_closed(self):
