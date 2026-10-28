@@ -116,6 +116,17 @@ pub trait Module {
         grads.iter().map(|g| self.backward(&g)).collect()
     }
 
+    /// Training-only backward when the caller does not need input gradients.
+    /// The default still executes the complete backward pass to preserve
+    /// gradient accumulation and stochastic-rounding RNG state.
+    ///
+    /// A specialized implementation must produce identical parameter
+    /// gradients, updates, errors, and subsequent RNG draws. Never use this
+    /// method if the layer's input gradients are required.
+    fn backward_batch_discard_input_grad(&mut self, grads: &Tensor) {
+        let _ = self.backward_batch(grads);
+    }
+
     // ── Parameter management ──────────────────────────────────────────────────
 
     /// One optimiser step: `params -= lr * velocity`.
@@ -232,6 +243,22 @@ impl Sequential {
         g
     }
 
+    /// Backpropagate for a training step that never consumes model-input
+    /// gradients. Only the first layer can safely omit them: all subsequent
+    /// layer input gradients are needed for the preceding layer's parameters.
+    /// Explicit opt-in keeps the original backward_batch API unchanged.
+    pub fn backward_batch_discard_input_grad(&mut self, grads: &Tensor) {
+        self.check_integer_backend();
+        let mut g = grads.clone();
+        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            if index == 0 {
+                layer.backward_batch_discard_input_grad(&g);
+            } else {
+                g = layer.backward_batch(&g);
+            }
+        }
+    }
+
     /// Profile individual backward layers, recording time in forward layer
     /// order. This method calls every layer exactly once and in the same
     /// sequence as backward_batch; no RNG draws are added, skipped or moved.
@@ -250,6 +277,32 @@ impl Sequential {
             layer_ns[index] += started.elapsed().as_nanos();
         }
         g
+    }
+
+    /// Same timing attribution as backward_batch_timed, but do not compute
+    /// the model's unconsumed input gradients. Profile the first layer's
+    /// specialized work rather than a full-backward surrogate.
+    pub fn backward_batch_timed_discard_input_grad(
+        &mut self,
+        grads: &Tensor,
+        layer_ns: &mut [u128],
+    ) {
+        self.check_integer_backend();
+        assert_eq!(
+            layer_ns.len(),
+            self.layers.len(),
+            "layer timing count mismatch"
+        );
+        let mut g = grads.clone();
+        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            let started = Instant::now();
+            if index == 0 {
+                layer.backward_batch_discard_input_grad(&g);
+            } else {
+                g = layer.backward_batch(&g);
+            }
+            layer_ns[index] += started.elapsed().as_nanos();
+        }
     }
 
     pub fn update(&mut self, lr_shift: u32) {
