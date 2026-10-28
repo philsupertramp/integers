@@ -276,17 +276,6 @@ impl Linear {
             .checked_add(1)
             .expect("Linear: sample counter overflow");
     }
-    #[inline]
-    fn backward_one_discard_input_grad(
-        &mut self,
-        grad_output: &TensorView,
-        input: &TensorView,
-        output: &TensorView,
-        clipped: &[bool],
-    ) {
-        self.backward_one_discard_input_grad_impl::<false>(grad_output, input, output, clipped);
-    }
-
     #[cfg(test)]
     #[inline]
     fn backward_one_discard_input_grad_preserve_rng(
