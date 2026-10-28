@@ -156,9 +156,15 @@ def node_identity(kubectl, namespace, job, uid):
     labels = node_info["metadata"].get("labels", {})
     if labels.get("benchmark.integers.dev/pi5") != "true":
         raise ValueError("Pod ran on node without explicit Pi5 label")
+    states = pod.get("status", {}).get("containerStatuses", [])
+    terminated = (states[0].get("state", {}).get("terminated", {})
+                  if states else {})
     return {"node": node, "node_uid": node_info["metadata"]["uid"],
             "pod": pod["metadata"]["name"], "pod_uid": pod["metadata"]["uid"],
-            "job_uid": uid}
+            "job_uid": uid,
+            "pod_started_utc": pod.get("status", {}).get("startTime"),
+            "container_started_utc": terminated.get("startedAt"),
+            "container_finished_utc": terminated.get("finishedAt")}
 
 
 def collect_one(root, plan, trial, kubectl, live):
@@ -183,7 +189,10 @@ def collect_one(root, plan, trial, kubectl, live):
                          live["metadata"]["uid"])
     (path / "trial.json").write_text(json.dumps(
         {**node, "job": trial["job"], "arm": trial["arm"],
-         "seed": trial["seed"], "collected_at_utc": utc_now()},
+         "seed": trial["seed"],
+         "job_started_utc": live.get("status", {}).get("startTime"),
+         "job_completed_utc": live.get("status", {}).get("completionTime"),
+         "collected_at_utc": utc_now()},
         indent=2, sort_keys=True) + "\n")
 
 
@@ -230,7 +239,10 @@ def run_plan(root, kubectl="kubectl", timeout_seconds=900):
                                  live["metadata"]["uid"])
             (path / "trial.json").write_text(json.dumps(
                 {**node, "job": name, "arm": trial["arm"],
-                 "seed": trial["seed"], "collected_at_utc": utc_now()},
+                 "seed": trial["seed"],
+         "job_started_utc": live.get("status", {}).get("startTime"),
+         "job_completed_utc": live.get("status", {}).get("completionTime"),
+         "collected_at_utc": utc_now()},
                 indent=2, sort_keys=True) + "\n")
         else:
             collect_one(root, plan, trial, kubectl, live)
