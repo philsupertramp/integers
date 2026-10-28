@@ -305,22 +305,37 @@ impl Linear {
     }
 
     fn backward_batch_discard_input_grad_impl<const PRESERVE_RNG: bool>(&mut self, grads: &Tensor) {
-        let n = self.input_batch_cache.shape.first().copied()
+        let n = self
+            .input_batch_cache
+            .shape
+            .first()
+            .copied()
             .expect("Linear: missing batch forward cache");
         assert!(grads.shape.len() >= 2, "Linear: expected batched gradients");
         assert_eq!(grads.shape[0], n, "Linear: gradient batch size mismatch");
         assert_eq!(
             grads.shape[1..].iter().product::<usize>(),
-            self.out_features, "Linear: gradient feature shape mismatch"
+            self.out_features,
+            "Linear: gradient feature shape mismatch"
         );
-        assert_eq!(grads.data.len(), n * self.out_features, "Linear: gradient buffer mismatch");
-        assert_eq!(self.clip_batch_cache.len(), n, "Linear: missing batch saturation cache");
+        assert_eq!(
+            grads.data.len(),
+            n * self.out_features,
+            "Linear: gradient buffer mismatch"
+        );
+        assert_eq!(
+            self.clip_batch_cache.len(),
+            n,
+            "Linear: missing batch saturation cache"
+        );
 
         let inputs = std::mem::take(&mut self.input_batch_cache);
         let outputs = std::mem::take(&mut self.output_batch_cache);
         let clips = std::mem::take(&mut self.clip_batch_cache);
         for ((g, (inp, out)), clipped) in grads
-            .iter().zip(inputs.iter().zip(outputs.iter())).zip(clips.iter())
+            .iter()
+            .zip(inputs.iter().zip(outputs.iter()))
+            .zip(clips.iter())
         {
             self.backward_one_discard_input_grad_impl::<PRESERVE_RNG>(&g, &inp, &out, clipped);
         }
@@ -1289,13 +1304,13 @@ mod experimental_unused_rng_tests {
                     .with_momentum(1);
                 let x = Tensor::from_vec(
                     (0..samples * 5)
-                        .map(|i| Dyadic::new(if i % 4 == 0 { 0 } else { i as i32 - 80 }, 7))
+                        .map(|i| Dyadic::new(if i % 4 == 0 { 0 } else { i as i32 - 80 }, shift))
                         .collect(),
                     vec![samples, 5],
                 );
                 let gradients = Tensor::from_vec(
                     (0..samples * 3)
-                        .map(|i| Dyadic::new(i as i32 % 17 - 8, 7))
+                        .map(|i| Dyadic::new(i as i32 % 17 - 8, shift))
                         .collect(),
                     vec![samples, 3],
                 );
