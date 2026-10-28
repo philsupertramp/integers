@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Seed-matched numerical convergence gate for experimental first-layer RNG elision.
 
-Run on a *single* benchmark image in a hosted ARM64 CI runner to compare
-training behavior, not Pi performance. Independently evaluate per-epoch
+Run *baseline and candidate immutable images* in a hosted ARM64 CI runner
+to compare training behavior, not Pi performance. Independently evaluate per-epoch
 validation accuracy and class recall with no official test set access.
 """
 import argparse
+import hashlib
 import json
 import statistics
 import subprocess
@@ -16,10 +17,9 @@ MIN_MEAN_CHANGE_PP = -1.0
 MIN_WORST_SEED_CHANGE_PP = -3.0
 
 
-def verify_record(value, seed, relaxed):
+def verify_record(value, seed):
     if (value.get("schema") != 1 or value.get("backend") != "integer"
             or value.get("seed") != seed
-            or value.get("experimental_skip_unused_rng") is not relaxed
             or value.get("validation_only") is not True
             or value.get("test_evaluated") is not False
             or value.get("test_size") != 0
@@ -30,6 +30,8 @@ def verify_record(value, seed, relaxed):
     curve = value.get("learning_curve")
     if not isinstance(curve, list) or not curve:
         raise ValueError("missing learning curve")
+    if len(curve) != value.get("epochs"):
+        raise ValueError("missing training epochs")
     for epoch_num, epoch in enumerate(curve, 1):
         if epoch.get("epoch") != epoch_num:
             raise ValueError("missing / out-of-order epoch")
@@ -48,10 +50,15 @@ def verify_record(value, seed, relaxed):
             raise ValueError("validation accuracy and confusion disagree")
         expected_recall = [confusion[i][i] / sum(confusion[i])
                            if sum(confusion[i]) else None for i in range(10)]
-        if any((r is None) != (e is None) or
-               (r is not None and abs(r - e) > .000001)
-               for r, e in zip(epoch["validation_per_class_recall"], expected_recall)):
+        recalls = epoch.get("validation_per_class_recall")
+        if (not isinstance(recalls, list) or len(recalls) != 10 or
+                any((r is None) != (e is None) or
+                    (r is not None and abs(r - e) > .000001)
+                    for r, e in zip(recalls, expected_recall))):
             raise ValueError("per-class recall disagrees with confusion")
+        predictions = epoch.get("validation_predictions")
+        if predictions != [sum(confusion[i][j] for i in range(10)) for j in range(10)]:
+            raise ValueError("predictions disagree with confusion")
         if epoch.get("training_samples") != value.get("train_size"):
             raise ValueError("training sample count mismatch")
     return value
@@ -60,11 +67,23 @@ def verify_record(value, seed, relaxed):
 def analyze(root, seeds=SEEDS):
     compared = []
     contract = None
+    provenance_file = root / "provenance.json"
+    provenance = json.loads(provenance_file.read_text()) if provenance_file.exists() else None
+    if provenance is not None:
+        images = provenance.get("images", {})
+        if not all(images.get(k) for k in ("A", "B")) or images["A"] == images["B"]:
+            raise ValueError("A/B must use distinct recorded images")
     for seed in seeds:
-        left = verify_record(json.loads((root / f"seed-{seed}-a.json").read_text()),
-                             seed, False)
-        right = verify_record(json.loads((root / f"seed-{seed}-b.json").read_text()),
-                              seed, True)
+        records = []
+        for arm in "ab":
+            path = root / f"seed-{seed}-{arm}.json"
+            raw = path.read_bytes()
+            if provenance is not None:
+                expected = provenance.get("sha256_by_file", {}).get(path.name)
+                if expected != hashlib.sha256(raw).hexdigest():
+                    raise ValueError("A/B result artifact differs from recorded checksum")
+            records.append(verify_record(json.loads(raw), seed))
+        left, right = records
         immutable = ("dataset", "split_seed", "architecture", "train_size",
                      "validation_size", "epochs", "batch_size", "lr_shift",
                      "quantization_shift", "momentum_shift", "output_bits",
@@ -113,11 +132,12 @@ def analyze(root, seeds=SEEDS):
             "status": ("pass" if statistics.mean(diffs) >= MIN_MEAN_CHANGE_PP
                        and min(diffs) >= MIN_WORST_SEED_CHANGE_PP else "regressed"),
         },
-        "note": "Same binary / hosted ARM64 quality test, not physical Pi performance.",
+        "image_provenance": provenance["images"] if provenance else "unverified_offline_fixture",
+        "note": "Two-image quality comparison, not physical Pi performance.",
     }
     (root / "quality.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     lines = ["# Experimental no-draw RNG: matched-seed convergence", "",
-             "No official MNIST test data evaluated. Same binary; integer backend only.",
+             "No official MNIST test data evaluated. Distinct baseline/candidate binaries; integer backend only.",
              "", "| Seed | A final validation | B final validation | Change |",
              "| --- | ---: | ---: | ---: |"]
     for row in compared:
@@ -133,16 +153,20 @@ def analyze(root, seeds=SEEDS):
     return result
 
 
-def run(image, root, docker="docker", train_size=8192, validation_size=1042,
-        epochs=2):
-    if not image or not image.isascii() or any(ch.isspace() for ch in image):
-        raise ValueError("explicit single candidate image required")
+def run(image_a, image_b, root, docker="docker", train_size=8192,
+        validation_size=1042, epochs=2):
+    if image_a == image_b:
+        raise ValueError("baseline and candidate images must differ")
+    for image in (image_a, image_b):
+        if not image or not image.isascii() or any(ch.isspace() for ch in image):
+            raise ValueError("explicit, distinct baseline/candidate images required")
     if root.exists() and list(root.iterdir()):
         raise FileExistsError("refusing to overwrite existing convergence data")
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o777)  # Docker image uses non-root benchmark user.
+    checksums = {}
     for seed in SEEDS:
-        for arm in "ab":
+        for arm, image in (("a", image_a), ("b", image_b)):
             output = root / f"seed-{seed}-{arm}.json"
             command = [
                 docker, "run", "--rm", "--network", "none", "--read-only",
@@ -158,14 +182,16 @@ def run(image, root, docker="docker", train_size=8192, validation_size=1042,
                 "--validation-limit", str(validation_size),
                 "--report", f"/results/{output.name}",
             ]
-            if arm == "b":
-                command.append("--experimental-skip-unused-rng")
-            print(f"seed {seed} policy {arm}: running", flush=True)
+            print(f"seed {seed} image {arm}: running", flush=True)
             subprocess.run(command, check=True)
-            verify_record(json.loads(output.read_text()), seed, arm == "b")
+            verify_record(json.loads(output.read_text()), seed)
+            checksums[output.name] = hashlib.sha256(output.read_bytes()).hexdigest()
     (root / "provenance.json").write_text(json.dumps(
-        {"image": image, "mode": "same-binary arm64 numerical-quality test",
-         "seeds": SEEDS, "source": "Docker benchmark release image"}, indent=2) + "\n")
+        {"images": {"A": image_a, "B": image_b},
+         "sha256_by_file": checksums,
+         "mode": "two-image arm64 numerical-quality comparison",
+         "seeds": SEEDS, "source": "Docker benchmark release images"},
+        indent=2) + "\n")
     return analyze(root)
 
 
@@ -173,7 +199,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     run_cmd = sub.add_parser("run")
-    run_cmd.add_argument("--image", required=True)
+    run_cmd.add_argument("--image-a", required=True)
+    run_cmd.add_argument("--image-b", required=True)
     run_cmd.add_argument("--out-dir", required=True, type=Path)
     run_cmd.add_argument("--docker", default="docker")
     run_cmd.add_argument("--train-size", type=int, default=8192)
@@ -183,7 +210,7 @@ def main(argv=None):
     analyze_cmd.add_argument("--out-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        result = (run(args.image, args.out_dir, args.docker,
+        result = (run(args.image_a, args.image_b, args.out_dir, args.docker,
                       args.train_size, args.validation_size, args.epochs)
                   if args.command == "run" else analyze(args.out_dir))
         print((args.out_dir / "quality.md").read_text())
