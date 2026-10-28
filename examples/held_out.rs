@@ -65,6 +65,7 @@ struct Config {
     validation_only: bool,
     final_test: bool,
     profile_training: bool,
+    experimental_skip_unused_rng: bool,
     split_seed: u64,
 }
 impl Config {
@@ -88,6 +89,7 @@ impl Config {
             validation_only: false,
             final_test: false,
             profile_training: false,
+            experimental_skip_unused_rng: false,
             split_seed: SPLIT_SEED,
         };
         let mut i = 0;
@@ -121,6 +123,11 @@ impl Config {
             }
             if key == "--profile-training" {
                 cfg.profile_training = true;
+                i += 1;
+                continue;
+            }
+            if key == "--experimental-skip-unused-rng" {
+                cfg.experimental_skip_unused_rng = true;
                 i += 1;
                 continue;
             }
@@ -207,6 +214,16 @@ impl Config {
             !cfg.profile_training
                 || (cfg.architecture == Architecture::Dense && cfg.validation_only),
             "training profiling requires dense --validation-only mode"
+        );
+        assert!(
+            !cfg.experimental_skip_unused_rng
+                || (cfg.validation_only
+                    && cfg.architecture == Architecture::Dense
+                    && cfg.backend == Backend::Integer
+                    && !cfg.final_test
+                    && !cfg.ci_sample
+                    && !cfg.smoke),
+            "experimental RNG elision requires dense integer --validation-only mode"
         );
         assert!(
             !cfg.validation_only || !cfg.ci_sample,
@@ -897,10 +914,17 @@ fn main() {
                                 .collect()
                         });
                         let started = Instant::now();
-                        integer.backward_batch_timed_discard_input_grad(
-                            &gradient,
-                            &mut profile.backward_layer_ns,
-                        );
+                        if cfg.experimental_skip_unused_rng {
+                            integer.backward_batch_timed_discard_input_grad_relaxed_rng(
+                                &gradient,
+                                &mut profile.backward_layer_ns,
+                            );
+                        } else {
+                            integer.backward_batch_timed_discard_input_grad(
+                                &gradient,
+                                &mut profile.backward_layer_ns,
+                            );
+                        }
                         profile.backward_ns += started.elapsed().as_nanos();
                         timed(&mut profile.update_ns, || integer.update(cfg.lr_shift));
                     } else {
@@ -919,7 +943,11 @@ fn main() {
                                 Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec())
                             })
                             .collect();
-                        integer.backward_batch_discard_input_grad(&gradient);
+                        if cfg.experimental_skip_unused_rng {
+                            integer.backward_batch_discard_input_grad_relaxed_rng(&gradient);
+                        } else {
+                            integer.backward_batch_discard_input_grad(&gradient);
+                        }
                         integer.update(cfg.lr_shift);
                     }
                 }
@@ -1096,7 +1124,7 @@ fn main() {
         format!("{:.6}", pct(n, data.test.len()))
     });
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"experimental_skip_unused_rng\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
         cfg.ci_sample,
         cfg.seed,
@@ -1119,6 +1147,7 @@ fn main() {
         data.test.len(),
         cfg.validation_only,
         cfg.profile_training,
+        cfg.experimental_skip_unused_rng,
         test_correct.is_some(),
         test_correct_json,
         test_accuracy_json,
