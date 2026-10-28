@@ -279,6 +279,8 @@ def analyze(root):
     all_nodes = set()
     source_commits = {arm: set() for arm in "AB"}
     temperatures = {"A": [], "B": []}
+    previous_finish = None
+    seen_jobs, seen_pods = set(), set()
     for trial in plan["trials"]:
         path = trial_path(root, trial)
         if not (path / "trial.json").exists():
@@ -290,6 +292,20 @@ def analyze(root):
             raise ValueError("trial metadata does not match immutable plan")
         if not meta.get("pod_uid") or not meta.get("job_uid") or not meta.get("node_uid"):
             raise ValueError("trial lacks verified Kubernetes identifiers")
+        if meta["job_uid"] in seen_jobs or meta["pod_uid"] in seen_pods:
+            raise ValueError("trial reuses a prior Kubernetes Job or Pod")
+        seen_jobs.add(meta["job_uid"])
+        seen_pods.add(meta["pod_uid"])
+        try:
+            started = dt.datetime.fromisoformat(meta["job_started_utc"].replace("Z", "+00:00"))
+            finished = dt.datetime.fromisoformat(meta["job_completed_utc"].replace("Z", "+00:00"))
+        except (AttributeError, KeyError, ValueError) as exc:
+            raise ValueError("missing or malformed Kubernetes Job timestamps") from exc
+        if (started.utcoffset() is None or finished.utcoffset() is None
+                or started >= finished
+                or (previous_finish is not None and started < previous_finish)):
+            raise ValueError("observed Job execution overlapped or violated planned ABBA order")
+        previous_finish = finished
         all_nodes.add((meta["node"], meta["node_uid"]))
         cfg = protocol(desired_job(plan, trial))
         raw = (path / f"seed-{trial['seed']}.json").read_bytes()
