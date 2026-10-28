@@ -771,3 +771,92 @@ python3 -m py_compile experiments/pi5_interleaved_ab.py
 The dedicated seed-sweep tooling workflow checks these offline.
 A real physical Pi result must be supplied from the completed cluster
 run. It cannot be inferred from GitHub-hosted ARM64 CI.
+
+## 17. Default first-layer RNG elision: numerical-quality and Pi performance gates (#56)
+
+The model-input gradient is not trainable, and the caller already discards
+it using `Sequential::backward_batch_discard_input_grad`. For the first
+`Linear`, this method now **automatically** skips the corresponding
+multiplications *and* their unused random draws. There is no feature
+flag or new public algorithm selector. The ordinary
+`backward_batch` and single-example `backward` methods continue
+to compute and return all requested input gradients.
+
+This does change the sequence of random draws used in later
+integer stochastic rounding and may produce different fixed-seed
+learning trajectories. This is an intentional change in training
+implementation, **not** a relaxation of correctness, gradient
+formulas, integer-only computation or held-out evaluation.
+
+### Merge requirements
+
+1. Rust correctness tests retain the prior RNG-preserving implementation
+   **only as a test oracle** and establish expected first-sample parameter
+   gradient and dropped-draw behavior. Standard public full backward
+   remains unchanged.
+2. A native ARM64 **candidate PR image** is compared to the immutable
+   merged PR #53 image for matching MNIST five-seed training:
+   seeds `1337,2026,2027,4242,42069`, 8192/1042,
+   2 epochs, batch32, lr shift7, both validation-only,
+   same dataset manifest; neither image accesses official test data.
+3. Preregistered **numerical** gate: across seed-matched pairs,
+   average final validation B−A ≥−1.0 pp, no seed worse
+   than −3.0 pp, no nonfinite/extreme outputs. Retain per-epoch
+   training/validation curves and per-class recall, confusion
+   matrices and prediction counts. **Exact fixed-seed parity is
+   not required**.
+4. After candidate review, publish a new image only through the
+   existing merged-`big-refactor` SHA workflow; compare it on the
+   *real Pi 5* with the merged PR #53 image using §16's 20-job
+   interleaved ABBA/BAAB protocol. Performance gate: ≥5% faster
+   point estimate and paired 95% confidence interval upper B/A <1;
+   validation and FP32 control must remain within the registered
+   thresholds. No Pi speed claims from hosted ARM64.
+5. PR #9 remains open, not merged. No project-wide performance
+   claims or default release claims until those measurements pass.
+
+### Quality test on a machine with both ARM64 images available
+
+```sh
+python3 -m unittest discover -s tests -p 'test_rng_elision_quality.py' -v
+
+# Image A is the merged PR #53 conservative implementation.
+# Image B is the local/native ARM64 candidate built by this PR.
+docker pull ghcr.io/philsupertramp/integers-benchmark@sha256:1345a53c6976736524894cf7bb07f7ff5cb8392e8afdcb14a374b4db8a699bcc
+python3 experiments/evaluate_rng_elision.py run \
+  --image-a ghcr.io/philsupertramp/integers-benchmark@sha256:1345a53c6976736524894cf7bb07f7ff5cb8392e8afdcb14a374b4db8a699bcc \
+  --image-b integers-pi5:ci \
+  --out-dir pi5-results/no-draw-quality
+cat pi5-results/no-draw-quality/quality.md
+```
+
+The evaluator retains individual `seed-{seed}-{a,b}.json`
+records, SHA-256 checksums in `provenance.json`, per-epoch
+class-level diagnostics in `quality.json`, and a plain-language
+`quality.md`. It exits nonzero if the quality criteria fail.
+The PR's ARM64 CI runs this experiment automatically, but
+its host is **not** a Raspberry Pi.
+
+### New physical Pi A/B run after the candidate has merged
+
+The §16 runner now permits explicit `--commit-a` and `--commit-b`
+for any two immutable benchmark image digests. Both full source
+SHA values must match those embedded by the benchmark image
+and the collector verifies them before accepting results:
+
+```sh
+python3 experiments/pi5_interleaved_ab.py plan \
+  --run-id default-rng-01 \
+  --dir pi5-results/default-rng-01 \
+  --image-a ghcr.io/philsupertramp/integers-benchmark@sha256:1345a53c6976736524894cf7bb07f7ff5cb8392e8afdcb14a374b4db8a699bcc \
+  --commit-a cb36399f7bbacb6239490a0ff8fad50c06347c1f \
+  --image-b GHCR_IMMUTABLE_CANDIDATE_DIGEST \
+  --commit-b MERGED_BIG_REFACTOR_COMMIT_SHA
+
+python3 experiments/pi5_interleaved_ab.py run \
+  --dir pi5-results/default-rng-01
+```
+
+Replace the two uppercase placeholders with the **actual**
+published digest and full commit SHA after merge, not floating tags.
+Results are stored and verified exactly as in §16.
