@@ -117,12 +117,12 @@ pub trait Module {
     }
 
     /// Training-only backward when the caller does not need input gradients.
-    /// The default still executes the complete backward pass to preserve
-    /// gradient accumulation and stochastic-rounding RNG state.
+    /// The default computes full backward. A specialized module may omit
+    /// computations and stochastic RNG draws **only** for discarded input
+    /// gradients. This can change subsequent rounding trajectories; the
+    /// training-quality gate must validate numerical behavior.
     ///
-    /// A specialized implementation must produce identical parameter
-    /// gradients, updates, errors, and subsequent RNG draws. Never use this
-    /// method if the layer's input gradients are required.
+    /// Never use this method if the layer's input gradients are required.
     fn backward_batch_discard_input_grad(&mut self, grads: &Tensor) {
         let _ = self.backward_batch(grads);
     }
@@ -246,7 +246,7 @@ impl Sequential {
     /// Backpropagate for a training step that never consumes model-input
     /// gradients. Only the first layer can safely omit them: all subsequent
     /// layer input gradients are needed for the preceding layer's parameters.
-    /// Explicit opt-in keeps the original backward_batch API unchanged.
+    /// The full-gradient backward_batch API is unchanged.
     pub fn backward_batch_discard_input_grad(&mut self, grads: &Tensor) {
         self.check_integer_backend();
         let mut g = grads.clone();
@@ -261,7 +261,7 @@ impl Sequential {
 
     /// Profile individual backward layers, recording time in forward layer
     /// order. This method calls every layer exactly once and in the same
-    /// sequence as backward_batch; no RNG draws are added, skipped or moved.
+    /// sequence as backward_batch; no RNG draws are added or moved.
     /// Stopwatch overhead means these figures are diagnostic, not cycle counts.
     pub fn backward_batch_timed(&mut self, grads: &Tensor, layer_ns: &mut [u128]) -> Tensor {
         self.check_integer_backend();
