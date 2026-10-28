@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 from collect_pi5_indexed import parse_seeds
+from pi5_benchmark import extract_result_archive
 from pi5_seed_sweep import (
     DEFAULT_SEEDS, DIGEST, MACHINE_FIELDS, PHASES, SAME_ACROSS_SEEDS,
     collect_sweep, kubectl_json, new_job, phase_totals, protocol, valid_name,
@@ -165,13 +166,15 @@ def collect_one(root, plan, trial, kubectl, live):
     cfg = protocol(desired_job(plan, trial))
     if path.exists():
         raw = (path / f"seed-{trial['seed']}.json").read_bytes()
+        if extract_result_archive((path / f"seed-{trial['seed']}.log").read_text()) != raw:
+            raise ValueError("local archived JSON differs from verified log envelope")
         verify_report(raw, trial["seed"], 0, cfg)
         meta = json.loads((path / "trial.json").read_text())
         if any(meta.get(k) != expected for k, expected in {
             "job": trial["job"], "arm": trial["arm"],
-            "seed": trial["seed"], "node": meta.get("node"),
-            "job_uid": live["metadata"]["uid"],
-        }.items()):
+            "seed": trial["seed"], "job_uid": live["metadata"]["uid"],
+        }.items()) or any(not meta.get(k) for k in (
+            "node", "node_uid", "pod", "pod_uid")):
             raise ValueError("existing local trial metadata mismatch")
         return
     # collect_sweep stages and atomically publishes its verified archives.
@@ -277,12 +280,18 @@ def analyze(root):
             raise ValueError("trial lacks verified Kubernetes identifiers")
         all_nodes.add((meta["node"], meta["node_uid"]))
         cfg = protocol(desired_job(plan, trial))
-        report = verify_report(
-            (path / f"seed-{trial['seed']}.json").read_bytes(),
-            trial["seed"], 0, cfg)
+        raw = (path / f"seed-{trial['seed']}.json").read_bytes()
+        if extract_result_archive((path / f"seed-{trial['seed']}.log").read_text()) != raw:
+            raise ValueError("local archived JSON differs from verified log envelope")
+        report = verify_report(raw, trial["seed"], 0, cfg)
         if report["dataset_manifest_sha256"] != plan["dataset_manifest_sha256"]:
             raise ValueError("wrong pinned dataset manifest")
         for run in report["runs"]:
+            machine = run["machine"]
+            if machine.get("cpu_limit") != "200000 100000":
+                raise ValueError("unexpected actual 2-CPU cgroup quota")
+            if machine.get("memory_limit_bytes") != 3221225472:
+                raise ValueError("unexpected actual 3 GiB cgroup limit")
             source_commits[trial["arm"]].add(run.get("git_commit_sha"))
             for epoch in run["learning_curve"]:
                 if epoch.get("nonfinite_outputs") != 0 or epoch.get("extreme_outputs") != 0:
