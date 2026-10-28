@@ -554,3 +554,50 @@ same-scale-accumulation change). Pin image digest, dataset manifest and CPU
 settings; capture thermal and clock conditions where possible. Run repeated,
 interleaved A/B comparisons to distinguish optimization from contention and
 thermal drift. Do not merge PR #9 on the basis of this experiment.
+
+
+## 14. Scoped RNG in Linear forward — paired Pi benchmark protocol (#47)
+
+The next portable optimization extends the existing `with_rng_state` lease
+from `Linear::backward_one` to `Linear::forward_one`.
+Each sample's original output-major / input-minor traversal stays unchanged,
+including calls for zero-mantissa operands. `mul_with_rng` shares the
+exact stochastic dyadic rounding logic; only RNG state acquisition moves
+outside the repeated inner product loop. `add` aligns to the finer
+exponent without consuming RNG; `requantize(acc, acc.s, ...)`
+does not change the exponent and also cannot draw RNG. Do not nest a
+thread-local RNG call inside the new scoped closure.
+
+A frozen pre-scoping reference under
+`src/nn/linear.rs::forward_scoped_rng_tests`
+compares **exact** outputs, clipping flags, and the next RNG draw across
+1×1, 5×3, and 64×32 matrices; shifts q=0,7,31,64,128; 4/8/31 output
+bits; 17 consecutive samples per case, zero/signed-extreme/unequal-exponent
+inputs, and saturation. Public single-sample and batch paths and their
+clipping/output caches are also checked. Existing backward oracles stay.
+
+The native ARM64 release-mode microbenchmark compares 64 forward calls
+through `Linear(784→128)` with the frozen TLS baseline within the
+**same binary**, and asserts outputs, clip flags and next RNG parity:
+
+```sh
+cargo test --locked --release --lib benchmark_forward_scoped_rng_vs_tls -- --ignored --nocapture
+```
+
+The hosted ARM64 result is only a diagnostic, **not** Raspberry Pi proof.
+
+For physical Pi performance, use
+`experiments/pi5_seed_sweep.py` and the prior 5-seed baseline
+(commit `57332082bb04b1c0bfc0a6d8e0e69b8c42fc61d6`,
+GHCR image digest
+`sha256:bb839ebbf724e1791e897bedfe1ee62d5dc3fb67bf97bd6f5fb111b4be56a121`).
+Reference means for 1337,2026,2027,4242,42069: integer forward
+14.859s, backward 20.868s, total integer training 36.764s.
+Use **identical ordered seeds** and workloads (2 epochs, 8,192/1,042,
+batch32, lr_shift7, same Pi and 2-CPU quota), different immutable
+candidate image/Job name, and original results as
+`--baseline-dir` for accurate per-seed comparisons. Check
+thermal state, clocks, scheduling and contention across interleaved
+measurements. Candidate image is published **after** merging to
+`big-refactor`, never by PR validation. The official test
+set must remain unevaluated.
