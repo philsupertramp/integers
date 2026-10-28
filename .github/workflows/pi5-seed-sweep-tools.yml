@@ -5,13 +5,17 @@ on:
     branches: [big-refactor]
     paths:
       - 'experiments/pi5_seed_sweep.py'
+      - 'experiments/pi5_interleaved_ab.py'
       - 'tests/test_pi5_seed_sweep.py'
+      - 'tests/test_pi5_interleaved_ab.py'
       - '.github/workflows/pi5-seed-sweep-tools.yml'
   push:
     branches: [big-refactor]
     paths:
       - 'experiments/pi5_seed_sweep.py'
+      - 'experiments/pi5_interleaved_ab.py'
       - 'tests/test_pi5_seed_sweep.py'
+      - 'tests/test_pi5_interleaved_ab.py'
       - '.github/workflows/pi5-seed-sweep-tools.yml'
 
 permissions:
@@ -24,5 +28,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Offline full seed-sweep orchestration, archive and comparison tests
         run: python3 -m unittest discover -s tests -p 'test_pi5_seed_sweep.py' -v
+      - name: Offline physical-Pi interleaving and paired-gate tests
+        run: python3 -m unittest discover -s tests -p 'test_pi5_interleaved_ab.py' -v
       - name: CLI syntax check
-        run: python3 -m py_compile experiments/pi5_seed_sweep.py
+        run: python3 -m py_compile experiments/pi5_seed_sweep.py experiments/pi5_interleaved_ab.py
