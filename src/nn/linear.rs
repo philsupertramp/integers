@@ -888,7 +888,6 @@ mod forward_scoped_rng_tests {
     }
 }
 
-
 #[cfg(test)]
 mod discarded_input_gradient_tests {
     use super::*;
@@ -948,7 +947,11 @@ mod discarded_input_gradient_tests {
                             (0..samples * n_out)
                                 .map(|i| {
                                     d(
-                                        if i % 5 == 0 { i32::MIN } else { (i % 47) as i32 - 23 },
+                                        if i % 5 == 0 {
+                                            i32::MIN
+                                        } else {
+                                            (i % 47) as i32 - 23
+                                        },
                                         q,
                                     )
                                 })
@@ -968,15 +971,14 @@ mod discarded_input_gradient_tests {
                         seed_rng(seed);
                         let fast_outputs = optimized.forward_batch(&inputs);
                         optimized.backward_batch_discard_input_grad(&grads);
-                        let fast_grads = (
-                            optimized.grad_w.data.clone(),
-                            optimized.grad_b.data.clone(),
-                        );
+                        let fast_grads =
+                            (optimized.grad_w.data.clone(), optimized.grad_b.data.clone());
                         let fast_samples = optimized.grad_samples;
                         optimized.update(7);
                         let fast_next_rng = rng_next();
 
-                        let label = format!("q={q} size={n_in}x{n_out} samples={samples} bits={bits}");
+                        let label =
+                            format!("q={q} size={n_in}x{n_out} samples={samples} bits={bits}");
                         assert_eq!(full_outputs.data, fast_outputs.data, "{label}: forward");
                         assert_eq!(full_grads, fast_grads, "{label}: parameter gradients");
                         assert_eq!(full_samples, fast_samples, "{label}: sample count");
@@ -1016,14 +1018,8 @@ mod discarded_input_gradient_tests {
     fn sequential_training_and_timed_path_preserve_predictions_and_rng_across_steps() {
         let mut full = model(1337);
         let mut optimized = model(1337);
-        let input = Tensor::from_vec(
-            (0..42).map(|i| d(i % 23 - 11, 7)).collect(),
-            vec![7, 6],
-        );
-        let grads = Tensor::from_vec(
-            (0..21).map(|i| d(i % 19 - 9, 7)).collect(),
-            vec![7, 3],
-        );
+        let input = Tensor::from_vec((0..42).map(|i| d(i % 23 - 11, 7)).collect(), vec![7, 6]);
+        let grads = Tensor::from_vec((0..21).map(|i| d(i % 19 - 9, 7)).collect(), vec![7, 3]);
         seed_rng(0x1234_5678);
         let mut expected = Vec::new();
         for _ in 0..4 {
@@ -1042,10 +1038,7 @@ mod discarded_input_gradient_tests {
             actual.push(optimized.forward_batch(&input).data);
             if step % 2 == 0 {
                 let mut layer_ns = [0u128; 3];
-                optimized.backward_batch_timed_discard_input_grad(
-                    &grads,
-                    &mut layer_ns,
-                );
+                optimized.backward_batch_timed_discard_input_grad(&grads, &mut layer_ns);
             } else {
                 optimized.backward_batch_discard_input_grad(&grads);
             }
@@ -1081,24 +1074,18 @@ mod discarded_input_gradient_tests {
         optimized.weights = full.weights.clone();
         optimized.biases = full.biases.clone();
         let input = Tensor::from_vec(
-            (0..784).map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7)).collect(),
+            (0..784)
+                .map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7))
+                .collect(),
             vec![784],
         );
-        let gradient = Tensor::from_vec(
-            (0..128).map(|j| d(j % 17 - 8, 7)).collect(),
-            vec![128],
-        );
+        let gradient = Tensor::from_vec((0..128).map(|j| d(j % 17 - 8, 7)).collect(), vec![128]);
         let output = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
         let clipped = vec![false; 128];
         seed_rng(0x1234_5678);
         let start = Instant::now();
         for _ in 0..SAMPLES {
-            black_box(full.backward_one(
-                &gradient.view(),
-                &input.view(),
-                &output.view(),
-                &clipped,
-            ));
+            black_box(full.backward_one(&gradient.view(), &input.view(), &output.view(), &clipped));
         }
         let full_time = start.elapsed();
         let next_full = rng_next();
