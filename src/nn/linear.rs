@@ -1272,3 +1272,84 @@ mod discarded_input_gradient_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod experimental_unused_rng_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    /// The retained weight-gradient product must still be correct on the
+    /// first iteration; only *subsequent* draws are allowed to diverge.
+    #[test]
+    fn relaxed_elision_changes_rng_but_not_first_weight_gradient() {
+        let mut baseline = Linear::new(6, 4, 7, 7, 31).with_grad_clip(8192);
+        let mut relaxed = Linear::new(6, 4, 7, 7, 31).with_grad_clip(8192);
+        relaxed.weights = baseline.weights.clone();
+        relaxed.biases = baseline.biases.clone();
+        let inputs = Tensor::from_vec(
+            (0..12).map(|i| Dyadic::new(i * 13 - 64, 7)).collect(),
+            vec![2, 6],
+        );
+        let gradient = Tensor::from_vec(
+            (0..8).map(|i| Dyadic::new(i * 7 - 17, 7)).collect(),
+            vec![2, 4],
+        );
+
+        seed_rng(0x0123_4567);
+        let expected = baseline.forward_batch(&inputs);
+        baseline.backward_batch_discard_input_grad(&gradient);
+        let baseline_first = baseline.grad_w.data[0];
+        let baseline_rng = rng_next();
+
+        seed_rng(0x0123_4567);
+        let observed = relaxed.forward_batch(&inputs);
+        relaxed.backward_batch_discard_input_grad_relaxed_rng(&gradient);
+        let relaxed_first = relaxed.grad_w.data[0];
+        let relaxed_rng = rng_next();
+
+        assert_eq!(observed.data, expected.data);
+        assert_eq!(baseline_first, relaxed_first);
+        assert_eq!(baseline.grad_samples, 2);
+        assert_eq!(relaxed.grad_samples, 2);
+        assert_ne!(baseline_rng, relaxed_rng, "opt-in must omit RNG draws");
+
+        baseline.update(7);
+        relaxed.update(7);
+        assert_eq!(baseline.weights.shape, relaxed.weights.shape);
+        assert_eq!(baseline.biases.shape, relaxed.biases.shape);
+        // Deliberately no equality claim for later weights or predictions.
+    }
+
+    #[test]
+    fn relaxed_first_layer_preserves_parameter_and_cache_contracts() {
+        for &samples in &[1usize, 3, 32] {
+            for &shift in &[0u32, 1, 7, 31, 63, 64, 128] {
+                let mut linear = Linear::new(5, 3, 7, shift, 8)
+                    .with_grad_clip(8192)
+                    .with_momentum(1);
+                let x = Tensor::from_vec(
+                    (0..samples * 5)
+                        .map(|i| Dyadic::new(if i % 4 == 0 { 0 } else { i as i32 - 80 }, 7))
+                        .collect(),
+                    vec![samples, 5],
+                );
+                let gradients = Tensor::from_vec(
+                    (0..samples * 3)
+                        .map(|i| Dyadic::new(i as i32 % 17 - 8, 7))
+                        .collect(),
+                    vec![samples, 3],
+                );
+                linear.zero_grad();
+                let output = linear.forward_batch(&x);
+                assert_eq!(output.shape, vec![samples, 3]);
+                linear.backward_batch_discard_input_grad_relaxed_rng(&gradients);
+                assert_eq!(linear.grad_samples, samples);
+                assert_eq!(linear.grad_w.data.len(), 15);
+                assert_eq!(linear.grad_b.data.len(), 3);
+                linear.update(7);
+                linear.zero_grad();
+                assert_eq!(linear.grad_samples, 0);
+            }
+        }
+    }
+}
