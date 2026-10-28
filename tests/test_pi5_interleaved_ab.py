@@ -1,5 +1,6 @@
 """Offline tests for mirrored, physically pinned Pi5 A/B experiment."""
 import copy
+import io
 import json
 import sys
 import tempfile
@@ -9,7 +10,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiments"))
 import pi5_interleaved_ab as ab
+from pi5_benchmark import emit_result_archive
 from test_pi5_seed_sweep import record
+
+
+def write_report(path, report):
+    raw = (json.dumps(report) + "\n").encode()
+    path.write_bytes(raw)
+    stream = io.StringIO()
+    emit_result_archive(raw, stream=stream)
+    path.with_suffix(".log").write_text(stream.getvalue())
 
 
 def fixture(plan, trial, version=None):
@@ -54,7 +64,7 @@ def populated(root):
     for trial in plan["trials"]:
         path = ab.trial_path(root, trial)
         path.mkdir(parents=True)
-        (path / f"seed-{trial['seed']}.json").write_text(json.dumps(fixture(plan, trial)))
+        write_report(path / f"seed-{trial['seed']}.json", fixture(plan, trial))
         (path / "trial.json").write_text(json.dumps({
             "job": trial["job"], "seed": trial["seed"], "arm": trial["arm"],
             "node": "pi5-local", "node_uid": "node-uid",
@@ -134,11 +144,11 @@ class InterleavedTests(unittest.TestCase):
             original = path.read_text()
             data = json.loads(original)
             data["runs"][0]["test_evaluated"] = True
-            path.write_text(json.dumps(data))
+            write_report(path, data)
             with self.assertRaisesRegex(ValueError, "test_evaluated"):
                 ab.analyze(root)
             self.assertFalse((root / "comparison.json").exists())
-            path.write_text(original)
+            write_report(path, json.loads(original))
             (ab.trial_path(root, t) / "trial.json").unlink()
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 ab.analyze(root)
@@ -164,7 +174,7 @@ class InterleavedTests(unittest.TestCase):
                 file = ab.trial_path(root, trial) / f"seed-{trial['seed']}.json"
                 report = json.loads(file.read_text())
                 report["runs"][0]["learning_curve"][-1]["validation_accuracy_pct"] = 74
-                file.write_text(json.dumps(report))
+                write_report(file, report)
             outcome = ab.analyze(root)
             self.assertEqual(outcome["gate"]["status"], "inconclusive_or_regressed")
             self.assertLess(outcome["validation_change_pp"]["worst_seed"], -3)
