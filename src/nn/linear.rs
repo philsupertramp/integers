@@ -1286,7 +1286,10 @@ mod experimental_unused_rng_tests {
         assert_eq!(baseline_first, relaxed_first);
         assert_eq!(baseline.grad_samples, 1);
         assert_eq!(relaxed.grad_samples, 1);
-        assert_ne!(baseline_rng, relaxed_rng, "default training must omit RNG draws");
+        assert_ne!(
+            baseline_rng, relaxed_rng,
+            "default training must omit RNG draws"
+        );
 
         baseline.update(7);
         relaxed.update(7);
