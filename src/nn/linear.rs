@@ -740,16 +740,7 @@ mod forward_scoped_rng_tests {
         let mut layer = Linear::new(784, 128, 7, 7, 31);
         let inputs = Tensor::from_vec(
             (0..784)
-                .map(|i| {
-                    Dyadic::new(
-                        if i % 3 == 0 {
-                            0
-                        } else {
-                            (i % 255) - 127
-                        },
-                        7,
-                    )
-                })
+                .map(|i| Dyadic::new(if i % 3 == 0 { 0 } else { (i % 255) - 127 }, 7))
                 .collect(),
             vec![784],
         );
