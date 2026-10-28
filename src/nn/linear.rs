@@ -216,7 +216,7 @@ impl Linear {
     /// stochastic RNG draw in the same j/i traversal order as backward_one.
     /// Only the discarded input-gradient multiplication/accumulation is
     /// elided; discard_mul_with_rng handles its exact RNG contract.
-    fn backward_one_discard_input_grad(
+    fn backward_one_discard_input_grad_impl<const PRESERVE_RNG: bool>(
         &mut self,
         grad_output: &TensorView,
         input: &TensorView,
@@ -263,9 +263,13 @@ impl Linear {
                         self.grad_w.data[idx],
                         mul_with_rng(gj, input.data[i], self.quant_shift, rng),
                     );
-                    // This result is unused, but the corresponding product
-                    // must still consume the exact original RNG stream.
-                    discard_mul_with_rng(gj, self.w(j, i), self.quant_shift, rng);
+                    // This product is discarded. The conservative policy
+                    // advances RNG exactly as the old backward path did.
+                    // In the experimental policy, later gradient rounding
+                    // intentionally consumes a different RNG subsequence.
+                    if PRESERVE_RNG {
+                        discard_mul_with_rng(gj, self.w(j, i), self.quant_shift, rng);
+                    }
                 }
                 self.grad_b.data[j] = add(self.grad_b.data[j], gj);
             }
@@ -274,6 +278,27 @@ impl Linear {
             .grad_samples
             .checked_add(1)
             .expect("Linear: sample counter overflow");
+    }
+    #[inline]
+    fn backward_one_discard_input_grad(
+        &mut self,
+        grad_output: &TensorView,
+        input: &TensorView,
+        output: &TensorView,
+        clipped: &[bool],
+    ) {
+        self.backward_one_discard_input_grad_impl::<true>(grad_output, input, output, clipped);
+    }
+
+    #[inline]
+    fn backward_one_discard_input_grad_relaxed_rng(
+        &mut self,
+        grad_output: &TensorView,
+        input: &TensorView,
+        output: &TensorView,
+        clipped: &[bool],
+    ) {
+        self.backward_one_discard_input_grad_impl::<false>(grad_output, input, output, clipped);
     }
 }
 
@@ -414,6 +439,35 @@ impl Module for Linear {
             .zip(clips.iter())
         {
             self.backward_one_discard_input_grad(&g, &inp, &out, clipped);
+        }
+    }
+
+    fn backward_batch_discard_input_grad_relaxed_rng(&mut self, grads: &Tensor) {
+        let n = self
+            .input_batch_cache
+            .shape
+            .first()
+            .copied()
+            .expect("Linear: missing batch forward cache");
+        assert!(grads.shape.len() >= 2, "Linear: expected batched gradients");
+        assert_eq!(grads.shape[0], n, "Linear: gradient batch size mismatch");
+        assert_eq!(
+            grads.shape[1..].iter().product::<usize>(),
+            self.out_features,
+            "Linear: gradient feature shape mismatch"
+        );
+        assert_eq!(grads.data.len(), n * self.out_features, "Linear: gradient buffer mismatch");
+        assert_eq!(self.clip_batch_cache.len(), n, "Linear: missing batch saturation cache");
+
+        let inputs = std::mem::take(&mut self.input_batch_cache);
+        let outputs = std::mem::take(&mut self.output_batch_cache);
+        let clips = std::mem::take(&mut self.clip_batch_cache);
+        for ((g, (inp, out)), clipped) in grads
+            .iter()
+            .zip(inputs.iter().zip(outputs.iter()))
+            .zip(clips.iter())
+        {
+            self.backward_one_discard_input_grad_relaxed_rng(&g, &inp, &out, clipped);
         }
     }
 
