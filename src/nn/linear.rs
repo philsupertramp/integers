@@ -887,3 +887,243 @@ mod forward_scoped_rng_tests {
         );
     }
 }
+
+
+#[cfg(test)]
+mod discarded_input_gradient_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    fn d(v: i32, s: u32) -> Dyadic {
+        Dyadic::new(v, s)
+    }
+
+    #[test]
+    fn discarded_first_layer_gradient_preserves_parameters_and_rng_after_update() {
+        // q >= 64 exercises the product-dependent RNG fallback, including
+        // zero products; q=0 tests zero draws, and q=63 the one-draw boundary.
+        for &q in &[0u32, 1, 7, 31, 63, 64, 128] {
+            for &(n_in, n_out) in &[(5usize, 3usize), (16, 8)] {
+                for &samples in &[1usize, 7] {
+                    for &bits in &[4u32, 31] {
+                        let mut full = Linear::new(n_in, n_out, 7, q, bits)
+                            .with_grad_clip(8192)
+                            .with_momentum(1);
+                        for (idx, w) in full.weights.data.iter_mut().enumerate() {
+                            *w = d(
+                                match idx % 17 {
+                                    0 => i32::MAX,
+                                    1 => i32::MIN,
+                                    2 => 0,
+                                    _ => (idx % 253) as i32 - 126,
+                                },
+                                q + (idx % 2) as u32,
+                            );
+                        }
+                        for (j, b) in full.biases.data.iter_mut().enumerate() {
+                            *b = d(if j % 4 == 0 { i32::MAX } else { 0 }, q);
+                        }
+                        let mut optimized = Linear::new(n_in, n_out, 7, q, bits)
+                            .with_grad_clip(8192)
+                            .with_momentum(1);
+                        optimized.weights = full.weights.clone();
+                        optimized.biases = full.biases.clone();
+
+                        let inputs = Tensor::from_vec(
+                            (0..samples * n_in)
+                                .map(|i| {
+                                    d(
+                                        if i % 7 == 0 {
+                                            0
+                                        } else {
+                                            (i % 201) as i32 - 100
+                                        },
+                                        q + (i % 2) as u32,
+                                    )
+                                })
+                                .collect(),
+                            vec![samples, n_in],
+                        );
+                        let grads = Tensor::from_vec(
+                            (0..samples * n_out)
+                                .map(|i| {
+                                    d(
+                                        if i % 5 == 0 { i32::MIN } else { (i % 47) as i32 - 23 },
+                                        q,
+                                    )
+                                })
+                                .collect(),
+                            vec![samples, n_out],
+                        );
+
+                        let seed = 0x1bad_b002_1234_5678;
+                        seed_rng(seed);
+                        let full_outputs = full.forward_batch(&inputs);
+                        let _unused_grad = full.backward_batch(&grads);
+                        let full_grads = (full.grad_w.data.clone(), full.grad_b.data.clone());
+                        let full_samples = full.grad_samples;
+                        full.update(7);
+                        let full_next_rng = rng_next();
+
+                        seed_rng(seed);
+                        let fast_outputs = optimized.forward_batch(&inputs);
+                        optimized.backward_batch_discard_input_grad(&grads);
+                        let fast_grads = (
+                            optimized.grad_w.data.clone(),
+                            optimized.grad_b.data.clone(),
+                        );
+                        let fast_samples = optimized.grad_samples;
+                        optimized.update(7);
+                        let fast_next_rng = rng_next();
+
+                        let label = format!("q={q} size={n_in}x{n_out} samples={samples} bits={bits}");
+                        assert_eq!(full_outputs.data, fast_outputs.data, "{label}: forward");
+                        assert_eq!(full_grads, fast_grads, "{label}: parameter gradients");
+                        assert_eq!(full_samples, fast_samples, "{label}: sample count");
+                        assert_eq!(
+                            full.weights.data, optimized.weights.data,
+                            "{label}: updated weights"
+                        );
+                        assert_eq!(
+                            full.biases.data, optimized.biases.data,
+                            "{label}: updated biases"
+                        );
+                        assert_eq!(
+                            full.vel_w.data, optimized.vel_w.data,
+                            "{label}: weight momentum"
+                        );
+                        assert_eq!(
+                            full.vel_b.data, optimized.vel_b.data,
+                            "{label}: bias momentum"
+                        );
+                        assert_eq!(full_next_rng, fast_next_rng, "{label}: RNG stream");
+                    }
+                }
+            }
+        }
+    }
+
+    fn model(seed: u64) -> crate::nn::Sequential {
+        seed_rng(seed);
+        let mut seq = crate::nn::Sequential::new();
+        seq.add(Linear::new(6, 4, 7, 7, 8).with_momentum(1));
+        seq.add(crate::nn::ReLU::new());
+        seq.add(Linear::new(4, 3, 7, 7, 8).with_momentum(1));
+        seq
+    }
+
+    #[test]
+    fn sequential_training_and_timed_path_preserve_predictions_and_rng_across_steps() {
+        let mut full = model(1337);
+        let mut optimized = model(1337);
+        let input = Tensor::from_vec(
+            (0..42).map(|i| d(i % 23 - 11, 7)).collect(),
+            vec![7, 6],
+        );
+        let grads = Tensor::from_vec(
+            (0..21).map(|i| d(i % 19 - 9, 7)).collect(),
+            vec![7, 3],
+        );
+        seed_rng(0x1234_5678);
+        let mut expected = Vec::new();
+        for _ in 0..4 {
+            full.zero_grad();
+            expected.push(full.forward_batch(&input).data);
+            let _ = full.backward_batch(&grads);
+            full.update(7);
+        }
+        let expected_after = full.forward_batch(&input).data;
+        let full_rng = rng_next();
+
+        seed_rng(0x1234_5678);
+        let mut actual = Vec::new();
+        for step in 0..4 {
+            optimized.zero_grad();
+            actual.push(optimized.forward_batch(&input).data);
+            if step % 2 == 0 {
+                let mut layer_ns = [0u128; 3];
+                optimized.backward_batch_timed_discard_input_grad(
+                    &grads,
+                    &mut layer_ns,
+                );
+            } else {
+                optimized.backward_batch_discard_input_grad(&grads);
+            }
+            optimized.update(7);
+        }
+        let actual_after = optimized.forward_batch(&input).data;
+        let fast_rng = rng_next();
+        assert_eq!(expected, actual, "predictions during training");
+        assert_eq!(expected_after, actual_after, "predictions after updates");
+        assert_eq!(full_rng, fast_rng, "RNG after multiple updates");
+    }
+
+    #[test]
+    fn public_backward_still_produces_full_input_gradients() {
+        let mut linear = Linear::new(6, 4, 7, 7, 8);
+        let inputs = Tensor::from_vec(vec![d(2, 7); 12], vec![2, 6]);
+        let grads = Tensor::from_vec(vec![d(3, 7); 8], vec![2, 4]);
+        linear.forward_batch(&inputs);
+        let input_grads = linear.backward_batch(&grads);
+        assert_eq!(input_grads.shape, vec![2, 6]);
+        assert_eq!(input_grads.data.len(), 12);
+    }
+
+    #[test]
+    #[ignore = "run with cargo test --release --lib benchmark_discard_unused_input_grad -- --ignored --nocapture"]
+    fn benchmark_discard_unused_input_grad() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const SAMPLES: usize = 64;
+        let mut full = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        let mut optimized = Linear::new(784, 128, 7, 7, 31).with_grad_clip(8192);
+        optimized.weights = full.weights.clone();
+        optimized.biases = full.biases.clone();
+        let input = Tensor::from_vec(
+            (0..784).map(|i| d(if i % 3 == 0 { 0 } else { i % 255 - 127 }, 7)).collect(),
+            vec![784],
+        );
+        let gradient = Tensor::from_vec(
+            (0..128).map(|j| d(j % 17 - 8, 7)).collect(),
+            vec![128],
+        );
+        let output = Tensor::from_vec(vec![d(0, 7); 128], vec![128]);
+        let clipped = vec![false; 128];
+        seed_rng(0x1234_5678);
+        let start = Instant::now();
+        for _ in 0..SAMPLES {
+            black_box(full.backward_one(
+                &gradient.view(),
+                &input.view(),
+                &output.view(),
+                &clipped,
+            ));
+        }
+        let full_time = start.elapsed();
+        let next_full = rng_next();
+
+        seed_rng(0x1234_5678);
+        let start = Instant::now();
+        for _ in 0..SAMPLES {
+            optimized.backward_one_discard_input_grad(
+                black_box(&gradient.view()),
+                black_box(&input.view()),
+                black_box(&output.view()),
+                black_box(&clipped),
+            );
+        }
+        let fast_time = start.elapsed();
+        let next_fast = rng_next();
+        assert_eq!(full.grad_w.data, optimized.grad_w.data);
+        assert_eq!(full.grad_b.data, optimized.grad_b.data);
+        assert_eq!(full.grad_samples, optimized.grad_samples);
+        assert_eq!(next_full, next_fast);
+        println!(
+            "Linear 784x128 backward, {SAMPLES} samples: full_input_gradient={:?}, discard_unused={:?}, ratio={:.3}x (native-host diagnostic, NOT physical Pi 5 performance)",
+            full_time,
+            fast_time,
+            full_time.as_secs_f64() / fast_time.as_secs_f64(),
+        );
+    }
+}
