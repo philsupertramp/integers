@@ -100,6 +100,23 @@ class InterleavedTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "modified"):
                 ab.validate_plan(damaged)
 
+    def test_reusable_immutable_image_and_git_sha_provenance(self):
+        commit = "d" * 40
+        image = "ghcr.io/philsupertramp/integers-benchmark@sha256:" + "f" * 64
+        plan = ab.build_plan("next-ab", ab.IMAGE_B, image,
+                             commit_a=ab.COMMIT_B, commit_b=commit)
+        self.assertEqual(plan["commits"]["A"], ab.COMMIT_B)
+        self.assertEqual(plan["commits"]["B"], commit)
+        ab.validate_plan(plan)
+        self.assertEqual(ab.desired_job(plan, plan["trials"][1])
+                         ["spec"]["template"]["spec"]["containers"][0]["image"], image)
+        with self.assertRaisesRegex(ValueError, "40-char"):
+            ab.build_plan("next-ab", ab.IMAGE_B, image,
+                          commit_a=ab.COMMIT_B, commit_b="invalid")
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            ab.build_plan("next-ab", ab.IMAGE_B, image,
+                          commit_a=ab.COMMIT_B, commit_b=ab.COMMIT_B)
+
     def test_rejects_invalid_plan_or_reused_image(self):
         with self.assertRaisesRegex(ValueError, "differ"):
             ab.build_plan("ab", ab.IMAGE_A, ab.IMAGE_A)
