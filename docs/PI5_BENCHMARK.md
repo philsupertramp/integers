@@ -805,13 +805,16 @@ formulas, integer-only computation or held-out evaluation.
    training/validation curves and per-class recall, confusion
    matrices and prediction counts. **Exact fixed-seed parity is
    not required**.
-4. After candidate review, publish a new image only through the
-   existing merged-`big-refactor` SHA workflow; compare it on the
-   *real Pi 5* with the merged PR #53 image using §16's 20-job
-   interleaved ABBA/BAAB protocol. Performance gate: ≥5% faster
-   point estimate and paired 95% confidence interval upper B/A <1;
-   validation and FP32 control must remain within the registered
-   thresholds. No Pi speed claims from hosted ARM64.
+4. Once independent correctness/quality CI passes and this **candidate**
+   PR has been reviewed, it may merge into `big-refactor` for hardware
+   evaluation (not into `master`). Publish the resulting image only
+   through the existing merged-`big-refactor` SHA workflow; compare it
+   on the *real Pi 5* with the merged PR #53 image using §16's 20-job
+   interleaved ABBA/BAAB protocol. Performance gate: ≥5% faster point
+   estimate and paired 95% confidence interval upper B/A <1, with
+   acceptable validation/FP32-control/RSS results. If Pi results fail,
+   revert the candidate rather than promoting it further. Hosted ARM64
+   is not Pi speed evidence.
 5. PR #9 remains open, not merged. No project-wide performance
    claims or default release claims until those measurements pass.
 
