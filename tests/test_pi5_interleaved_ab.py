@@ -2,6 +2,7 @@
 import copy
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -178,6 +179,65 @@ class InterleavedTests(unittest.TestCase):
             outcome = ab.analyze(root)
             self.assertEqual(outcome["gate"]["status"], "inconclusive_or_regressed")
             self.assertLess(outcome["validation_change_pp"]["worst_seed"], -3)
+
+    def test_serial_orchestrator_resumes_successful_jobs_without_resubmitting(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "experiment"
+            plan = ab.build_plan("resume-test")
+            ab.save_plan(root, plan)
+            observed = []
+
+            def existing_job(_kubectl, _namespace, _kind, name):
+                trial = next(t for t in plan["trials"] if t["job"] == name)
+                job = ab.desired_job(plan, trial)
+                job["metadata"]["uid"] = f"uid-{trial['index']}"
+                job["status"] = {"succeeded": 1}
+                return job
+
+            def collect_stub(_root, _plan, trial, _kubectl, _live):
+                observed.append((trial["arm"], trial["seed"]))
+
+            with mock.patch.object(ab, "kubectl_json", side_effect=existing_job), \
+                    mock.patch.object(ab, "collect_one", side_effect=collect_stub), \
+                    mock.patch.object(ab, "analyze", return_value={"gate": {"status": "pass"}}), \
+                    mock.patch.object(ab.subprocess, "run") as runner:
+                ab.run_plan(root)
+                runner.assert_not_called()
+            self.assertEqual(observed, [(t["arm"], t["seed"]) for t in plan["trials"]])
+            self.assertEqual(len(observed), 20)
+
+    def test_new_job_fail_closed_when_cluster_wait_fails(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "experiment"
+            plan = ab.build_plan("abort-test")
+            ab.save_plan(root, plan)
+            calls = []
+
+            def get_job(_kubectl, _namespace, _kind, name):
+                calls.append(name)
+                if len(calls) == 1:
+                    raise subprocess.CalledProcessError(
+                        1, ["kubectl", "get"], stderr="Error from server (NotFound)")
+                job = ab.desired_job(plan, plan["trials"][0])
+                job["metadata"]["uid"] = "uid-1"
+                job["status"] = {"succeeded": 0}
+                return job
+
+            def invoke(cmd, **kwargs):
+                if "create" in cmd:
+                    return subprocess.CompletedProcess(cmd, 0)
+                raise subprocess.CalledProcessError(1, cmd, stderr="deadline exceeded")
+
+            with mock.patch.object(ab, "kubectl_json", side_effect=get_job), \
+                    mock.patch.object(ab.subprocess, "run", side_effect=invoke) as runner, \
+                    mock.patch.object(ab, "collect_one") as collect:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    ab.run_plan(root)
+                collect.assert_not_called()
+                self.assertEqual(runner.call_count, 2)
+                self.assertEqual(len(calls), 2)
 
     def test_independent_paired_t_interval_not_raw_seed_sd(self):
         result = ab.log_interval([0.75, 0.78, 0.80, 0.82, 0.85])
