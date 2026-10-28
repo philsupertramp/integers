@@ -290,8 +290,6 @@ def run(args) -> dict:
         ]
         if args.profile_training:
             command.append("--profile-training")
-        if backend == "integer" and args.experimental_skip_unused_rng:
-            command.append("--experimental-skip-unused-rng")
         if args.validation_only:
             command.append("--validation-only")
             command.extend(["--train-limit", str(args.train_limit),
@@ -307,9 +305,6 @@ def run(args) -> dict:
         if record["backend"] != backend or record["seed"] != args.seed:
             raise ValueError("runner output does not match request")
         verify_training_profile(record, args.profile_training)
-        expected_relaxed = backend == "integer" and args.experimental_skip_unused_rng
-        if record.get("experimental_skip_unused_rng") != expected_relaxed:
-            raise ValueError("runner ignored or mismatched experimental RNG policy")
         record["benchmark_schema"] = 1
         record.update(indexed_seed_metadata(args))
         record["git_commit_sha"] = os.environ.get("BENCHMARK_GIT_SHA", "unknown")
@@ -373,7 +368,6 @@ def parse_args(argv=None):
     parser.add_argument("--validation-only", action="store_true", default=False)
     parser.add_argument("--final-test", action="store_true", default=False)
     parser.add_argument("--profile-training", action="store_true", default=False)
-    parser.add_argument("--experimental-skip-unused-rng", action="store_true", default=False)
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--validation-limit", type=int, default=None)
     parser.add_argument("--require-arm64", action="store_true", default=False)
@@ -392,9 +386,6 @@ def parse_args(argv=None):
         parser.error("choose exactly one of --validation-only or --final-test")
     if args.profile_training and (not args.validation_only or args.architecture != "dense"):
         parser.error("--profile-training requires dense --validation-only")
-    if args.experimental_skip_unused_rng and (
-            not args.validation_only or args.architecture != "dense"):
-        parser.error("--experimental-skip-unused-rng requires dense --validation-only")
     if args.final_test and (args.train_limit is not None or args.validation_limit is not None):
         parser.error("sample limits require --validation-only")
     if args.validation_only:
