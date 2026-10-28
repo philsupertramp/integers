@@ -1,5 +1,6 @@
 """Offline tests for mirrored, physically pinned Pi5 A/B experiment."""
 import copy
+import datetime as dt
 import io
 import json
 import subprocess
@@ -66,10 +67,14 @@ def populated(root):
         path = ab.trial_path(root, trial)
         path.mkdir(parents=True)
         write_report(path / f"seed-{trial['seed']}.json", fixture(plan, trial))
+        started = dt.datetime(2026, 10, 28, 20, tzinfo=dt.timezone.utc) + dt.timedelta(
+            minutes=2 * trial["index"])
         (path / "trial.json").write_text(json.dumps({
             "job": trial["job"], "seed": trial["seed"], "arm": trial["arm"],
             "node": "pi5-local", "node_uid": "node-uid",
             "pod_uid": f"pod-{trial['index']}", "job_uid": f"job-{trial['index']}",
+            "job_started_utc": started.isoformat(),
+            "job_completed_utc": (started + dt.timedelta(minutes=1)).isoformat(),
         }))
     return plan
 
@@ -135,6 +140,23 @@ class InterleavedTests(unittest.TestCase):
                 1)
             self.assertEqual(result["validation_change_pp"]["mean"], 0)
             self.assertTrue((root / "comparison.md").exists())
+
+    def test_actual_execution_order_and_unique_pods_are_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "experiment"
+            plan = populated(root)
+            meta_file = ab.trial_path(root, plan["trials"][1]) / "trial.json"
+            meta = json.loads(meta_file.read_text())
+            original = meta.copy()
+            meta["job_started_utc"] = "2026-10-28T20:00:30+00:00"
+            meta_file.write_text(json.dumps(meta))
+            with self.assertRaisesRegex(ValueError, "overlapped"):
+                ab.analyze(root)
+            meta = original.copy()
+            meta["pod_uid"] = "pod-0"
+            meta_file.write_text(json.dumps(meta))
+            with self.assertRaisesRegex(ValueError, "reuses"):
+                ab.analyze(root)
 
     def test_missing_or_corrupted_trials_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
