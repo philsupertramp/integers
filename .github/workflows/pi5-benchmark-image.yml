@@ -9,6 +9,7 @@ on:
       - 'experiments/**'
       # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
       - '!experiments/pi5_seed_sweep.py'
+      - '!experiments/pi5_interleaved_ab.py'
       - 'examples/held_out.rs'
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
@@ -27,6 +28,7 @@ on:
       - 'experiments/**'
       # Tooling-only changes use fast pi5-seed-sweep-tools CI; no image rebuild.
       - '!experiments/pi5_seed_sweep.py'
+      - '!experiments/pi5_interleaved_ab.py'
       - 'examples/held_out.rs'
       - 'examples/mnist_nn/mnist_loader.rs'
       - 'deployments/pi5/**'
