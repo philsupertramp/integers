@@ -498,7 +498,7 @@ mod tests {
                 vec![1, 28, 28],
             );
             integer.set_training(false);
-            let y = integer.forward(&zeros);
+            let y = integer.forward(&zeros.view());
             assert_eq!(y.data.len(), 10);
         }
     }
