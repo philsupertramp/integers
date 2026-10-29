@@ -392,9 +392,117 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
     )
 }
 
+
+/**
+ * Paired depth stress models for #38.
+ *
+ * A fixed pair of convolutional stages uses 3x3 spatial convolution followed
+ * by optional 1x1 convolutions, ReLU after each convolution and a 2x2 pool
+ * after each stage. 4 and 8 convolutional layers thus keep the same spatial
+ * geometry (28 -> 13 -> 5), dense head and comparable channel widths.
+ * The extra 1x1 layers isolate gradient propagation without adding a
+ * padding implementation or silently changing the classifier dimensions.
+ */
+fn add_depth_conv(
+    integer: &mut Sequential,
+    ops: &mut Vec<Op>,
+    cin: usize,
+    cout: usize,
+    spatial: usize,
+    kernel: usize,
+) -> usize {
+    let conv = Conv2D::new(cin, cout, kernel, kernel, spatial, spatial, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    ops.push(Op::Conv(Convolution::from_integer(&conv)));
+    integer.add(conv);
+    integer.add(ReLU::new());
+    ops.push(Op::Relu);
+    spatial - kernel + 1
+}
+
+pub fn build_depth_models(seed: u64, conv_layers: usize) -> (Sequential, CnnFp32) {
+    assert!(
+        conv_layers == 4 || conv_layers == 8,
+        "only the predeclared 4/8-layer depth study is supported"
+    );
+    seed_rng(seed);
+    let mut integer = Sequential::new();
+    let mut ops = Vec::new();
+    let per_stage = conv_layers / 2;
+
+    let mut spatial = add_depth_conv(&mut integer, &mut ops, 1, 4, 28, 3);
+    for _ in 1..per_stage {
+        spatial = add_depth_conv(&mut integer, &mut ops, 4, 4, spatial, 1);
+    }
+    integer.add(MaxPool2D::new(4, spatial, spatial, 2, 2));
+    ops.push(Op::Pool(Pool::new(4, spatial, spatial, 2, 2)));
+    spatial /= 2;
+
+    spatial = add_depth_conv(&mut integer, &mut ops, 4, 8, spatial, 3);
+    for _ in 1..per_stage {
+        spatial = add_depth_conv(&mut integer, &mut ops, 8, 8, spatial, 1);
+    }
+    integer.add(MaxPool2D::new(8, spatial, spatial, 2, 2));
+    ops.push(Op::Pool(Pool::new(8, spatial, spatial, 2, 2)));
+    spatial /= 2;
+    assert_eq!(spatial, 5, "frozen spatial contract");
+
+    integer.add(Flatten);
+    ops.push(Op::Flatten);
+    let dense = Linear::new(8 * spatial * spatial, 64, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    ops.push(Op::Linear(Dense::from_integer(&dense)));
+    integer.add(dense);
+    integer.add(ReLU::new());
+    ops.push(Op::Relu);
+    let head = Linear::new(64, 10, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    ops.push(Op::Linear(Dense::from_integer(&head)));
+    integer.add(head);
+
+    (
+        integer,
+        CnnFp32 {
+            ops,
+            inputs: Vec::new(),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn depth_models_are_deterministic_and_fp32_backpropagates() {
+        for depth in [4, 8] {
+            let (mut integer, mut reference) = build_depth_models(1337, depth);
+            assert_eq!(
+                integer.layers.iter().filter(|layer| layer.name() == "Conv2D").count(),
+                depth
+            );
+            let input = vec![0.0; 784];
+            let target = vec![0.0; 10];
+            let output = reference.forward(&input);
+            assert_eq!(output.len(), 10);
+            assert!(output.iter().all(|x| x.is_finite()));
+            reference.zero_grad();
+            let prediction = reference.accumulate(&input, &target);
+            assert!(prediction < 10);
+            reference.update(7, 1);
+            assert_eq!(reference.nonfinite_parameters(), 0);
+            let zeros = integers::dyadic::Tensor::from_vec(
+                vec![Dyadic::new(0, SHIFT); 784],
+                vec![1, 28, 28],
+            );
+            integer.set_training(false);
+            let y = integer.forward(&zeros);
+            assert_eq!(y.data.len(), 10);
+        }
+    }
+
     #[test]
     fn pool_ties_overlap_and_gradient_scatter() {
         let mut pool = Pool::new(1, 3, 3, 2, 1);
