@@ -466,9 +466,10 @@ pub fn build_depth_models(seed: u64, conv_layers: usize) -> (Sequential, CnnFp32
 
     integer.add(Flatten);
     ops.push(Op::Flatten);
-    let dense = Linear::new(8 * spatial * spatial, 64, SHIFT, SHIFT, BITS)
+    let mut dense = Linear::new(8 * spatial * spatial, 64, SHIFT, SHIFT, BITS)
         .with_grad_clip(GRAD_CLIP)
         .with_momentum(MOM_SHIFT);
+    scale_relu_initial_weights(&mut dense.weights.data);
     ops.push(Op::Linear(Dense::from_integer(&dense)));
     integer.add(dense);
     integer.add(ReLU::new());
