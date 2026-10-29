@@ -59,7 +59,7 @@ jobs:
           test -x target/release/examples/held_out
           python3 experiments/depth_paired_abba.py plan \
             --dir /tmp/integers-depth-ci --seeds 1337 --depths 4,8 \
-            --epochs 1 --train-limit 16 --validation-limit 16 --batch-size 8
+            --epochs 2 --train-limit 2048 --validation-limit 512 --batch-size 32
           python3 experiments/depth_paired_abba.py run --dir /tmp/integers-depth-ci
           python3 experiments/depth_paired_abba.py analyze --dir /tmp/integers-depth-ci
           test ! -e data/mnist/t10k-images-idx3-ubyte
