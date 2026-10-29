@@ -1,0 +1,50 @@
+name: Depth learning quality — 10-epoch paired exploratory control
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: depth-learning-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paired-depth-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate standalone pairing and archive contract
+        run: python3 -m unittest discover -s tests -p 'test_depth_paired_abba.py' -v
+      - name: Acquire only pinned MNIST development IDX
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Build both backends from the same locked revision
+        run: cargo build --locked --release --example held_out
+      - name: Run one matched integer/FP32 learning trial at each depth
+        run: |
+          python3 experiments/depth_paired_abba.py plan \
+            --dir /tmp/depth-learning-10epoch \
+            --single-pass --seeds 1337 --depths 4,8 \
+            --epochs 10 --train-limit 8192 --validation-limit 1042 \
+            --batch-size 32 --lr-shift 7
+          python3 experiments/depth_paired_abba.py run --dir /tmp/depth-learning-10epoch
+          python3 experiments/depth_paired_abba.py analyze --dir /tmp/depth-learning-10epoch
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Publish numerical learning verdict and complete paired curves
+        if: success()
+        run: cat /tmp/depth-learning-10epoch/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve raw per-epoch evidence even if a trial fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: depth-learning-10epoch
+          path: /tmp/depth-learning-10epoch/
+          if-no-files-found: warn
+          retention-days: 30

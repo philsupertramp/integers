@@ -1,0 +1,48 @@
+name: MNIST 20-conv proof of learning — paired integer and FP32
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  depth-20-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test independent depth experiment and archive contracts
+        run: python3 -m unittest discover -s tests -p 'test_depth_paired_abba.py' -v
+      - name: Fetch MNIST development IDX only
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Compile both backends from same locked code
+        run: cargo build --release --locked --example held_out
+      - name: Run matched depth-20 control, fixed 10-epoch budget
+        run: |
+          python3 experiments/depth_paired_abba.py plan \
+            --dir /tmp/mnist-depth-20-learning \
+            --single-pass --seeds 1337 --depths 20 \
+            --epochs 10 --train-limit 8192 --validation-limit 1042 \
+            --batch-size 32 --lr-shift 7
+          python3 experiments/depth_paired_abba.py run \
+            --dir /tmp/mnist-depth-20-learning
+          python3 experiments/depth_paired_abba.py analyze \
+            --dir /tmp/mnist-depth-20-learning
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Summarize exploratory learning gate
+        if: success()
+        run: cat /tmp/mnist-depth-20-learning/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve provenance, raw epochs and checksum-verified logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnist-depth-20-learning
+          path: /tmp/mnist-depth-20-learning/
+          if-no-files-found: warn
+          retention-days: 30

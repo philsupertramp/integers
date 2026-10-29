@@ -46,6 +46,11 @@ enum Task {
 enum Architecture {
     Dense,
     Cnn,
+    Cnn4,
+    Cnn8,
+    Cnn12,
+    Cnn16,
+    Cnn20,
 }
 struct Config {
     task: Task,
@@ -139,6 +144,11 @@ impl Config {
                     cfg.architecture = match value.as_str() {
                         "dense" => Architecture::Dense,
                         "cnn" => Architecture::Cnn,
+                        "cnn4" => Architecture::Cnn4,
+                        "cnn8" => Architecture::Cnn8,
+                        "cnn12" => Architecture::Cnn12,
+                        "cnn16" => Architecture::Cnn16,
+                        "cnn20" => Architecture::Cnn20,
                         _ => panic!("unknown architecture: {value}"),
                     }
                 }
@@ -171,7 +181,7 @@ impl Config {
             i += 2;
         }
         assert!(
-            cfg.architecture != Architecture::Cnn || cfg.task == Task::Mnist,
+            cfg.architecture == Architecture::Dense || cfg.task == Task::Mnist,
             "CNN requires MNIST"
         );
         assert!(
@@ -848,6 +858,14 @@ fn main() {
         (Task::Iris, _) => vec![4, 8, 8, 3],
         (Task::Mnist, Architecture::Dense) => vec![784, 128, 128, 10],
         (Task::Mnist, Architecture::Cnn) => vec![784, 2704, 676, 968, 200, 64, 10],
+        (
+            Task::Mnist,
+            Architecture::Cnn4
+            | Architecture::Cnn8
+            | Architecture::Cnn12
+            | Architecture::Cnn16
+            | Architecture::Cnn20,
+        ) => vec![784, 200, 64, 10],
     };
     let (mut integer, mut fp32) = match cfg.architecture {
         Architecture::Dense => {
@@ -856,6 +874,22 @@ fn main() {
         }
         Architecture::Cnn => {
             let (model, reference) = cnn_reference::build_models(cfg.seed);
+            (model, Fp32Model::Cnn(reference))
+        }
+        Architecture::Cnn4
+        | Architecture::Cnn8
+        | Architecture::Cnn12
+        | Architecture::Cnn16
+        | Architecture::Cnn20 => {
+            let depth = match cfg.architecture {
+                Architecture::Cnn4 => 4,
+                Architecture::Cnn8 => 8,
+                Architecture::Cnn12 => 12,
+                Architecture::Cnn16 => 16,
+                Architecture::Cnn20 => 20,
+                _ => unreachable!("only experimental CNN depths reach this branch"),
+            };
+            let (model, reference) = cnn_reference::build_depth_models(cfg.seed, depth);
             (model, Fp32Model::Cnn(reference))
         }
     };
@@ -1064,10 +1098,14 @@ fn main() {
     } else {
         "mnist"
     };
-    let architecture_kind = if cfg.architecture == Architecture::Dense {
-        "dense_mlp"
-    } else {
-        "mnist_cnn_v1"
+    let architecture_kind = match cfg.architecture {
+        Architecture::Dense => "dense_mlp",
+        Architecture::Cnn => "mnist_cnn_v1",
+        Architecture::Cnn4 => "mnist_cnn_4conv_he_v2",
+        Architecture::Cnn8 => "mnist_cnn_8conv_he_v2",
+        Architecture::Cnn12 => "mnist_cnn_12conv_he_v2",
+        Architecture::Cnn16 => "mnist_cnn_16conv_he_v2",
+        Architecture::Cnn20 => "mnist_cnn_20conv_he_v2",
     };
     if let Some(correct) = test_correct {
         println!(

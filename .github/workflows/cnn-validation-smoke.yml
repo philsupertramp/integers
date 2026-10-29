@@ -53,6 +53,22 @@ jobs:
               assert sum(map(sum,matrix)) == 128
           print((root / "summary.md").read_text())
           PY
+      - name: Paired 4/8-layer independent backend smoke with mirrored order
+        run: |
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test -x target/release/examples/held_out
+          python3 experiments/depth_paired_abba.py plan \
+            --dir /tmp/integers-depth-ci --seeds 1337 --depths 4,8 \
+            --epochs 2 --train-limit 2048 --validation-limit 512 --batch-size 32
+          python3 experiments/depth_paired_abba.py run --dir /tmp/integers-depth-ci
+          python3 experiments/depth_paired_abba.py analyze --dir /tmp/integers-depth-ci
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+      - name: Preserve depth smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: depth-4-8-validation-smoke
+          path: /tmp/integers-depth-ci/
+          retention-days: 14
       - name: Preserve small auditable feasibility measurements
         uses: actions/upload-artifact@v4
         with:

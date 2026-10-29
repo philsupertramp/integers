@@ -1,0 +1,59 @@
+name: MNIST 16-conv learning gate (20-conv manually selectable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      depth:
+        description: 'Convolution layers (20 only after reviewing 16-layer control)'
+        type: choice
+        required: true
+        default: '16'
+        options:
+          - '16'
+          - '20'
+
+permissions:
+  contents: read
+
+jobs:
+  paired-deep-learning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEPTH: ${{ inputs.depth || '16' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check selected depth and protocol tests
+        run: |
+          case "$DEPTH" in 16|20) ;; *) exit 1 ;; esac
+          python3 -m unittest discover -s tests -p 'test_depth_paired_abba.py' -v
+      - name: Fetch canonical MNIST training IDX, not official test data
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Build locked integer and independent FP32 control
+        run: cargo build --locked --release --example held_out
+      - name: Paired validation-only 10-epoch depth learning trial
+        run: |
+          OUTPUT="/tmp/mnist-depth-${DEPTH}-learning"
+          python3 experiments/depth_paired_abba.py plan \
+            --dir "$OUTPUT" --single-pass --seeds 1337 --depths "$DEPTH" \
+            --epochs 10 --train-limit 8192 --validation-limit 1042 \
+            --batch-size 32 --lr-shift 7
+          python3 experiments/depth_paired_abba.py run --dir "$OUTPUT"
+          python3 experiments/depth_paired_abba.py analyze --dir "$OUTPUT"
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Publish paired learning verdict
+        if: success()
+        run: cat "/tmp/mnist-depth-${DEPTH}-learning/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve plan, complete curves, and checksum-verified archives
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnist-depth-${{ inputs.depth || '16' }}-learning
+          path: /tmp/mnist-depth-${{ inputs.depth || '16' }}-learning/
+          if-no-files-found: warn
+          retention-days: 30
