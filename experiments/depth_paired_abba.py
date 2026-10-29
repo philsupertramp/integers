@@ -49,9 +49,14 @@ def parse_numbers(text: str, allowed=None) -> list[int]:
     return values
 
 
+def trial_order(block: int, single_pass: bool) -> str:
+    """Use independent AB training runs for exploration; full mirrored ABBA for timing."""
+    return "AB" if single_pass else mirrored_arms(block)
+
+
 def build_plan(binary: Path, data_dir: Path, seeds: list[int],
                depths: list[int], epochs: int, train: int, validation: int,
-               batch: int, lr_shift: int) -> dict:
+               batch: int, lr_shift: int, single_pass: bool = False) -> dict:
     binary = binary.resolve(strict=True)
     data_dir = data_dir.resolve(strict=True)
     if not binary.is_file() or not all((data_dir / p).is_file() for p in DATA_FILES):
@@ -70,13 +75,14 @@ def build_plan(binary: Path, data_dir: Path, seeds: list[int],
     trials = []
     for depth in depths:
         for block, seed in enumerate(seeds):
-            for arm in mirrored_arms(block):
+            for arm in trial_order(block, single_pass):
                 trials.append({
                     "index": len(trials), "depth": depth, "seed": seed,
                     "block": block, "arm": arm, "backend": BACKENDS[arm],
                 })
     plan = {
-        "schema": 1, "design": "paired-depth-ABBA-BAAB",
+        "schema": 1, "design": ("paired-depth-AB" if single_pass
+                                 else "paired-depth-ABBA-BAAB"),
         "source_sha": source_sha,
         "binary": str(binary), "binary_sha256": file_digest(binary),
         "data_dir": str(data_dir),
@@ -96,14 +102,15 @@ def verify_plan(plan: dict):
     copy = dict(plan)
     checksum = copy.pop("integrity_sha256")
     if digest(canonical(copy)) != checksum or plan.get("schema") != 1 or (
-            plan.get("design") != "paired-depth-ABBA-BAAB"):
+            plan.get("design") not in ("paired-depth-AB", "paired-depth-ABBA-BAAB")):
         raise ValueError("experiment plan was altered")
     expected = []
+    single_pass = plan["design"] == "paired-depth-AB"
     for depth in plan["depths"]:
         if depth not in DEPTHS:
             raise ValueError("unsupported depth")
         for block, seed in enumerate(plan["seeds"]):
-            for arm in mirrored_arms(block):
+            for arm in trial_order(block, single_pass):
                 expected.append({"index": len(expected), "depth": depth,
                                  "seed": seed, "block": block,
                                  "arm": arm, "backend": BACKENDS[arm]})
@@ -248,8 +255,9 @@ def analyze(root: Path):
                 for backend in BACKENDS.values()
             }
             for backend, values in by_backend.items():
-                if len(values) != 2:
-                    raise ValueError(f"missing mirrored repetitions for {backend}")
+                required = 1 if plan["design"] == "paired-depth-AB" else 2
+                if len(values) != required:
+                    raise ValueError(f"expected {required} run(s) for {backend}")
                 # Re-running the same seeded algorithm must NOT change outcomes.
                 curve = values[0]["learning_curve"]
                 if any(
@@ -291,14 +299,16 @@ def analyze(root: Path):
         "schema": 1, "plan_sha256": plan["integrity_sha256"],
         "binary_sha256": plan["binary_sha256"],
         "source_sha": plan["source_sha"], "dataset_sha256": plan["dataset_sha256"],
-        "workload": plan["workload"], "depths": by_depth,
+        "workload": plan["workload"], "design": plan["design"], "depths": by_depth,
         "caveat": "ABBA repetitions control timing drift; only distinct seeds inform learning. "
                   "No Pi speed/energy claim; no official test evaluation; no library-wide "
                   "correctness claim; numerical equivalence not assumed.",
     }
     lines = ["# Paired 4/8-convolution-layer integer vs FP32 feasibility",
              "", "Validation-only development data; no official test evaluation.",
-             "ABBA/BAAB repeated processes are timing controls, not additional seeds.", ""]
+             ("Single-pass AB exploration: one run per backend per depth/seed."
+              if plan["design"] == "paired-depth-AB" else
+              "ABBA/BAAB repeated processes are timing controls, not additional seeds."), ""]
     for depth, summary in by_depth.items():
         lines += [f"## {depth} convolutions", "",
                   "| Seed | Integer validation | FP32 validation | Difference | Integer / FP32 training time |",
@@ -334,6 +344,9 @@ def main(argv=None):
     p.add_argument("--validation-limit", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr-shift", type=int, default=7)
+    p.add_argument("--single-pass", action="store_true",
+                   help="one matched integer/FP32 run per depth/seed for learning exploration; "
+                        "full mirrored ABBA/BAAB remains the default for timing")
     for action in ("run", "analyze"):
         cmd = sub.add_parser(action)
         cmd.add_argument("--dir", type=Path, required=True)
@@ -344,10 +357,12 @@ def main(argv=None):
                               parse_numbers(args.seeds),
                               parse_numbers(args.depths, DEPTHS),
                               args.epochs, args.train_limit,
-                              args.validation_limit, args.batch_size, args.lr_shift)
+                              args.validation_limit, args.batch_size, args.lr_shift,
+                              args.single_pass)
             args.dir.mkdir(parents=True, exist_ok=False)
             (args.dir / "plan.json").write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
-            print(f"Planned {len(plan['trials'])} mirrored validation-only trials")
+            print(f"Planned {len(plan['trials'])} validation-only trials "
+                  f"({plan['design']})")
         elif args.action == "run":
             run(args.dir)
         else:
