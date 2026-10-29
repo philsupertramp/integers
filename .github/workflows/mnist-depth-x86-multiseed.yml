@@ -1,0 +1,77 @@
+name: MNIST x86_64 depth-quality sweep — missing 12/16/20 seeds
+
+on:
+  pull_request:
+    branches: [big-refactor]
+    paths:
+      - '.github/workflows/mnist-depth-x86-multiseed.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mnist-x86-multiseed-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  protocol:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate x86 host and independent depth-archive protocol
+        run: |
+          test "$(uname -m)" = x86_64
+          python3 -m unittest discover -s tests -p 'test_depth_paired_abba.py' -v
+          cargo test --locked --all-targets
+
+  independent-seeds:
+    name: depth-${{ matrix.depth }} / seed-${{ matrix.seed }} (x86_64)
+    needs: protocol
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        depth: [12, 16, 20]
+        seed: [2027, 4242]
+    env:
+      DEPTH: ${{ matrix.depth }}
+      SEED: ${{ matrix.seed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Confirm native x86_64 execution
+        run: test "$(uname -m)" = x86_64
+      - name: Fetch and verify pinned MNIST development IDX only
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Build paired integer and independent FP32 backends
+        run: cargo build --release --locked --example held_out
+      - name: Frozen matched 10-epoch experiment
+        run: |
+          OUT="/tmp/x86-depth-${DEPTH}-seed-${SEED}"
+          python3 experiments/depth_paired_abba.py plan \
+            --dir "$OUT" \
+            --single-pass --seeds "$SEED" --depths "$DEPTH" \
+            --epochs 10 --train-limit 8192 --validation-limit 1042 \
+            --batch-size 32 --lr-shift 7
+          python3 experiments/depth_paired_abba.py run --dir "$OUT"
+          python3 experiments/depth_paired_abba.py analyze --dir "$OUT"
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Summarize quality verdict for this independent seed
+        if: success()
+        run: cat "/tmp/x86-depth-${DEPTH}-seed-${SEED}/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve immutable plan, per-epoch reports and log archives
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-mnist-d${{ matrix.depth }}-s${{ matrix.seed }}
+          path: /tmp/x86-depth-${{ matrix.depth }}-seed-${{ matrix.seed }}/
+          if-no-files-found: warn
+          retention-days: 30

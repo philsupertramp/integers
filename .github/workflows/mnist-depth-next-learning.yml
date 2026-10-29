@@ -1,10 +1,6 @@
 name: MNIST 16-conv learning gate (20-conv manually selectable)
 
 on:
-  pull_request:
-    branches: [big-refactor]
-    paths:
-      - '.github/workflows/mnist-depth-next-learning.yml'
   workflow_dispatch:
     inputs:
       depth:

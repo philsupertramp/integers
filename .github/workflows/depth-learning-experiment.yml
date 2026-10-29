@@ -1,13 +1,6 @@
 name: Depth learning quality — 10-epoch paired exploratory control
 
 on:
-  pull_request:
-    branches: [big-refactor]
-    paths:
-      - 'experiments/depth_paired_abba.py'
-      - 'tests/test_depth_paired_abba.py'
-      - 'docs/DEPTH_STUDY.md'
-      - '.github/workflows/depth-learning-experiment.yml'
   workflow_dispatch:
 
 permissions:

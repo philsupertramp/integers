@@ -1,10 +1,7 @@
 name: MNIST 20-conv proof of learning — paired integer and FP32
 
 on:
-  pull_request:
-    branches: [big-refactor]
-    paths:
-      - '.github/workflows/mnist-depth-20-learning.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read

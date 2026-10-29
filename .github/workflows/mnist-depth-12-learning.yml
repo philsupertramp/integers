@@ -1,10 +1,6 @@
 name: MNIST 12-conv proof of learning — matched integer and FP32
 
 on:
-  pull_request:
-    branches: [big-refactor]
-    paths:
-      - '.github/workflows/mnist-depth-12-learning.yml'
   workflow_dispatch:
 
 permissions:

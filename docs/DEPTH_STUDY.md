@@ -255,3 +255,15 @@ observations and one seed, with mirrored repeats. It tests execution, archive
 validation, dataset isolation and an initial learning signal, **not full
 convergence or independent generalization**. Further layerwise loss, zero-gradient, saturation and
 rounding-to-zero observability belongs in #37 after reviewing actual results.
+
+## 20-layer learning gate completed; three-seed native x86_64 sweep
+
+The [20-convolution, 10-epoch, one-seed MNIST control](https://github.com/philsupertramp/integers/actions/runs/40955710678) passed: validation **80.902% integer** and **83.589% FP32** (integer − FP32 **−2.687 percentage points**), seed 1337, 8192 train, 1042 validation, batch 32, lr shift 7. [Archived raw reports](https://github.com/philsupertramp/integers/actions/runs/40955710678/artifacts/12933159670). Its reported **3.02×** is the integer / FP32 *training-time ratio*, not an accuracy gap. None of the seeded experiments touches the official MNIST test partition.
+
+All 4/8/12/16/20-layer He-v2 variants now pass the initial one-seed learning gate, but the one-seed results do **not** establish a population trend or guarantee that integer and FP32 agree numerically layer-by-layer. Specifically, the integer-minus-FP32 final validation gaps at seed 1337 are −1.248, −0.672, −4.223, −0.384 and −2.687 pp, respectively. They are non-monotonic.
+
+The **native x86_64 multi-seed** follow-up runs only the *missing independent seeds* `2027` and `4242` on each of depths **12, 16 and 20** with the same training and validation split, epoch budget and hyperparameters. A six-job GitHub Actions matrix archives immutable per-job plans, binary/dataset checksums, independent integer and FP32 full learning curves and report logs. It does **not** relabel deterministic repeated jobs as independent evidence. A pooled three-seed assessment must combine these six results with the existing independently completed seed-1337 results for the matching depth, and identify which exact commits were used (identical model source; workflow-only changes).
+
+For low-noise *timing*, retain the original mirrored ABBA/BAAB protocol as a separate experiment. The new six-job matrix is for **training quality**, not rigorous timing: parallel CI jobs and host contention may bias wall-clock ratios. More robust conclusions still require gradient oracles and, where relevant, layerwise diagnostics (#37). No CIFAR-10 migration until MNIST capabilities and limitations have been assessed.
+
+Previously expensive one-seed PR workflows are now manual-dispatch-only to avoid re-running duplicate training whenever the draft PR changes. The six native x86_64 depth-seed combinations are the new automatic research gate.
