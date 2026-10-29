@@ -92,7 +92,7 @@ class DepthPairedTests(unittest.TestCase):
         plan = self.plan(seeds=[1337, 2027, 4242], depths=[4, 8])
         # Build a separate, immutable single-pass plan with unchanged workload.
         with mock.patch.object(depth.subprocess, "check_output",
-                               return_value="a" * 40 + "\\n"):
+                               return_value="a" * 40):
             plan = depth.build_plan(self.binary, self.data,
                                     [1337, 2027, 4242], [4, 8],
                                     1, 20, 10, 2, 7, single_pass=True)
