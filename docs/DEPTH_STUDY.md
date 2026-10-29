@@ -46,6 +46,42 @@ continuous FP32 convolution, pooling, linear, backward and optimizer arithmetic
 from `experiments/cnn_reference.rs`; no integer production helpers in its
 training arithmetic.
 
+## After the first longer experiment: isolate an initialization control
+
+The [frozen 10-epoch v1 hosted x86_64 run](https://github.com/philsupertramp/integers/actions/runs/40928659717)
+used 8,192 training / 1,042 validation rows and seed 1337:
+
+| Model v1 (same default fan-in uniform initialization) | Integer | FP32 |
+| --- | ---: | ---: |
+| 4 convolutions | 74.280% | 79.367% |
+| 8 convolutions | 8.637% | 9.693% |
+
+The four-layer networks learn noticeably; neither 8-layer backend leaves
+chance-level classification. This is a **failed FP32 learning control** for
+eight layers, *not* evidence of a specifically integer-induced depth defect.
+The run's full reports remain immutable in the linked Actions artifact.
+
+To isolate a conventional source of deep plain-ReLU training failure, the
+**new v2 experiment differs from v1 only in its initialization**:
+before copying parameters to the independent FP32 model, all hidden
+convolution and hidden dense weights are multiplied **once** by the exact
+integer factor 5/2 (truncated toward zero). The baseline constructor samples
+uniformly at approximately ±1/sqrt(fan-in); this produces approximately
+±2.5/sqrt(fan-in) initial bounds, near He-uniform
+±sqrt(6/fan-in). The output linear head is unchanged, as are model topology,
+loss, quantization shifts, clipping, momentum, SGD and data selection.
+Both numerical backends receive exactly the same already-scaled, quantized
+weights. This preparation-only change does **not** alter production layer
+constructors or introduce floats to runtime integer training.
+
+New result identities are `mnist_cnn_4conv_he_v2` and
+`mnist_cnn_8conv_he_v2` to prevent mixing the original v1 experiment
+with v2. The same 10-epoch/8192/1042 job can be rerun and should be
+interpreted independently. We must still see FP32 improve before drawing
+conclusions about integer-specific numerical soundness; if not, revisit
+plain-network width/initialization or learning-rate choices as new disclosed
+experiments rather than simply raising the integer precision.
+
 ## Larger learning-control experiment
 
 The 2026-10-29 2-epoch, 2,048-train/512-validation one-seed feasibility
