@@ -38,6 +38,13 @@ def utc_now():
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
+def mirrored_arms(block_index):
+    """Shared deterministic ABBA/BAAB order; not a quality acceptance gate."""
+    if not isinstance(block_index, int) or block_index < 0:
+        raise ValueError("block index must be nonnegative")
+    return "ABBA" if block_index % 2 == 0 else "BAAB"
+
+
 def build_plan(run_id, image_a=IMAGE_A, image_b=IMAGE_B, seeds=STANDARD_SEEDS,
                namespace="default"):
     valid_name(run_id)
@@ -56,7 +63,7 @@ def build_plan(run_id, image_a=IMAGE_A, image_b=IMAGE_B, seeds=STANDARD_SEEDS,
     for block, seed in enumerate(seeds):
         # ABBA and BAAB both put treatment observations symmetrically in time.
         # Reversing by seed protects against systematic first-arm bias.
-        for letter in ("ABBA" if block % 2 == 0 else "BAAB"):
+        for letter in mirrored_arms(block):
             number = len(trials)
             job = valid_name(f"pi5-{run_id}-{number:02d}")
             trials.append({"index": number, "block": block, "seed": seed,
