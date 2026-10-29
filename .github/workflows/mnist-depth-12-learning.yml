@@ -1,0 +1,52 @@
+name: MNIST 12-conv proof of learning — matched integer and FP32
+
+on:
+  pull_request:
+    branches: [big-refactor]
+    paths:
+      - '.github/workflows/mnist-depth-12-learning.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  depth-12-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate deep-pair protocol tests
+        run: python3 -m unittest discover -s tests -p 'test_depth_paired_abba.py' -v
+      - name: Fetch only canonical MNIST training IDX
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Build frozen Rust integer and independent FP32 experiment
+        run: cargo build --locked --release --example held_out
+      - name: Train 12-conv model for 10 epochs using paired learning protocol
+        run: |
+          python3 experiments/depth_paired_abba.py plan \
+            --dir /tmp/mnist-depth-12-learning \
+            --single-pass --seeds 1337 --depths 12 \
+            --epochs 10 --train-limit 8192 --validation-limit 1042 \
+            --batch-size 32 --lr-shift 7
+          python3 experiments/depth_paired_abba.py run \
+            --dir /tmp/mnist-depth-12-learning
+          python3 experiments/depth_paired_abba.py analyze \
+            --dir /tmp/mnist-depth-12-learning
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Report learning comparison
+        if: success()
+        run: cat /tmp/mnist-depth-12-learning/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve verified plan, full curves, and original logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnist-depth-12-learning
+          path: /tmp/mnist-depth-12-learning/
+          if-no-files-found: warn
+          retention-days: 30
