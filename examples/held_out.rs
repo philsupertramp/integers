@@ -1081,8 +1081,8 @@ fn main() {
     let architecture_kind = match cfg.architecture {
         Architecture::Dense => "dense_mlp",
         Architecture::Cnn => "mnist_cnn_v1",
-        Architecture::Cnn4 => "mnist_cnn_4conv_v1",
-        Architecture::Cnn8 => "mnist_cnn_8conv_v1",
+        Architecture::Cnn4 => "mnist_cnn_4conv_he_v2",
+        Architecture::Cnn8 => "mnist_cnn_8conv_he_v2",
     };
     if let Some(correct) = test_correct {
         println!(
