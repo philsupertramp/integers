@@ -397,8 +397,10 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
  *
  * A fixed pair of convolutional stages uses 3x3 spatial convolution followed
  * by optional 1x1 convolutions, ReLU after each convolution and a 2x2 pool
- * after each stage. 4 and 8 convolutional layers thus keep the same spatial
- * geometry (28 -> 13 -> 5), dense head and comparable channel widths.
+ * after each stage. 4, 8, 12, 16, and 20 convolutional layers thus keep the
+ * same spatial geometry (28 -> 13 -> 5), dense head and channel widths.
+ * More layers test gradient and precision propagation at unchanged feature
+ * map geometry; 1x1 convolutions do not expand the spatial receptive field.
  * The extra 1x1 layers isolate gradient propagation without adding a
  * padding implementation or silently changing the classifier dimensions.
  *
@@ -439,8 +441,8 @@ fn add_depth_conv(
 
 pub fn build_depth_models(seed: u64, conv_layers: usize) -> (Sequential, CnnFp32) {
     assert!(
-        conv_layers == 4 || conv_layers == 8,
-        "only the predeclared 4/8-layer depth study is supported"
+        matches!(conv_layers, 4 | 8 | 12 | 16 | 20),
+        "only the predeclared 4/8/12/16/20-layer depth study is supported"
     );
     seed_rng(seed);
     let mut integer = Sequential::new();
@@ -512,13 +514,21 @@ mod tests {
 
     #[test]
     fn depth_models_are_deterministic_and_fp32_backpropagates() {
-        for depth in [4, 8] {
+        for depth in [4, 8, 12, 16, 20] {
             let (mut integer, mut reference) = build_depth_models(1337, depth);
             assert_eq!(
                 integer
                     .layers
                     .iter()
                     .filter(|layer| layer.name() == "Conv2D")
+                    .count(),
+                depth
+            );
+            assert_eq!(
+                reference
+                    .ops
+                    .iter()
+                    .filter(|op| matches!(op, Op::Conv(_)))
                     .count(),
                 depth
             );

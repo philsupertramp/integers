@@ -19,7 +19,7 @@ from pi5_benchmark import emit_result_archive, extract_result_archive
 from pi5_interleaved_ab import mirrored_arms
 
 DEFAULT_SEEDS = (1337, 2027, 4242)
-DEPTHS = (4, 8)
+DEPTHS = (4, 8, 12, 16, 20)
 DATA_FILES = ("train-images-idx3-ubyte", "train-labels-idx1-ubyte")
 BACKENDS = {"A": "integer", "B": "fp32"}
 # First proof of learning, not a final accuracy benchmark or arithmetic oracle.
@@ -69,7 +69,7 @@ def build_plan(binary: Path, data_dir: Path, seeds: list[int],
             not 0 < s < 1 << 64 for s in seeds):
         raise ValueError("use 1..16 unique positive u64 seeds")
     if not depths or len(set(depths)) != len(depths) or any(d not in DEPTHS for d in depths):
-        raise ValueError("only distinct 4/8 depths allowed")
+        raise ValueError("only distinct predeclared 4/8/12/16/20 depths allowed")
     if not (1 <= epochs <= 100 and 1 <= train <= 55000 and
             1 <= validation <= 5000 and 1 <= batch <= 1024 and 0 <= lr_shift <= 30):
         raise ValueError("invalid bounded validation-only workload")
@@ -367,7 +367,9 @@ def main(argv=None):
     p.add_argument("--binary", type=Path, default=Path("target/release/examples/held_out"))
     p.add_argument("--data-dir", type=Path, default=Path("data/mnist"))
     p.add_argument("--seeds", default=",".join(map(str, DEFAULT_SEEDS)))
-    p.add_argument("--depths", default="4,8")
+    p.add_argument("--depths", default="4,8",
+                   help="comma-separated subset of 4,8,12,16,20; new depths use "
+                        "the exact He-v2 topology and MNIST development split")
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--train-limit", type=int, default=2048)
     p.add_argument("--validation-limit", type=int, default=512)

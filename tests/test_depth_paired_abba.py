@@ -116,6 +116,39 @@ class DepthPairedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "altered"):
             depth.verify_plan(bad)
 
+    def test_deeper_mnist_depths_have_distinct_archives_and_are_fail_closed(self):
+        plan = self.plan(seeds=[1337], depths=[12, 16, 20])
+        self.assertEqual(len(plan["trials"]), 12)
+        self.assertEqual([trial["depth"] for trial in plan["trials"][::4]],
+                         [12, 16, 20])
+        self.assertEqual([trial["arm"] for trial in plan["trials"][:4]],
+                         list("ABBA"))
+        (self.root / "plan.json").write_text(json.dumps(plan))
+        for trial in plan["trials"]:
+            archive(self.root, plan, trial, 50.0)
+        outcome = depth.analyze(self.root)
+        self.assertEqual(set(outcome["depths"]), {"12", "16", "20"})
+        for d in ("12", "16", "20"):
+            self.assertEqual(outcome["depths"][d]["quality_status"],
+                             "inconclusive_fp32_not_learned")
+        altered = json.loads(json.dumps(plan))
+        altered["depths"].append(24)
+        with self.assertRaisesRegex(ValueError, "altered"):
+            depth.verify_plan(altered)
+
+    def test_deep_single_pass_and_depth_whitelist(self):
+        with mock.patch.object(depth.subprocess, "check_output",
+                               return_value="a" * 40):
+            plan = depth.build_plan(self.binary, self.data, [1337], [12, 16, 20],
+                                    1, 20, 10, 2, 7, single_pass=True)
+        self.assertEqual(len(plan["trials"]), 6)
+        self.assertEqual([t["backend"] for t in plan["trials"]],
+                         ["integer", "fp32"] * 3)
+        self.assertEqual(depth.parse_numbers("12,16,20", depth.DEPTHS),
+                         [12, 16, 20])
+        with self.assertRaisesRegex(ValueError, "only"):
+            depth.parse_numbers("12,24", depth.DEPTHS)
+
     def test_rejects_changed_binary_and_dataset(self):
         plan = self.plan()
         depth.check_environment(plan)

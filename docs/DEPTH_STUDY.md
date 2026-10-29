@@ -1,13 +1,14 @@
-# #38 — paired 4/8-convolution integer-vs-FP32 feasibility
+# #38 — paired MNIST depth feasibility: 4/8/12/16/20 convolutions
 
-**Status:** implementation candidate only. No complete 3-seed feasibility/quality
-results are asserted here. This is the *first*, inexpensive, x86_64-controlled
-depth experiment. #37 instrumentation and 12/16/20-convolution studies are
-deliberately deferred until the paired results are reviewed.
+**Status:** 4/8-layer He-v2 validation was confirmed across three paired
+independent seeds; 12/16/20 layers are now implemented for progressive
+feasibility testing. Numeric behavior and convergence at deeper levels are
+**not yet established**. Defer #37 per-layer diagnostics until experiments
+identify a reproducible integer-specific deviation.
 
 ## Dataset decision for the first step
 
-This is an **MNIST control**, not yet the proposed CIFAR-10 stress test. It
+This remains an **MNIST depth study**; the CIFAR-10 stress test is explicitly deferred. It
 extends the independently tested, seeded MNIST CNN from #35 while holding the
 input, target convention, loss and source/preparation fixed. That isolates
 depth as the immediate variable; adding a new CIFAR loader/data layout at the
@@ -45,6 +46,76 @@ momentum decay `2^-1`, actual-size minibatch means, and the pre-existing
 continuous FP32 convolution, pooling, linear, backward and optimizer arithmetic
 from `experiments/cnn_reference.rs`; no integer production helpers in its
 training arithmetic.
+
+## Phase D: 12/16/20 convolutional layers on MNIST
+
+After **three independent He-v2 seeds** on 4/8 layers, the mean validation
+accuracy was approximately 87.33% integer vs 88.55% FP32 at depth 4, and
+83.11% integer vs 85.25% FP32 at depth 8. The largest single-seed deficit
+was 3.74 pp (depth 8, seed 2027); all three matched seeds showed learning.
+These are developer-uploaded, checksum-verified development-validation
+results, not a pristine test set or controlled timing evidence.
+
+Continue on MNIST for now. Do **not** introduce CIFAR-10, augmentation,
+normalization, residual connections, or any optimizer/quantization change
+while investigating the depth limit.
+
+### Frozen deeper architecture
+
+Extend the He-v2 paired CNN construction to **12, 16, and 20** convolutional
+layers. There are always two identical spatial stages:
+
+- Stage A: one 3x3 Conv(1→4) and `(D/2 − 1)` 1x1 Conv(4→4), each
+  followed by ReLU, then a 2x2 MaxPool2D.
+- Stage B: one 3x3 Conv(4→8) and `(D/2 − 1)` 1x1 Conv(8→8), each
+  followed by ReLU, then another 2x2 MaxPool2D.
+- The resulting `8×5×5` feature map is flattened and processed by
+  `Linear(200→64) → ReLU → Linear(64→10)`, exactly as at depth 4/8.
+- All hidden convolution and hidden linear weights retain the integer-only
+  preparation-time ×5/2 He-style initialization. The independent FP32
+  reference receives the decoded *same* initialized dyadic parameters.
+- Shift 7, 31-bit outputs, raw-logit MSE, clipping, momentum, dataset
+  split, learning-rate shift, and deterministic sample orders are unchanged.
+- The model identities are `mnist_cnn_{12,16,20}conv_he_v2`.
+
+This isolates **backpropagation depth**, not increased spatial receptive
+field or model width. It is a plain, narrow network without skip connections;
+lack of convergence in *both* backends is not an integer-specific bug.
+
+### Execution: do not launch all training at once
+
+The PR's new CI depth smoke runs **one epoch, 64 train / 64 validation**, and
+one independent integer/FP32 trial for each new depth. It checks construction,
+forward/backward, report and archive validity, but is **not convergence
+evidence** and must not be evaluated against the 80% accuracy gate.
+
+On an x86_64 machine, after the MNIST data and Rust release example are
+prepared, first run *one seed for one depth* to identify which depths are
+computationally feasible and learn. Each `plan` requires a fresh directory:
+
+```sh
+python3 experiments/depth_paired_abba.py plan \
+  --dir depth-results/mnist-12conv-seed1337 \
+  --single-pass --seeds 1337 --depths 12 --epochs 10 \
+  --train-limit 8192 --validation-limit 1042 --batch-size 32 --lr-shift 7
+python3 experiments/depth_paired_abba.py run \
+  --dir depth-results/mnist-12conv-seed1337
+python3 experiments/depth_paired_abba.py analyze \
+  --dir depth-results/mnist-12conv-seed1337
+```
+
+Repeat with separate directories and `--depths 16` then `20` after
+inspecting each FP32 learning curve and elapsed CPU cost. If the FP32 control
+learns at a given depth and integer fails or reproducibly degrades,
+investigate layerwise numerical diagnostics in #37 **before** modifying
+quantization to improve headline accuracy. If the FP32 control fails,
+the benchmark is inconclusive for integer numerical quality.
+
+Only after both backends learn at a depth run the frozen 3-seed cohort
+`--seeds 1337,2027,4242` there. Then, separately, use the existing
+mirrored ABBA/BAAB protocol for timing on a low-load x86_64 or Pi5 host;
+wall times gathered under competing load are not reliable comparisons.
+No official MNIST test partition is used in these depth experiments.
 
 ## After the first longer experiment: isolate an initialization control
 
