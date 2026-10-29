@@ -493,6 +493,24 @@ pub fn build_depth_models(seed: u64, conv_layers: usize) -> (Sequential, CnnFp32
 mod tests {
     use super::*;
     #[test]
+    fn depth_init_scaling_is_deterministic_and_integer_only() {
+        let mut weights = [
+            Dyadic::new(64, SHIFT),
+            Dyadic::new(-7, SHIFT),
+            Dyadic::new(0, SHIFT),
+        ];
+        scale_relu_initial_weights(&mut weights);
+        assert_eq!(
+            weights,
+            [
+                Dyadic::new(160, SHIFT),
+                Dyadic::new(-17, SHIFT),
+                Dyadic::new(0, SHIFT),
+            ]
+        );
+    }
+
+    #[test]
     fn depth_models_are_deterministic_and_fp32_backpropagates() {
         for depth in [4, 8] {
             let (mut integer, mut reference) = build_depth_models(1337, depth);
