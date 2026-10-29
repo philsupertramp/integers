@@ -864,7 +864,11 @@ fn main() {
             (model, Fp32Model::Cnn(reference))
         }
         Architecture::Cnn4 | Architecture::Cnn8 => {
-            let depth = if cfg.architecture == Architecture::Cnn4 { 4 } else { 8 };
+            let depth = if cfg.architecture == Architecture::Cnn4 {
+                4
+            } else {
+                8
+            };
             let (model, reference) = cnn_reference::build_depth_models(cfg.seed, depth);
             (model, Fp32Model::Cnn(reference))
         }
