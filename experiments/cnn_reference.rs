@@ -424,11 +424,12 @@ fn add_depth_conv(
     spatial: usize,
     kernel: usize,
 ) -> usize {
-    let conv = Conv2D::new(
+    let mut conv = Conv2D::new(
         cin, cout, kernel, kernel, spatial, spatial, SHIFT, SHIFT, BITS,
     )
     .with_grad_clip(GRAD_CLIP)
     .with_momentum(MOM_SHIFT);
+    scale_relu_initial_weights(&mut conv.kernels.data);
     ops.push(Op::Conv(Convolution::from_integer(&conv)));
     integer.add(conv);
     integer.add(ReLU::new());
