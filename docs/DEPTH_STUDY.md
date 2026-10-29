@@ -46,6 +46,47 @@ continuous FP32 convolution, pooling, linear, backward and optimizer arithmetic
 from `experiments/cnn_reference.rs`; no integer production helpers in its
 training arithmetic.
 
+## Larger learning-control experiment
+
+The 2026-10-29 2-epoch, 2,048-train/512-validation one-seed feasibility
+experiment did not establish learning for *either* backend, with only
+8–16% validation accuracy. Do not diagnose integer-specific instability
+from this short run.
+
+A second, predeclared validation-only CI experiment now trains **10 epochs on
+8,192 examples**, validating on 1,042 fixed examples, batch 32, learning rate
+shift 7. Its time budget is approximately 5–10 minutes on a hosted x86_64
+runner, but duration depends on the runner. The separate workflow is
+`.github/workflows/depth-learning-experiment.yml`.
+
+We use `--single-pass` to run one independent A=integer/B=FP32 process
+per depth for exploratory **learning quality**. Deterministic single-seed
+repetitions would waste this training budget and do not add independent
+learning evidence; the default **mirrored ABBA/BAAB mode is unchanged**
+for repeatable performance comparison after convergence.
+
+This is an exploratory **one-seed** control, not a final conclusion. Before
+reading outcomes, the initial learning/quality classifications are frozen:
+both backends must achieve **at least 80% mean validation accuracy**,
+and the integer model must lag FP32 by **no more than 5 percentage points**
+for the `initial_quality_gate_pass` label. If FP32 stays below 80%, the
+result is `inconclusive_fp32_not_learned`, even when integer accuracy
+is comparably low. These gates do not replace gradient or operator oracles,
+or establish test-set generalization. Later three-seed matched runs and
+the full mirrored Pi timing suite remain separate.
+
+To reproduce this longer exploratory CI job locally:
+
+```sh
+cargo build --release --locked --example held_out
+python3 experiments/depth_paired_abba.py plan \
+  --dir depth-results/learning-10epoch-01 --single-pass \
+  --seeds 1337 --depths 4,8 --epochs 10 \
+  --train-limit 8192 --validation-limit 1042 --batch-size 32
+python3 experiments/depth_paired_abba.py run --dir depth-results/learning-10epoch-01
+python3 experiments/depth_paired_abba.py analyze --dir depth-results/learning-10epoch-01
+```
+
 ## Execution
 
 On an x86_64 host with Rust and Python 3 and canonical MNIST training IDX:
