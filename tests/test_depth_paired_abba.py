@@ -31,7 +31,7 @@ def fixture(trial, plan, val=50.0):
     return {
         "schema": 1, "dataset": "mnist", "seed": trial["seed"],
         "backend": trial["backend"],
-        "architecture_kind": f"mnist_cnn_{trial['depth']}conv_v1",
+        "architecture_kind": f"mnist_cnn_{trial['depth']}conv_he_v2",
         "validation_only": True, "test_evaluated": False,
         "test_size": 0, "test_accuracy_pct": None,
         "train_size": plan["workload"]["train"], "validation_size": n,
