@@ -102,7 +102,8 @@ partial/tampered outputs.
   correct. Existing analytic layer oracles remain mandatory. If FP32 fails to
   learn at a depth, report **inconclusive**, not an integer-specific failure.
 
-The CI smoke uses only 16 training / 16 validation observations and one
-seed; it tests code execution, archive validation and dataset isolation, **not
-convergence**. Further layerwise loss, zero-gradient, saturation and
+The CI feasibility test uses 2 epochs with 2,048 training / 512 validation
+observations and one seed, with mirrored repeats. It tests execution, archive
+validation, dataset isolation and an initial learning signal, **not full
+convergence or independent generalization**. Further layerwise loss, zero-gradient, saturation and
 rounding-to-zero observability belongs in #37 after reviewing actual results.
