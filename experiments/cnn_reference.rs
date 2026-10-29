@@ -392,7 +392,6 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
     )
 }
 
-
 /**
  * Paired depth stress models for #38.
  *
@@ -411,9 +410,11 @@ fn add_depth_conv(
     spatial: usize,
     kernel: usize,
 ) -> usize {
-    let conv = Conv2D::new(cin, cout, kernel, kernel, spatial, spatial, SHIFT, SHIFT, BITS)
-        .with_grad_clip(GRAD_CLIP)
-        .with_momentum(MOM_SHIFT);
+    let conv = Conv2D::new(
+        cin, cout, kernel, kernel, spatial, spatial, SHIFT, SHIFT, BITS,
+    )
+    .with_grad_clip(GRAD_CLIP)
+    .with_momentum(MOM_SHIFT);
     ops.push(Op::Conv(Convolution::from_integer(&conv)));
     integer.add(conv);
     integer.add(ReLU::new());
@@ -480,7 +481,11 @@ mod tests {
         for depth in [4, 8] {
             let (mut integer, mut reference) = build_depth_models(1337, depth);
             assert_eq!(
-                integer.layers.iter().filter(|layer| layer.name() == "Conv2D").count(),
+                integer
+                    .layers
+                    .iter()
+                    .filter(|layer| layer.name() == "Conv2D")
+                    .count(),
                 depth
             );
             let input = vec![0.0; 784];
