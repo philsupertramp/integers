@@ -146,7 +146,7 @@ def validate_record(record: dict, trial: dict, plan: dict):
     if (record.get("schema") != 1 or record.get("dataset") != "mnist"
             or record.get("seed") != trial["seed"]
             or record.get("backend") != trial["backend"]
-            or record.get("architecture_kind") != f"mnist_cnn_{trial['depth']}conv_v1"
+            or record.get("architecture_kind") != f"mnist_cnn_{trial['depth']}conv_he_v2"
             or record.get("validation_only") is not True
             or record.get("test_evaluated") is not False
             or record.get("test_size") != 0
