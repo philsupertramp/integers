@@ -88,6 +88,34 @@ class DepthPairedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "altered"):
             depth.verify_plan(altered)
 
+    def test_single_pass_pairs_preserve_provenance_and_quality_verdict(self):
+        plan = self.plan(seeds=[1337, 2027, 4242], depths=[4, 8])
+        # Build a separate, immutable single-pass plan with unchanged workload.
+        with mock.patch.object(depth.subprocess, "check_output",
+                               return_value="a" * 40 + "\\n"):
+            plan = depth.build_plan(self.binary, self.data,
+                                    [1337, 2027, 4242], [4, 8],
+                                    1, 20, 10, 2, 7, single_pass=True)
+        self.assertEqual(plan["design"], "paired-depth-AB")
+        self.assertEqual(len(plan["trials"]), 12)
+        self.assertEqual([t["arm"] for t in plan["trials"][:2]], ["A", "B"])
+        self.assertIs(depth.verify_plan(plan), plan)
+        (self.root / "plan.json").write_text(json.dumps(plan))
+        for trial in plan["trials"]:
+            archive(self.root, plan, trial,
+                    60.0 if trial["backend"] == "fp32" else 50.0)
+        outcome = depth.analyze(self.root)
+        self.assertEqual(
+            outcome["depths"]["4"]["quality_status"],
+            "inconclusive_fp32_not_learned")
+        self.assertEqual(len(outcome["depths"]["8"]["seeds"]), 3)
+        self.assertEqual(outcome["design"], "paired-depth-AB")
+        # Duplicating a run is forbidden, not considered an extra seed.
+        bad = json.loads(json.dumps(plan))
+        bad["trials"].append(bad["trials"][0])
+        with self.assertRaisesRegex(ValueError, "altered"):
+            depth.verify_plan(bad)
+
     def test_rejects_changed_binary_and_dataset(self):
         plan = self.plan()
         depth.check_environment(plan)
