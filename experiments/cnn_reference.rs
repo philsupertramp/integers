@@ -401,7 +401,21 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
  * geometry (28 -> 13 -> 5), dense head and comparable channel widths.
  * The extra 1x1 layers isolate gradient propagation without adding a
  * padding implementation or silently changing the classifier dimensions.
+ *
+ * The earlier v1 narrow/deep control plateaued near 10% for BOTH backends.
+ * v2 uses an approximate He-uniform fan-in scaling (×5/2 vs original
+ * ×sqrt(6)) ONLY at initialization for layers feeding ReLU. Multiplication
+ * is deterministic integer preparation, and FP32 receives precisely the
+ * same already-initialized dyadic weights via its independent decoder.
+ * This does not change Conv2D::new or production weight initialization.
  */
+fn scale_relu_initial_weights(weights: &mut [Dyadic]) {
+    for value in weights {
+        value.v = i32::try_from((value.v as i64 * 5) / 2)
+            .expect("depth experiment: He-scaled initial weight overflow");
+    }
+}
+
 fn add_depth_conv(
     integer: &mut Sequential,
     ops: &mut Vec<Op>,
