@@ -22,6 +22,10 @@ DEFAULT_SEEDS = (1337, 2027, 4242)
 DEPTHS = (4, 8)
 DATA_FILES = ("train-images-idx3-ubyte", "train-labels-idx1-ubyte")
 BACKENDS = {"A": "integer", "B": "fp32"}
+# First proof of learning, not a final accuracy benchmark or arithmetic oracle.
+# Freeze before interpreting the 10-epoch exploratory run.
+MIN_MEAN_VALIDATION_PCT = 80.0
+MAX_MEAN_INTEGER_GAP_PP = 5.0
 
 
 def digest(data: bytes) -> str:
@@ -279,11 +283,30 @@ def analyze(root: Path):
                 "fp32_final_validation_pct": b, "integer_minus_fp32_pp": a - b,
                 "integer_training_ms": t_a, "fp32_training_ms": t_b,
                 "integer_over_fp32_time": t_a / t_b,
+                "integer_peak_rss_kb": max(
+                    (r.get("peak_rss_kb") or 0) for r in by_backend["integer"]),
+                "fp32_peak_rss_kb": max(
+                    (r.get("peak_rss_kb") or 0) for r in by_backend["fp32"]),
                 "integer_curve": by_backend["integer"][0]["learning_curve"],
                 "fp32_curve": by_backend["fp32"][0]["learning_curve"],
             })
+        mean_integer = statistics.mean(
+            r["integer_final_validation_pct"] for r in per_seed)
+        mean_fp32 = statistics.mean(
+            r["fp32_final_validation_pct"] for r in per_seed)
+        if mean_fp32 < MIN_MEAN_VALIDATION_PCT:
+            quality_status = "inconclusive_fp32_not_learned"
+        elif mean_integer < MIN_MEAN_VALIDATION_PCT:
+            quality_status = "integer_below_learning_threshold"
+        elif mean_fp32 - mean_integer > MAX_MEAN_INTEGER_GAP_PP:
+            quality_status = "integer_accuracy_gap_exceeds_threshold"
+        else:
+            quality_status = "initial_quality_gate_pass"
         by_depth[str(depth)] = {
             "seeds": per_seed,
+            "quality_status": quality_status,
+            "learning_min_validation_pct": MIN_MEAN_VALIDATION_PCT,
+            "max_mean_integer_gap_pp": MAX_MEAN_INTEGER_GAP_PP,
             "mean_integer_minus_fp32_pp": statistics.mean(
                 r["integer_minus_fp32_pp"] for r in per_seed),
             "worst_integer_minus_fp32_pp": min(
@@ -318,11 +341,17 @@ def analyze(root: Path):
                          f"{x['fp32_final_validation_pct']:.3f}% | "
                          f"{x['integer_minus_fp32_pp']:+.3f} pp | "
                          f"{x['integer_over_fp32_time']:.2f}x |")
-        lines += ["", f"Mean validation gap (integer - FP32): "
+        lines += ["", f"**Exploratory learning verdict: {summary['quality_status']}** "
+                  f"(both means ≥{MIN_MEAN_VALIDATION_PCT:g}%; "
+                  f"integer deficit ≤{MAX_MEAN_INTEGER_GAP_PP:g} pp)",
+                  f"Mean validation gap (integer - FP32): "
                   f"{summary['mean_integer_minus_fp32_pp']:+.3f} pp",
                   f"Mean integer/FP32 training-time ratio: "
                   f"{summary['mean_integer_over_fp32_time']:.2f}x", ""]
-    lines += ["All per-epoch curves, predictions, confusion matrices, checksums and original "
+    lines += ["A passed initial accuracy gate only establishes learning on this development"
+              " cohort. It does not prove gradient equivalence, statistical noninferiority,"
+              " generalization on unseen test data or library-wide correctness.", "",
+              "All per-epoch curves, predictions, confusion matrices, checksums and original "
               "reports are in summary.json and trials/. Detailed numerical diagnosis is "
               "reserved for #37 after reviewing these results.", ""]
     (root / "summary.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
