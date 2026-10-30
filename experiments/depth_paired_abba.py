@@ -60,7 +60,8 @@ def trial_order(block: int, single_pass: bool) -> str:
 
 def build_plan(binary: Path, data_dir: Path, seeds: list[int],
                depths: list[int], epochs: int, train: int, validation: int,
-               batch: int, lr_shift: int, single_pass: bool = False) -> dict:
+               batch: int, lr_shift: int, single_pass: bool = False,
+               trace_layers: bool = False) -> dict:
     binary = binary.resolve(strict=True)
     data_dir = data_dir.resolve(strict=True)
     if not binary.is_file() or not all((data_dir / p).is_file() for p in DATA_FILES):
@@ -98,6 +99,9 @@ def build_plan(binary: Path, data_dir: Path, seeds: list[int],
         "test_set": "never_loaded",
         "interpretation": "three or more seeds for learning; duplicated runs are timing controls only",
     }
+    if trace_layers:
+        plan["diagnostics"] = {"layer_trace": True, "schema": 1,
+                               "sampling": "first_minibatch_epochs_1_5_10_last"}
     plan["integrity_sha256"] = digest(canonical(plan))
     return plan
 
@@ -108,6 +112,11 @@ def verify_plan(plan: dict):
     if digest(canonical(copy)) != checksum or plan.get("schema") != 1 or (
             plan.get("design") not in ("paired-depth-AB", "paired-depth-ABBA-BAAB")):
         raise ValueError("experiment plan was altered")
+    diagnostics = plan.get("diagnostics")
+    if diagnostics is not None and diagnostics != {
+            "layer_trace": True, "schema": 1,
+            "sampling": "first_minibatch_epochs_1_5_10_last"}:
+        raise ValueError("unsupported layer diagnostics protocol")
     expected = []
     single_pass = plan["design"] == "paired-depth-AB"
     for depth in plan["depths"]:
@@ -157,6 +166,30 @@ def validate_record(record: dict, trial: dict, plan: dict):
             or record.get("batch_size") != w["batch"]
             or record.get("lr_shift") != w["lr_shift"]):
         raise ValueError(f"unmatched model, data, or test isolation for {trial_name(trial)}")
+    trace = record.get("layer_diagnostics")
+    if plan.get("diagnostics"):
+        expected_epochs = sorted({1, 5, 10, w["epochs"]} & set(range(1, w["epochs"] + 1)))
+        if (not isinstance(trace, dict) or trace.get("schema") != 1
+                or trace.get("sampling") != "first_minibatch_epochs_1_5_10_last"
+                or [t.get("epoch") for t in trace.get("records", [])] != expected_epochs):
+            raise ValueError("missing or invalid sampled layer diagnostics")
+        for point in trace["records"]:
+            layers = point.get("layers")
+            if (point.get("batch_index") != 0
+                    or point.get("batch_samples") != min(w["batch"], w["train"])
+                    or not isinstance(layers, list) or len(layers) != trial["depth"] + 2):
+                raise ValueError("invalid layer trace shape")
+            for layer in layers:
+                p = layer.get("parameter_count")
+                if (not isinstance(p, int) or p <= 0
+                        or layer.get("gradient_count") != p
+                        or layer.get("changed_parameters", -1) < 0
+                        or layer.get("unchanged_parameters", -1) < 0
+                        or layer["changed_parameters"] + layer["unchanged_parameters"] != p
+                        or not 0 <= layer.get("zero_gradient_count", -1) <= p):
+                    raise ValueError("invalid layer gradient/update diagnostic counts")
+    elif trace is not None:
+        raise ValueError("unexpected layer diagnostics in untraced plan")
     curve = record.get("learning_curve")
     if not isinstance(curve, list) or len(curve) != w["epochs"]:
         raise ValueError("incomplete learning curve")
@@ -227,6 +260,8 @@ def run(root: Path):
                 "--batch-size", str(w["batch"]), "--lr-shift", str(w["lr_shift"]),
                 "--train-limit", str(w["train"]), "--validation-limit", str(w["validation"]),
             ]
+            if plan.get("diagnostics"):
+                cmd.append("--trace-layers")
             print(f"[{trial['index'] + 1}/{len(plan['trials'])}] "
                   f"{trial_name(trial)}", flush=True)
             result = subprocess.run(cmd, text=True, capture_output=True, check=True)
@@ -375,6 +410,8 @@ def main(argv=None):
     p.add_argument("--validation-limit", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr-shift", type=int, default=7)
+    p.add_argument("--trace-layers", action="store_true",
+                   help="opt-in bounded per-layer snapshots at selected epochs")
     p.add_argument("--single-pass", action="store_true",
                    help="one matched integer/FP32 run per depth/seed for learning exploration; "
                         "full mirrored ABBA/BAAB remains the default for timing")
@@ -389,7 +426,7 @@ def main(argv=None):
                               parse_numbers(args.depths, DEPTHS),
                               args.epochs, args.train_limit,
                               args.validation_limit, args.batch_size, args.lr_shift,
-                              args.single_pass)
+                              args.single_pass, args.trace_layers)
             args.dir.mkdir(parents=True, exist_ok=False)
             (args.dir / "plan.json").write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
             print(f"Planned {len(plan['trials'])} validation-only trials "
