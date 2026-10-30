@@ -571,12 +571,15 @@ mod numeric_snapshot_tests {
         saturated.kernels.data[0] = Dyadic::new(256, 7);
         let output = saturated.forward_batch(&one(127));
         assert_eq!(output.data.len(), 1);
-        let observed = saturated.numeric_snapshot().expect("built-in Conv2D is observable");
+        let observed = saturated
+            .numeric_snapshot()
+            .expect("built-in Conv2D is observable");
         assert_eq!(observed.forward_outputs, 1);
         assert_eq!(observed.forward_saturated, 1);
-        saturated.backward_batch_discard_input_grad(
-            &Tensor::from_vec(vec![Dyadic::new(64, 7)], vec![1, 1])
-        );
+        saturated.backward_batch_discard_input_grad(&Tensor::from_vec(
+            vec![Dyadic::new(64, 7)],
+            vec![1, 1],
+        ));
         let gradients = saturated.numeric_snapshot().unwrap();
         assert_eq!(gradients.gradients.len(), 2);
         assert!(gradients.gradients.iter().all(|g| g.v == 0));
@@ -587,9 +590,10 @@ mod numeric_snapshot_tests {
         ordinary.forward_batch(&one(127));
         let normal = ordinary.numeric_snapshot().unwrap();
         assert_eq!(normal.forward_saturated, 0);
-        ordinary.backward_batch_discard_input_grad(
-            &Tensor::from_vec(vec![Dyadic::new(64, 7)], vec![1, 1])
-        );
+        ordinary.backward_batch_discard_input_grad(&Tensor::from_vec(
+            vec![Dyadic::new(64, 7)],
+            vec![1, 1],
+        ));
         let gradients = ordinary.numeric_snapshot().unwrap();
         assert!(gradients.gradients.iter().any(|g| g.v != 0));
         assert_eq!(gradients.forward_saturated, 0);
