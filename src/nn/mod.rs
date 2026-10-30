@@ -554,3 +554,60 @@ mod gradient_average_tests {
         mean_gradient(Dyadic::new(3, 0), 0);
     }
 }
+
+#[cfg(test)]
+mod numeric_snapshot_tests {
+    use super::{Conv2D, Dyadic, Module, Tensor};
+    use crate::rng::seed_rng;
+
+    fn one(value: i32) -> Tensor {
+        Tensor::from_vec(vec![Dyadic::new(value, 7)], vec![1, 1, 1, 1])
+    }
+
+    #[test]
+    fn distinguishes_observed_saturation_from_nonzero_gradients() {
+        seed_rng(1337);
+        let mut saturated = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 2);
+        saturated.kernels.data[0] = Dyadic::new(256, 7);
+        let output = saturated.forward_batch(&one(127));
+        assert_eq!(output.data.len(), 1);
+        let observed = saturated.numeric_snapshot().expect("built-in Conv2D is observable");
+        assert_eq!(observed.forward_outputs, 1);
+        assert_eq!(observed.forward_saturated, 1);
+        saturated.backward_batch_discard_input_grad(
+            &Tensor::from_vec(vec![Dyadic::new(64, 7)], vec![1, 1])
+        );
+        let gradients = saturated.numeric_snapshot().unwrap();
+        assert_eq!(gradients.gradients.len(), 2);
+        assert!(gradients.gradients.iter().all(|g| g.v == 0));
+
+        seed_rng(1337);
+        let mut ordinary = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+        ordinary.kernels.data[0] = Dyadic::new(1, 7);
+        ordinary.forward_batch(&one(127));
+        let normal = ordinary.numeric_snapshot().unwrap();
+        assert_eq!(normal.forward_saturated, 0);
+        ordinary.backward_batch_discard_input_grad(
+            &Tensor::from_vec(vec![Dyadic::new(64, 7)], vec![1, 1])
+        );
+        let gradients = ordinary.numeric_snapshot().unwrap();
+        assert!(gradients.gradients.iter().any(|g| g.v != 0));
+        assert_eq!(gradients.forward_saturated, 0);
+    }
+
+    #[test]
+    fn a_snapshot_is_read_only_and_does_not_consume_rng() {
+        seed_rng(1337);
+        let mut traced = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+        seed_rng(1337);
+        let mut plain = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+
+        seed_rng(4242);
+        let a = traced.numeric_snapshot().unwrap();
+        assert_eq!(a, traced.numeric_snapshot().unwrap());
+        let y_traced = traced.forward_batch(&one(127));
+        seed_rng(4242);
+        let y_plain = plain.forward_batch(&one(127));
+        assert_eq!(y_traced.data, y_plain.data);
+    }
+}
