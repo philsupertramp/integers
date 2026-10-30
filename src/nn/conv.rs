@@ -239,12 +239,27 @@ impl Module for Conv2D {
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
         let out = &self.output_batch_cache.data;
         Some(LayerNumericSnapshot {
-            parameters: self.kernels.data.iter().chain(&self.biases.data).copied().collect(),
-            gradients: self.grad_k.data.iter().chain(&self.grad_b.data).copied().collect(),
+            parameters: self
+                .kernels
+                .data
+                .iter()
+                .chain(&self.biases.data)
+                .copied()
+                .collect(),
+            gradients: self
+                .grad_k
+                .data
+                .iter()
+                .chain(&self.grad_b.data)
+                .copied()
+                .collect(),
             forward_outputs: out.len(),
             forward_zeros: out.iter().filter(|v| v.v == 0).count(),
-            forward_saturated: self.clip_batch_cache.iter()
-                .map(|c| c.iter().filter(|&&hit| hit).count()).sum(),
+            forward_saturated: self
+                .clip_batch_cache
+                .iter()
+                .map(|c| c.iter().filter(|&&hit| hit).count())
+                .sum(),
         })
     }
     fn training_arithmetic(&self) -> TrainingArithmetic {

@@ -151,7 +151,9 @@ pub trait Module {
 
     /// Diagnostic snapshots are disabled unless an experiment explicitly calls
     /// this. New modules are never implicitly included in the report.
-    fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> { None }
+    fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
+        None
+    }
 
     // ── Metadata ─────────────────────────────────────────────────────────────
 
@@ -321,7 +323,9 @@ impl Sequential {
     }
 
     pub fn numeric_snapshots(&self) -> Vec<(usize, &'static str, LayerNumericSnapshot)> {
-        self.layers.iter().enumerate()
+        self.layers
+            .iter()
+            .enumerate()
             .filter_map(|(i, layer)| layer.numeric_snapshot().map(|s| (i, layer.name(), s)))
             .collect()
     }

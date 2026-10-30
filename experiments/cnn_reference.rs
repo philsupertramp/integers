@@ -273,18 +273,23 @@ pub struct CnnFp32 {
 }
 impl CnnFp32 {
     pub fn numeric_snapshots(&self) -> Vec<Fp32NumericSnapshot> {
-        self.ops.iter().enumerate().filter_map(|(index, op)| {
-            let (kind, p) = match op {
-                Op::Conv(c) => ("Conv2D", &c.params),
-                Op::Linear(l) => ("Linear", &l.params),
-                _ => return None,
-            };
-            Some(Fp32NumericSnapshot {
-                index, kind,
-                parameters: p.weights.iter().chain(&p.bias).copied().collect(),
-                gradients: p.grad_weights.iter().chain(&p.grad_bias).copied().collect(),
+        self.ops
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| {
+                let (kind, p) = match op {
+                    Op::Conv(c) => ("Conv2D", &c.params),
+                    Op::Linear(l) => ("Linear", &l.params),
+                    _ => return None,
+                };
+                Some(Fp32NumericSnapshot {
+                    index,
+                    kind,
+                    parameters: p.weights.iter().chain(&p.bias).copied().collect(),
+                    gradients: p.grad_weights.iter().chain(&p.grad_bias).copied().collect(),
+                })
             })
-        }).collect()
+            .collect()
     }
 
     pub fn forward(&mut self, input: &[f32]) -> Vec<f32> {

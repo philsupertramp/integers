@@ -226,10 +226,18 @@ impl Config {
             "training profiling requires dense --validation-only mode"
         );
         assert!(
-            !cfg.trace_layers || (cfg.validation_only && cfg.task == Task::Mnist
-                && matches!(cfg.architecture, Architecture::Cnn4 | Architecture::Cnn8
-                    | Architecture::Cnn12 | Architecture::Cnn16 | Architecture::Cnn20)
-                && !cfg.profile_training),
+            !cfg.trace_layers
+                || (cfg.validation_only
+                    && cfg.task == Task::Mnist
+                    && matches!(
+                        cfg.architecture,
+                        Architecture::Cnn4
+                            | Architecture::Cnn8
+                            | Architecture::Cnn12
+                            | Architecture::Cnn16
+                            | Architecture::Cnn20
+                    )
+                    && !cfg.profile_training),
             "--trace-layers requires validation-only depth CNN without profiling"
         );
         assert!(
@@ -830,12 +838,13 @@ impl TrainingProfile {
     }
 }
 
-
 fn should_trace_epoch(epoch: usize, total: usize) -> bool {
     epoch == 1 || epoch == 5 || epoch == 10 || epoch == total
 }
 
-fn trace_integer(epoch: usize, batch: usize,
+fn trace_integer(
+    epoch: usize,
+    batch: usize,
     forward: &[(usize, &'static str, LayerNumericSnapshot)],
     before: &[(usize, &'static str, LayerNumericSnapshot)],
     after: &[(usize, &'static str, LayerNumericSnapshot)],
@@ -864,10 +873,16 @@ fn trace_integer(epoch: usize, batch: usize,
                 changed, b.2.parameters.len() - changed
             )
         }).collect();
-    format!("{{\"epoch\":{},\"batch_index\":0,\"batch_samples\":{},\"layers\":[{}]}}",
-        epoch, batch, layers.join(","))
+    format!(
+        "{{\"epoch\":{},\"batch_index\":0,\"batch_samples\":{},\"layers\":[{}]}}",
+        epoch,
+        batch,
+        layers.join(",")
+    )
 }
-fn trace_fp32(epoch: usize, batch: usize,
+fn trace_fp32(
+    epoch: usize,
+    batch: usize,
     before: &[cnn_reference::Fp32NumericSnapshot],
     after: &[cnn_reference::Fp32NumericSnapshot],
 ) -> String {
@@ -888,8 +903,12 @@ fn trace_fp32(epoch: usize, batch: usize,
             changed, a.parameters.len() - changed
         )
     }).collect();
-    format!("{{\"epoch\":{},\"batch_index\":0,\"batch_samples\":{},\"layers\":[{}]}}",
-        epoch, batch, layers.join(","))
+    format!(
+        "{{\"epoch\":{},\"batch_index\":0,\"batch_samples\":{},\"layers\":[{}]}}",
+        epoch,
+        batch,
+        layers.join(",")
+    )
 }
 
 struct Epoch {
@@ -1021,7 +1040,9 @@ fn main() {
                         let y = integer.forward_batch(&x);
                         let forward_snapshot = if sampled_epoch && batch_idx == 0 {
                             Some(integer.numeric_snapshots())
-                        } else { None };
+                        } else {
+                            None
+                        };
                         for (sample, &idx) in y.iter().zip(ids) {
                             if argmax(sample.data) == data.pool.labels[idx] as usize {
                                 correct += 1;
@@ -1035,12 +1056,18 @@ fn main() {
                             })
                             .collect();
                         integer.backward_batch_discard_input_grad(&gradient);
-                        let before_update = forward_snapshot.as_ref()
+                        let before_update = forward_snapshot
+                            .as_ref()
                             .map(|_| integer.numeric_snapshots());
                         integer.update(cfg.lr_shift);
                         if let (Some(forward), Some(before)) = (forward_snapshot, before_update) {
-                            trace_records.push(trace_integer(epoch + 1, ids.len(),
-                                &forward, &before, &integer.numeric_snapshots()));
+                            trace_records.push(trace_integer(
+                                epoch + 1,
+                                ids.len(),
+                                &forward,
+                                &before,
+                                &integer.numeric_snapshots(),
+                            ));
                         }
                     }
                 }
@@ -1082,14 +1109,20 @@ fn main() {
                                 unreachable!("trace requires paired CNN");
                             };
                             Some(model.numeric_snapshots())
-                        } else { None };
+                        } else {
+                            None
+                        };
                         fp32.update(cfg.lr_shift, ids.len());
                         if let Some(before) = before_update {
                             let Fp32Model::Cnn(model) = &fp32 else {
                                 unreachable!("trace requires paired CNN");
                             };
-                            trace_records.push(trace_fp32(epoch + 1, ids.len(), &before,
-                                &model.numeric_snapshots()));
+                            trace_records.push(trace_fp32(
+                                epoch + 1,
+                                ids.len(),
+                                &before,
+                                &model.numeric_snapshots(),
+                            ));
                         }
                     }
                 }
@@ -1234,9 +1267,13 @@ fn main() {
         format!("{:.6}", pct(n, data.test.len()))
     });
     let layer_trace_json = if cfg.trace_layers {
-        format!("{{\"schema\":1,\"sampling\":\"first_minibatch_epochs_1_5_10_last\",\"records\":[{}]}}",
-            trace_records.join(","))
-    } else { "null".to_owned() };
+        format!(
+            "{{\"schema\":1,\"sampling\":\"first_minibatch_epochs_1_5_10_last\",\"records\":[{}]}}",
+            trace_records.join(",")
+        )
+    } else {
+        "null".to_owned()
+    };
     let payload = format!(
         "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"layer_diagnostics\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
