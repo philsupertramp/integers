@@ -746,8 +746,9 @@ mod numeric_snapshot_tests {
 
 #[cfg(test)]
 mod observed_optimizer_tests {
-    use super::{Dyadic, OptimizerQuantizationStats, Tensor,
-        apply_updates_mean, apply_updates_mean_observed};
+    use super::{
+        Dyadic, OptimizerQuantizationStats, Tensor, apply_updates_mean, apply_updates_mean_observed,
+    };
     use crate::rng::{rng_next, seed_rng};
 
     #[test]
@@ -758,24 +759,40 @@ mod observed_optimizer_tests {
             Dyadic::new(0, 0),
             Dyadic::new(i32::MIN, 0),
         ];
-        let gradients = Tensor::from_vec(vec![
-            Dyadic::new(1, 0),
-            Dyadic::new(0, 0),
-            Dyadic::new(0, 0),
-            Dyadic::new(1, 0),
-        ], vec![4]);
+        let gradients = Tensor::from_vec(
+            vec![
+                Dyadic::new(1, 0),
+                Dyadic::new(0, 0),
+                Dyadic::new(0, 0),
+                Dyadic::new(1, 0),
+            ],
+            vec![4],
+        );
         let mut original_weights = weights.to_vec();
         let mut observed_weights = weights.to_vec();
         let mut original_velocity = vec![Dyadic::new(0, 0); 4];
         let mut observed_velocity = original_velocity.clone();
         seed_rng(4242);
-        apply_updates_mean(&mut original_weights, &gradients,
-            &mut original_velocity, 30, None, 1);
+        apply_updates_mean(
+            &mut original_weights,
+            &gradients,
+            &mut original_velocity,
+            30,
+            None,
+            1,
+        );
         let next_plain = rng_next();
         seed_rng(4242);
         let mut stats = OptimizerQuantizationStats::default();
-        apply_updates_mean_observed(&mut observed_weights, &gradients,
-            &mut observed_velocity, 30, None, 1, &mut stats);
+        apply_updates_mean_observed(
+            &mut observed_weights,
+            &gradients,
+            &mut observed_velocity,
+            30,
+            None,
+            1,
+            &mut stats,
+        );
         let next_traced = rng_next();
         assert_eq!(original_weights, observed_weights);
         assert_eq!(original_velocity, observed_velocity);
@@ -790,13 +807,14 @@ mod observed_optimizer_tests {
     #[test]
     fn observed_optimizer_counts_actual_delta_and_saturation_without_changing_momentum_rng() {
         let weights = [
-            Dyadic::new(0, 7), Dyadic::new(i32::MIN, 7),
+            Dyadic::new(0, 7),
+            Dyadic::new(i32::MIN, 7),
             Dyadic::new(33, 7),
         ];
-        let gradients = Tensor::from_vec(vec![
-            Dyadic::new(128, 7), Dyadic::new(128, 7),
-            Dyadic::new(0, 7),
-        ], vec![3]);
+        let gradients = Tensor::from_vec(
+            vec![Dyadic::new(128, 7), Dyadic::new(128, 7), Dyadic::new(0, 7)],
+            vec![3],
+        );
         for momentum in [None, Some(1u32)] {
             let mut normal = weights.to_vec();
             let mut observed = weights.to_vec();
@@ -808,7 +826,13 @@ mod observed_optimizer_tests {
             seed_rng(1337);
             let mut stats = OptimizerQuantizationStats::default();
             apply_updates_mean_observed(
-                &mut observed, &gradients, &mut traced_vel, 0, momentum, 1, &mut stats
+                &mut observed,
+                &gradients,
+                &mut traced_vel,
+                0,
+                momentum,
+                1,
+                &mut stats,
             );
             let after_observed = rng_next();
             assert_eq!(normal, observed);
