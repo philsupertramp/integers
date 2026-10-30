@@ -1137,7 +1137,7 @@ fn main() {
                         };
                         fp32.update(cfg.lr_shift, ids.len());
                         if let Some(before) = before_update {
-                            let Fp32Model::Cnn(model) = &fp32 else {
+                            let Fp32Model::Cnn(model) = &mut fp32 else {
                                 unreachable!("trace requires paired CNN");
                             };
                             trace_records.push(trace_fp32(
