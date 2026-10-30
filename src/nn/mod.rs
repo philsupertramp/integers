@@ -70,6 +70,30 @@ pub use conv::Conv2D;
 use crate::dyadic::{Dyadic, Tensor, TensorView, add, stochastic_round};
 use std::time::Instant;
 
+/// An opt-in, read-only raw-dyadic snapshot used only for research reporting.
+/// A snapshot must not modify weights, gradients, training state or RNG.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerNumericSnapshot {
+    pub parameters: Vec<Dyadic>,
+    pub gradients: Vec<Dyadic>,
+    pub forward_outputs: usize,
+    pub forward_zeros: usize,
+    pub forward_nonpositive: usize,
+    pub forward_saturated: usize,
+}
+
+/// Counts observed INSIDE the integer optimizer, at the actual stochastic-round
+/// decision. Only diagnostic updates use this path; no extra random draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OptimizerQuantizationStats {
+    pub parameters_seen: usize,
+    pub zero_effective_steps: usize,
+    pub nonzero_effective_steps: usize,
+    pub quantized_to_zero_updates: usize,
+    pub nonzero_rounded_deltas: usize,
+    pub saturation_blocked_deltas: usize,
+}
+
 // ─── Module trait ──────────────────────────────────────────────────────────────
 
 /// Declares whether a layer may execute in the ADR-002 integer training backend.
@@ -137,6 +161,22 @@ pub trait Module {
     /// Works for a full batch, a short last batch, and repeated backward calls.
     /// Reset accumulated gradients. Does **not** reset velocity.
     fn zero_grad(&mut self);
+
+    /// Diagnostic snapshots are disabled unless an experiment explicitly calls
+    /// this. New modules are never implicitly included in the report.
+    fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
+        None
+    }
+
+    /// Sample one normal optimizer update with direct stochastic-round counters.
+    /// Unsupported modules execute their ordinary update and return no stats.
+    fn update_with_quantization_stats(
+        &mut self,
+        lr_shift: u32,
+    ) -> Option<OptimizerQuantizationStats> {
+        self.update(lr_shift);
+        None
+    }
 
     // ── Metadata ─────────────────────────────────────────────────────────────
 
@@ -305,6 +345,32 @@ impl Sequential {
         }
     }
 
+    pub fn numeric_snapshots(&self) -> Vec<(usize, &'static str, LayerNumericSnapshot)> {
+        self.layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, layer)| layer.numeric_snapshot().map(|s| (i, layer.name(), s)))
+            .collect()
+    }
+
+    /// Exactly one ordinary optimizer update per layer; built-in integer layers
+    /// additionally count the stochastic quantization outcome at that operation.
+    pub fn update_with_numeric_trace(
+        &mut self,
+        lr_shift: u32,
+    ) -> Vec<(usize, &'static str, OptimizerQuantizationStats)> {
+        self.check_integer_backend();
+        self.layers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, layer)| {
+                layer
+                    .update_with_quantization_stats(lr_shift)
+                    .map(|stats| (i, layer.name(), stats))
+            })
+            .collect()
+    }
+
     pub fn update(&mut self, lr_shift: u32) {
         self.check_integer_backend();
         for layer in &mut self.layers {
@@ -461,6 +527,93 @@ fn apply_updates_mean(
     }
 }
 
+/// Only the diagnostic path uses this function. The original sgd_step remains
+/// untouched. This performs the same single stochastic_round at the same point,
+/// then observes its result without drawing from RNG a second time.
+fn sgd_step_observed(
+    w: Dyadic,
+    g: Dyadic,
+    lr_shift: u32,
+    stats: &mut OptimizerQuantizationStats,
+) -> Dyadic {
+    let eff = (g.s as i64) + (lr_shift as i64) - (w.s as i64);
+    let delta = if eff >= 0 {
+        stochastic_round(g.v, eff as u32)
+    } else {
+        let k = (-eff).min(30) as u32;
+        ((g.v as i64) << k).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    };
+    stats.parameters_seen += 1;
+    if g.v == 0 {
+        stats.zero_effective_steps += 1;
+    } else {
+        stats.nonzero_effective_steps += 1;
+        if eff > 0 && delta == 0 {
+            stats.quantized_to_zero_updates += 1;
+        }
+    }
+    if delta != 0 {
+        stats.nonzero_rounded_deltas += 1;
+    }
+    let updated = w.v.saturating_sub(delta);
+    if delta != 0 && updated == w.v {
+        stats.saturation_blocked_deltas += 1;
+    }
+    Dyadic::new(updated, w.s)
+}
+
+fn momentum_step_observed(
+    w: Dyadic,
+    g: Dyadic,
+    v: &mut Dyadic,
+    lr_shift: u32,
+    m: u32,
+    stats: &mut OptimizerQuantizationStats,
+) -> Dyadic {
+    let decayed = Dyadic::new(stochastic_round(v.v, m), v.s);
+    *v = add(decayed, g);
+    sgd_step_observed(w, *v, lr_shift, stats)
+}
+
+/// Matched training arithmetic for exactly the minibatch under observation.
+/// The normal path never calls this diagnostic function.
+fn apply_updates_mean_observed(
+    params: &mut [Dyadic],
+    grads: &Tensor,
+    vels: &mut [Dyadic],
+    lr_shift: u32,
+    momentum: Option<u32>,
+    samples: usize,
+    stats: &mut OptimizerQuantizationStats,
+) {
+    assert!(samples > 0, "apply_updates: no accumulated examples");
+    assert_eq!(
+        params.len(),
+        grads.data.len(),
+        "apply_updates: param/gradient mismatch"
+    );
+    assert_eq!(
+        params.len(),
+        vels.len(),
+        "apply_updates: param/velocity mismatch"
+    );
+    match momentum {
+        None => params
+            .iter_mut()
+            .zip(grads.data.iter())
+            .for_each(|(w, &g)| {
+                *w = sgd_step_observed(*w, mean_gradient(g, samples), lr_shift, stats);
+            }),
+        Some(m) => params
+            .iter_mut()
+            .zip(grads.data.iter())
+            .zip(vels.iter_mut())
+            .for_each(|((w, &g), v)| {
+                *w = momentum_step_observed(*w, mean_gradient(g, samples), v, lr_shift, m, stats);
+            }),
+    }
+}
+
 // ─── Flatten ──────────────────────────────────────────────────────────────────
 
 /// Pass-through shape bridge (conv → linear). Exists for `summary()` clarity.
@@ -527,5 +680,170 @@ mod gradient_average_tests {
     #[should_panic(expected = "sample count must be nonzero")]
     fn zero_samples_rejected() {
         mean_gradient(Dyadic::new(3, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod numeric_snapshot_tests {
+    use super::{Conv2D, Dyadic, Module, Tensor};
+    use crate::rng::seed_rng;
+
+    fn one(value: i32) -> Tensor {
+        Tensor::from_vec(vec![Dyadic::new(value, 7)], vec![1, 1, 1, 1])
+    }
+
+    #[test]
+    fn distinguishes_observed_saturation_from_nonzero_gradients() {
+        seed_rng(1337);
+        let mut saturated = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 2);
+        saturated.kernels.data[0] = Dyadic::new(256, 7);
+        let output = saturated.forward_batch(&one(127));
+        assert_eq!(output.data.len(), 1);
+        let observed = saturated
+            .numeric_snapshot()
+            .expect("built-in Conv2D is observable");
+        assert_eq!(observed.forward_outputs, 1);
+        assert_eq!(observed.forward_saturated, 1);
+        saturated.backward_batch_discard_input_grad(&Tensor::from_vec(
+            vec![Dyadic::new(64, 7)],
+            vec![1, 1],
+        ));
+        let gradients = saturated.numeric_snapshot().unwrap();
+        assert_eq!(gradients.gradients.len(), 2);
+        assert!(gradients.gradients.iter().all(|g| g.v == 0));
+
+        seed_rng(1337);
+        let mut ordinary = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+        ordinary.kernels.data[0] = Dyadic::new(1, 7);
+        ordinary.forward_batch(&one(127));
+        let normal = ordinary.numeric_snapshot().unwrap();
+        assert_eq!(normal.forward_saturated, 0);
+        ordinary.backward_batch_discard_input_grad(&Tensor::from_vec(
+            vec![Dyadic::new(64, 7)],
+            vec![1, 1],
+        ));
+        let gradients = ordinary.numeric_snapshot().unwrap();
+        assert!(gradients.gradients.iter().any(|g| g.v != 0));
+        assert_eq!(gradients.forward_saturated, 0);
+    }
+
+    #[test]
+    fn a_snapshot_is_read_only_and_does_not_consume_rng() {
+        seed_rng(1337);
+        let mut traced = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+        seed_rng(1337);
+        let mut plain = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+
+        seed_rng(4242);
+        let a = traced.numeric_snapshot().unwrap();
+        assert_eq!(a, traced.numeric_snapshot().unwrap());
+        let y_traced = traced.forward_batch(&one(127));
+        seed_rng(4242);
+        let y_plain = plain.forward_batch(&one(127));
+        assert_eq!(y_traced.data, y_plain.data);
+    }
+}
+
+#[cfg(test)]
+mod observed_optimizer_tests {
+    use super::{
+        Dyadic, OptimizerQuantizationStats, Tensor, apply_updates_mean, apply_updates_mean_observed,
+    };
+    use crate::rng::{rng_next, seed_rng};
+
+    #[test]
+    fn stats_classify_rounding_zero_effective_steps_and_saturation_without_rng_drift() {
+        let weights = [
+            Dyadic::new(0, 0),
+            Dyadic::new(17, 0),
+            Dyadic::new(0, 0),
+            Dyadic::new(i32::MIN, 0),
+        ];
+        let gradients = Tensor::from_vec(
+            vec![
+                Dyadic::new(1, 0),
+                Dyadic::new(0, 0),
+                Dyadic::new(0, 0),
+                Dyadic::new(1, 0),
+            ],
+            vec![4],
+        );
+        let mut original_weights = weights.to_vec();
+        let mut observed_weights = weights.to_vec();
+        let mut original_velocity = vec![Dyadic::new(0, 0); 4];
+        let mut observed_velocity = original_velocity.clone();
+        seed_rng(4242);
+        apply_updates_mean(
+            &mut original_weights,
+            &gradients,
+            &mut original_velocity,
+            30,
+            None,
+            1,
+        );
+        let next_plain = rng_next();
+        seed_rng(4242);
+        let mut stats = OptimizerQuantizationStats::default();
+        apply_updates_mean_observed(
+            &mut observed_weights,
+            &gradients,
+            &mut observed_velocity,
+            30,
+            None,
+            1,
+            &mut stats,
+        );
+        let next_traced = rng_next();
+        assert_eq!(original_weights, observed_weights);
+        assert_eq!(original_velocity, observed_velocity);
+        assert_eq!(next_plain, next_traced);
+        assert_eq!(stats.parameters_seen, 4);
+        assert_eq!(stats.zero_effective_steps, 2);
+        assert_eq!(stats.nonzero_effective_steps, 2);
+        assert_eq!(stats.quantized_to_zero_updates, 2);
+        assert_eq!(stats.nonzero_rounded_deltas, 0);
+    }
+
+    #[test]
+    fn observed_optimizer_counts_actual_delta_and_saturation_without_changing_momentum_rng() {
+        let weights = [
+            Dyadic::new(0, 7),
+            Dyadic::new(i32::MIN, 7),
+            Dyadic::new(33, 7),
+        ];
+        let gradients = Tensor::from_vec(
+            vec![Dyadic::new(128, 7), Dyadic::new(128, 7), Dyadic::new(0, 7)],
+            vec![3],
+        );
+        for momentum in [None, Some(1u32)] {
+            let mut normal = weights.to_vec();
+            let mut observed = weights.to_vec();
+            let mut normal_vel = vec![Dyadic::new(0, 7); 3];
+            let mut traced_vel = normal_vel.clone();
+            seed_rng(1337);
+            apply_updates_mean(&mut normal, &gradients, &mut normal_vel, 0, momentum, 1);
+            let after_normal = rng_next();
+            seed_rng(1337);
+            let mut stats = OptimizerQuantizationStats::default();
+            apply_updates_mean_observed(
+                &mut observed,
+                &gradients,
+                &mut traced_vel,
+                0,
+                momentum,
+                1,
+                &mut stats,
+            );
+            let after_observed = rng_next();
+            assert_eq!(normal, observed);
+            assert_eq!(normal_vel, traced_vel);
+            assert_eq!(after_normal, after_observed);
+            assert_eq!(stats.parameters_seen, 3);
+            assert_eq!(stats.nonzero_effective_steps, 2);
+            assert_eq!(stats.zero_effective_steps, 1);
+            assert_eq!(stats.nonzero_rounded_deltas, 2);
+            assert_eq!(stats.saturation_blocked_deltas, 1);
+            assert_eq!(stats.quantized_to_zero_updates, 0);
+        }
     }
 }

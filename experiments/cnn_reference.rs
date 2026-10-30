@@ -260,16 +260,61 @@ enum Op {
     Flatten,
     Linear(Dense),
 }
+pub struct Fp32NumericSnapshot {
+    pub index: usize,
+    pub kind: &'static str,
+    pub parameters: Vec<f32>,
+    pub gradients: Vec<f32>,
+    pub forward_count: usize,
+    pub forward_zero_count: usize,
+    pub forward_nonpositive_count: usize,
+}
+
 pub struct CnnFp32 {
     ops: Vec<Op>,
     inputs: Vec<Vec<f32>>,
+    observe_forward: bool,
+    forward_counts: Vec<(usize, usize, usize)>,
 }
 impl CnnFp32 {
+    /// Reset and start observation on precisely the sampled minibatch.
+    pub fn begin_forward_observation(&mut self) {
+        self.observe_forward = true;
+        self.forward_counts = vec![(0, 0, 0); self.ops.len()];
+    }
+
+    pub fn end_forward_observation(&mut self) {
+        self.observe_forward = false;
+    }
+
+    pub fn numeric_snapshots(&self) -> Vec<Fp32NumericSnapshot> {
+        self.ops
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| {
+                let (kind, p) = match op {
+                    Op::Conv(c) => ("Conv2D", &c.params),
+                    Op::Linear(l) => ("Linear", &l.params),
+                    _ => return None,
+                };
+                Some(Fp32NumericSnapshot {
+                    index,
+                    kind,
+                    parameters: p.weights.iter().chain(&p.bias).copied().collect(),
+                    gradients: p.grad_weights.iter().chain(&p.grad_bias).copied().collect(),
+                    forward_count: self.forward_counts.get(index).map_or(0, |v| v.0),
+                    forward_zero_count: self.forward_counts.get(index).map_or(0, |v| v.1),
+                    forward_nonpositive_count: self.forward_counts.get(index).map_or(0, |v| v.2),
+                })
+            })
+            .collect()
+    }
+
     pub fn forward(&mut self, input: &[f32]) -> Vec<f32> {
         assert_eq!(input.len(), 784, "MNIST CNN expects a 28x28 input");
         self.inputs.clear();
         let mut current = input.to_vec();
-        for op in &mut self.ops {
+        for (index, op) in self.ops.iter_mut().enumerate() {
             self.inputs.push(current.clone());
             current = match op {
                 Op::Conv(layer) => layer.forward(&current),
@@ -278,6 +323,12 @@ impl CnnFp32 {
                 Op::Flatten => current,
                 Op::Linear(layer) => layer.forward(&current),
             };
+            if self.observe_forward && matches!(op, Op::Conv(_) | Op::Linear(_)) {
+                let observation = &mut self.forward_counts[index];
+                observation.0 += current.len();
+                observation.1 += current.iter().filter(|&&x| x == 0.0).count();
+                observation.2 += current.iter().filter(|&&x| x <= 0.0).count();
+            }
         }
         assert_eq!(current.len(), 10);
         current
@@ -388,6 +439,8 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
         CnnFp32 {
             ops,
             inputs: Vec::new(),
+            observe_forward: false,
+            forward_counts: Vec::new(),
         },
     )
 }
@@ -487,6 +540,8 @@ pub fn build_depth_models(seed: u64, conv_layers: usize) -> (Sequential, CnnFp32
         CnnFp32 {
             ops,
             inputs: Vec::new(),
+            observe_forward: false,
+            forward_counts: Vec::new(),
         },
     )
 }
