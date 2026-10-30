@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use integers::data::Dataset;
 use integers::dyadic::{Dyadic, Tensor};
-use integers::nn::{LayerNumericSnapshot, Linear, ReLU, Sequential};
+use integers::nn::{LayerNumericSnapshot, Linear, OptimizerQuantizationStats, ReLU, Sequential};
 use integers::rng::seed_rng;
 use integers::{argmax, mse_grad};
 
@@ -848,13 +848,17 @@ fn trace_integer(
     forward: &[(usize, &'static str, LayerNumericSnapshot)],
     before: &[(usize, &'static str, LayerNumericSnapshot)],
     after: &[(usize, &'static str, LayerNumericSnapshot)],
+    stats: &[(usize, &'static str, OptimizerQuantizationStats)],
 ) -> String {
     assert_eq!(forward.len(), before.len());
     assert_eq!(before.len(), after.len());
-    let layers: Vec<String> = forward.iter().zip(before).zip(after)
-        .map(|((f, b), a)| {
+    assert_eq!(before.len(), stats.len());
+    let layers: Vec<String> = forward.iter().zip(before).zip(after).zip(stats)
+        .map(|(((f, b), a), s)| {
             assert_eq!((f.0, f.1), (b.0, b.1));
             assert_eq!((b.0, b.1), (a.0, a.1));
+            assert_eq!((a.0, a.1), (s.0, s.1));
+            assert_eq!(b.2.parameters.len(), s.2.parameters_seen);
             assert_eq!(b.2.parameters.len(), b.2.gradients.len());
             let zeros = b.2.gradients.iter().filter(|x| x.v == 0).count();
             let max_abs = b.2.gradients.iter()
@@ -866,11 +870,15 @@ fn trace_integer(
             let changed = b.2.parameters.iter().zip(&a.2.parameters)
                 .filter(|(x, y)| x != y).count();
             format!(
-                "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_mantissa\":{},\"nonzero_gradient_min_scale\":{},\"nonzero_gradient_max_scale\":{},\"forward_count\":{},\"forward_zero_count\":{},\"forward_saturated_count\":{},\"changed_parameters\":{},\"unchanged_parameters\":{},\"quantized_to_zero_updates\":null}}",
+                "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_mantissa\":{},\"nonzero_gradient_min_scale\":{},\"nonzero_gradient_max_scale\":{},\"forward_count\":{},\"forward_zero_count\":{},\"forward_nonpositive_count\":{},\"forward_saturated_count\":{},\"changed_parameters\":{},\"unchanged_parameters\":{},\"effective_zero_step_count\":{},\"effective_nonzero_step_count\":{},\"nonzero_rounded_delta_count\":{},\"saturation_blocked_delta_count\":{},\"quantized_to_zero_updates\":{}}}",
                 f.0, f.1, b.2.parameters.len(), b.2.parameters.iter().filter(|x| x.v == 0).count(),
                 b.2.gradients.len(), zeros, max_abs, min_scale, max_scale,
-                f.2.forward_outputs, f.2.forward_zeros, f.2.forward_saturated,
-                changed, b.2.parameters.len() - changed
+                f.2.forward_outputs, f.2.forward_zeros, f.2.forward_nonpositive,
+                f.2.forward_saturated,
+                changed, b.2.parameters.len() - changed,
+                s.2.zero_effective_steps, s.2.nonzero_effective_steps,
+                s.2.nonzero_rounded_deltas, s.2.saturation_blocked_deltas,
+                s.2.quantized_to_zero_updates
             )
         }).collect();
     format!(
@@ -896,10 +904,11 @@ fn trace_fp32(
         let abs_json = if abs.is_finite() { format!("{:.8e}", abs) }
             else { "null".to_owned() };
         format!(
-            "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_fp32\":{},\"nonfinite_gradient_count\":{},\"forward_saturated_count\":null,\"changed_parameters\":{},\"unchanged_parameters\":{},\"quantized_to_zero_updates\":null}}",
+            "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_fp32\":{},\"nonfinite_gradient_count\":{},\"forward_count\":{},\"forward_zero_count\":{},\"forward_nonpositive_count\":{},\"forward_saturated_count\":null,\"changed_parameters\":{},\"unchanged_parameters\":{},\"quantized_to_zero_updates\":null}}",
             a.index, a.kind, a.parameters.len(), a.parameters.iter().filter(|x| **x == 0.0).count(),
             a.gradients.len(), a.gradients.iter().filter(|x| **x == 0.0).count(),
             abs_json, a.gradients.iter().filter(|x| !x.is_finite()).count(),
+            a.forward_count, a.forward_zero_count, a.forward_nonpositive_count,
             changed, a.parameters.len() - changed
         )
     }).collect();
@@ -1059,14 +1068,22 @@ fn main() {
                         let before_update = forward_snapshot
                             .as_ref()
                             .map(|_| integer.numeric_snapshots());
-                        integer.update(cfg.lr_shift);
-                        if let (Some(forward), Some(before)) = (forward_snapshot, before_update) {
+                        let update_stats = if before_update.is_some() {
+                            Some(integer.update_with_numeric_trace(cfg.lr_shift))
+                        } else {
+                            integer.update(cfg.lr_shift);
+                            None
+                        };
+                        if let (Some(forward), Some(before), Some(stats)) =
+                            (forward_snapshot, before_update, update_stats)
+                        {
                             trace_records.push(trace_integer(
                                 epoch + 1,
                                 ids.len(),
                                 &forward,
                                 &before,
                                 &integer.numeric_snapshots(),
+                                &stats,
                             ));
                         }
                     }
@@ -1097,6 +1114,12 @@ fn main() {
                         });
                     } else {
                         fp32.zero_grad();
+                        if sampled_epoch && batch_idx == 0 {
+                            let Fp32Model::Cnn(model) = &mut fp32 else {
+                                unreachable!("trace requires paired CNN");
+                            };
+                            model.begin_forward_observation();
+                        }
                         for &idx in ids {
                             let x = float_row(&data.pool, idx);
                             let t = float_target(&data.pool, idx);
@@ -1123,6 +1146,7 @@ fn main() {
                                 &before,
                                 &model.numeric_snapshots(),
                             ));
+                            model.end_forward_observation();
                         }
                     }
                 }

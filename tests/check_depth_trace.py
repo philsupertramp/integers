@@ -35,13 +35,20 @@ for depth in (16, 20):
                 for layer in layers:
                     assert layer["gradient_count"] == layer["parameter_count"]
                     assert layer["changed_parameters"] + layer["unchanged_parameters"] == layer["parameter_count"]
-                    assert layer["quantized_to_zero_updates"] is None
                     assert 0 <= layer["zero_gradient_count"] <= layer["gradient_count"]
+                    assert 0 <= layer["forward_zero_count"] <= layer["forward_nonpositive_count"] <= layer["forward_count"]
+                    assert layer["forward_count"] > 0
                     if backend == "integer":
                         assert 0 <= layer["forward_saturated_count"] <= layer["forward_count"]
-                        assert 0 <= layer["forward_zero_count"] <= layer["forward_count"]
+                        assert layer["quantized_to_zero_updates"] >= 0
+                        assert layer["effective_zero_step_count"] + layer["effective_nonzero_step_count"] == layer["parameter_count"]
+                        assert layer["quantized_to_zero_updates"] <= layer["effective_nonzero_step_count"]
+                        assert layer["nonzero_rounded_delta_count"] + layer["quantized_to_zero_updates"] == layer["effective_nonzero_step_count"]
+                        assert layer["saturation_blocked_delta_count"] <= layer["nonzero_rounded_delta_count"]
+                        assert layer["changed_parameters"] == layer["nonzero_rounded_delta_count"] - layer["saturation_blocked_delta_count"]
                     else:
                         assert layer["forward_saturated_count"] is None
+                        assert layer["quantized_to_zero_updates"] is None
             for a, b in zip(plain["learning_curve"], traced["learning_curve"]):
                 for key in ("train_accuracy_pct", "validation_accuracy_pct",
                             "validation_confusion", "validation_predictions",

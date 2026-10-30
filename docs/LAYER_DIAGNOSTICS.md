@@ -26,13 +26,25 @@ denominators are `forward_count` at this *sampled batch only*. `changed_paramete
 counts exact dyadic differences across the ordinary optimizer step;
 `unchanged_parameters` is its complement, including legitimate zero
 gradients, sub-unit updates lost to rounding, and other possible causes.
-It is **not** a measured stochastic-round-to-zero count, which remains
-`quantized_to_zero_updates: null` instead of making an invented attribution.
+The observer now counts **actual stochastic-round-to-zero optimizer events** at
+the existing `sgd_step` rounding decision: `quantized_to_zero_updates` is
+incremented only when the effective (post-momentum) dyadic step mantissa is
+nonzero, the quantization exponent is positive, and that step rounds to a
+zero integer weight delta. `effective_zero_step_count`,
+`effective_nonzero_step_count`, `nonzero_rounded_delta_count`, and
+`saturation_blocked_delta_count` make the denominator explicit and
+distinguish rounding from zero effective steps and i32 weight saturation.
+The observable optimizer executes the **same stochastic_round exactly once**
+at each ordinary site, consuming the same seeded RNG draws. It is called only
+for the selected minibatch. These are not full-epoch counts.
 
 The **independent FP32** sample reads the corresponding reference model's
 accumulated float gradients, zero/nonfinite counts, absolute gradient
-maximum, parameter values and exact updates, but has no integer clipping
-flags. Its missing clip metrics are therefore null, not zero.
+maximum, parameter values and exact updates. It additionally counts
+pre-ReLU zero and nonpositive convolution/dense activations over the *same
+first minibatch*; matching integer pre-ReLU counts are taken from the usual
+cached batch output. Nonpositive counts distinguish ReLU-inactive outputs
+from exact zeros. FP32 has no integer output clipping flags. Its missing clip metrics are therefore null, not zero.
 The two processes run independently; no float computation is introduced
 into the integer model forward/backward/update code.
 
@@ -43,7 +55,10 @@ Old plans and old archived reports remain valid without this option.
 
 The integration invariance test runs both backends and depths 16/20 with the
 same seed under trace-on and trace-off, asserting identical per-epoch learning
-outcomes and confusion matrices. CI records timing/RSS for both modes;
+outcomes and confusion matrices. A low-level optimizer fixture compares
+observed and unobserved *weights, momentum states and subsequent RNG draw*
+and deliberately triggers round-to-zero, nonzero weight deltas and
+saturation-blocked deltas. CI records timing/RSS for both modes;
 those metrics describe optional tracing overhead on a *small smoke workload*
 and are not stable hardware performance claims. The requirement is zero
 numerical effect, not zero measurement overhead.
@@ -60,7 +75,9 @@ old ten-epoch gates. No auto-tuning or architecture tweaks are permitted.
 Interpret early-vs-late layer gradient zero rates, update counts and saturation
 alongside the independent FP32 learning curves.
 
-A new report's `layer_diagnostics` schema is 1. Sampling only the first
+A new report's `layer_diagnostics` schema is 1 (with both additional
+fields optional in earlier archived reports). Sampling only the first
 minibatch is a limited observation; it cannot establish full epoch-wide
-statistics, the exact prequantized gradient, or per-operation stochastic
-rounding rates. Full arithmetic event counters remain future scope of #37.
+statistics, the exact unquantized gradient, or overall per-operation stochastic rounding
+rates outside this selected optimizer step. Full activation/gradient tracing
+remains future scope of #37.

@@ -78,7 +78,20 @@ pub struct LayerNumericSnapshot {
     pub gradients: Vec<Dyadic>,
     pub forward_outputs: usize,
     pub forward_zeros: usize,
+    pub forward_nonpositive: usize,
     pub forward_saturated: usize,
+}
+
+/// Counts observed INSIDE the integer optimizer, at the actual stochastic-round
+/// decision. Only diagnostic updates use this path; no extra random draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OptimizerQuantizationStats {
+    pub parameters_seen: usize,
+    pub zero_effective_steps: usize,
+    pub nonzero_effective_steps: usize,
+    pub quantized_to_zero_updates: usize,
+    pub nonzero_rounded_deltas: usize,
+    pub saturation_blocked_deltas: usize,
 }
 
 // ─── Module trait ──────────────────────────────────────────────────────────────
@@ -152,6 +165,16 @@ pub trait Module {
     /// Diagnostic snapshots are disabled unless an experiment explicitly calls
     /// this. New modules are never implicitly included in the report.
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
+        None
+    }
+
+    /// Sample one normal optimizer update with direct stochastic-round counters.
+    /// Unsupported modules execute their ordinary update and return no stats.
+    fn update_with_quantization_stats(
+        &mut self,
+        lr_shift: u32,
+    ) -> Option<OptimizerQuantizationStats> {
+        self.update(lr_shift);
         None
     }
 
@@ -330,6 +353,19 @@ impl Sequential {
             .collect()
     }
 
+    /// Exactly one ordinary optimizer update per layer; built-in integer layers
+    /// additionally count the stochastic quantization outcome at that operation.
+    pub fn update_with_numeric_trace(
+        &mut self,
+        lr_shift: u32,
+    ) -> Vec<(usize, &'static str, OptimizerQuantizationStats)> {
+        self.check_integer_backend();
+        self.layers.iter_mut().enumerate().filter_map(|(i, layer)| {
+            layer.update_with_quantization_stats(lr_shift)
+                .map(|stats| (i, layer.name(), stats))
+        }).collect()
+    }
+
     pub fn update(&mut self, lr_shift: u32) {
         self.check_integer_backend();
         for layer in &mut self.layers {
@@ -482,6 +518,80 @@ fn apply_updates_mean(
             .zip(vels.iter_mut())
             .for_each(|((w, &g), v)| {
                 *w = momentum_step(*w, mean_gradient(g, samples), v, lr_shift, m)
+            }),
+    }
+}
+
+/// Only the diagnostic path uses this function. The original sgd_step remains
+/// untouched. This performs the same single stochastic_round at the same point,
+/// then observes its result without drawing from RNG a second time.
+fn sgd_step_observed(
+    w: Dyadic,
+    g: Dyadic,
+    lr_shift: u32,
+    stats: &mut OptimizerQuantizationStats,
+) -> Dyadic {
+    let eff = (g.s as i64) + (lr_shift as i64) - (w.s as i64);
+    let delta = if eff >= 0 {
+        stochastic_round(g.v, eff as u32)
+    } else {
+        let k = (-eff).min(30) as u32;
+        ((g.v as i64) << k).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    };
+    stats.parameters_seen += 1;
+    if g.v == 0 {
+        stats.zero_effective_steps += 1;
+    } else {
+        stats.nonzero_effective_steps += 1;
+        if eff > 0 && delta == 0 {
+            stats.quantized_to_zero_updates += 1;
+        }
+    }
+    if delta != 0 {
+        stats.nonzero_rounded_deltas += 1;
+    }
+    let updated = w.v.saturating_sub(delta);
+    if delta != 0 && updated == w.v {
+        stats.saturation_blocked_deltas += 1;
+    }
+    Dyadic::new(updated, w.s)
+}
+
+fn momentum_step_observed(
+    w: Dyadic,
+    g: Dyadic,
+    v: &mut Dyadic,
+    lr_shift: u32,
+    m: u32,
+    stats: &mut OptimizerQuantizationStats,
+) -> Dyadic {
+    let decayed = Dyadic::new(stochastic_round(v.v, m), v.s);
+    *v = add(decayed, g);
+    sgd_step_observed(w, *v, lr_shift, stats)
+}
+
+/// Matched training arithmetic for exactly the minibatch under observation.
+/// The normal path never calls this diagnostic function.
+fn apply_updates_mean_observed(
+    params: &mut [Dyadic],
+    grads: &Tensor,
+    vels: &mut [Dyadic],
+    lr_shift: u32,
+    momentum: Option<u32>,
+    samples: usize,
+    stats: &mut OptimizerQuantizationStats,
+) {
+    assert!(samples > 0, "apply_updates: no accumulated examples");
+    assert_eq!(params.len(), grads.data.len(), "apply_updates: param/gradient mismatch");
+    assert_eq!(params.len(), vels.len(), "apply_updates: param/velocity mismatch");
+    match momentum {
+        None => params.iter_mut().zip(grads.data.iter()).for_each(|(w, &g)| {
+            *w = sgd_step_observed(*w, mean_gradient(g, samples), lr_shift, stats);
+        }),
+        Some(m) => params.iter_mut().zip(grads.data.iter())
+            .zip(vels.iter_mut()).for_each(|((w, &g), v)| {
+                *w = momentum_step_observed(*w, mean_gradient(g, samples), v,
+                    lr_shift, m, stats);
             }),
     }
 }
