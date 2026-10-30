@@ -260,11 +260,33 @@ enum Op {
     Flatten,
     Linear(Dense),
 }
+pub struct Fp32NumericSnapshot {
+    pub index: usize,
+    pub kind: &'static str,
+    pub parameters: Vec<f32>,
+    pub gradients: Vec<f32>,
+}
+
 pub struct CnnFp32 {
     ops: Vec<Op>,
     inputs: Vec<Vec<f32>>,
 }
 impl CnnFp32 {
+    pub fn numeric_snapshots(&self) -> Vec<Fp32NumericSnapshot> {
+        self.ops.iter().enumerate().filter_map(|(index, op)| {
+            let (kind, p) = match op {
+                Op::Conv(c) => ("Conv2D", &c.params),
+                Op::Linear(l) => ("Linear", &l.params),
+                _ => return None,
+            };
+            Some(Fp32NumericSnapshot {
+                index, kind,
+                parameters: p.weights.iter().chain(&p.bias).copied().collect(),
+                gradients: p.grad_weights.iter().chain(&p.grad_bias).copied().collect(),
+            })
+        }).collect()
+    }
+
     pub fn forward(&mut self, input: &[f32]) -> Vec<f32> {
         assert_eq!(input.len(), 784, "MNIST CNN expects a 28x28 input");
         self.inputs.clear();

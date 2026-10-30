@@ -70,6 +70,17 @@ pub use conv::Conv2D;
 use crate::dyadic::{Dyadic, Tensor, TensorView, add, stochastic_round};
 use std::time::Instant;
 
+/// An opt-in, read-only raw-dyadic snapshot used only for research reporting.
+/// A snapshot must not modify weights, gradients, training state or RNG.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerNumericSnapshot {
+    pub parameters: Vec<Dyadic>,
+    pub gradients: Vec<Dyadic>,
+    pub forward_outputs: usize,
+    pub forward_zeros: usize,
+    pub forward_saturated: usize,
+}
+
 // ─── Module trait ──────────────────────────────────────────────────────────────
 
 /// Declares whether a layer may execute in the ADR-002 integer training backend.
@@ -137,6 +148,10 @@ pub trait Module {
     /// Works for a full batch, a short last batch, and repeated backward calls.
     /// Reset accumulated gradients. Does **not** reset velocity.
     fn zero_grad(&mut self);
+
+    /// Diagnostic snapshots are disabled unless an experiment explicitly calls
+    /// this. New modules are never implicitly included in the report.
+    fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> { None }
 
     // ── Metadata ─────────────────────────────────────────────────────────────
 
@@ -303,6 +318,12 @@ impl Sequential {
             }
             layer_ns[index] += started.elapsed().as_nanos();
         }
+    }
+
+    pub fn numeric_snapshots(&self) -> Vec<(usize, &'static str, LayerNumericSnapshot)> {
+        self.layers.iter().enumerate()
+            .filter_map(|(i, layer)| layer.numeric_snapshot().map(|s| (i, layer.name(), s)))
+            .collect()
     }
 
     pub fn update(&mut self, lr_shift: u32) {

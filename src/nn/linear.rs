@@ -2,7 +2,7 @@ use crate::dyadic::{
     Dyadic, Tensor, TensorView, add, discard_mul_with_rng, mul_with_rng, requantize, signed_bounds,
     ste_requantize,
 };
-use crate::nn::{Module, TrainingArithmetic, apply_updates_mean};
+use crate::nn::{LayerNumericSnapshot, Module, TrainingArithmetic, apply_updates_mean};
 use crate::rng::{rng_range, with_rng_state};
 
 /// Fully-connected affine layer: `y = ℛ(W⊗x ⊕ b)`.
@@ -278,6 +278,17 @@ impl Linear {
 }
 
 impl Module for Linear {
+    fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
+        let out = &self.output_batch_cache.data;
+        Some(LayerNumericSnapshot {
+            parameters: self.weights.data.iter().chain(&self.biases.data).copied().collect(),
+            gradients: self.grad_w.data.iter().chain(&self.grad_b.data).copied().collect(),
+            forward_outputs: out.len(),
+            forward_zeros: out.iter().filter(|v| v.v == 0).count(),
+            forward_saturated: self.clip_batch_cache.iter()
+                .map(|c| c.iter().filter(|&&hit| hit).count()).sum(),
+        })
+    }
     fn training_arithmetic(&self) -> TrainingArithmetic {
         TrainingArithmetic::IntegerOnly
     }

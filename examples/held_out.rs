@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use integers::data::Dataset;
 use integers::dyadic::{Dyadic, Tensor};
-use integers::nn::{Linear, ReLU, Sequential};
+use integers::nn::{LayerNumericSnapshot, Linear, ReLU, Sequential};
 use integers::rng::seed_rng;
 use integers::{argmax, mse_grad};
 
@@ -70,6 +70,7 @@ struct Config {
     validation_only: bool,
     final_test: bool,
     profile_training: bool,
+    trace_layers: bool,
     split_seed: u64,
 }
 impl Config {
@@ -93,6 +94,7 @@ impl Config {
             validation_only: false,
             final_test: false,
             profile_training: false,
+            trace_layers: false,
             split_seed: SPLIT_SEED,
         };
         let mut i = 0;
@@ -126,6 +128,11 @@ impl Config {
             }
             if key == "--profile-training" {
                 cfg.profile_training = true;
+                i += 1;
+                continue;
+            }
+            if key == "--trace-layers" {
+                cfg.trace_layers = true;
                 i += 1;
                 continue;
             }
@@ -217,6 +224,13 @@ impl Config {
             !cfg.profile_training
                 || (cfg.architecture == Architecture::Dense && cfg.validation_only),
             "training profiling requires dense --validation-only mode"
+        );
+        assert!(
+            !cfg.trace_layers || (cfg.validation_only && cfg.task == Task::Mnist
+                && matches!(cfg.architecture, Architecture::Cnn4 | Architecture::Cnn8
+                    | Architecture::Cnn12 | Architecture::Cnn16 | Architecture::Cnn20)
+                && !cfg.profile_training),
+            "--trace-layers requires validation-only depth CNN without profiling"
         );
         assert!(
             !cfg.validation_only || !cfg.ci_sample,
@@ -816,6 +830,68 @@ impl TrainingProfile {
     }
 }
 
+
+fn should_trace_epoch(epoch: usize, total: usize) -> bool {
+    epoch == 1 || epoch == 5 || epoch == 10 || epoch == total
+}
+
+fn trace_integer(epoch: usize, batch: usize,
+    forward: &[(usize, &'static str, LayerNumericSnapshot)],
+    before: &[(usize, &'static str, LayerNumericSnapshot)],
+    after: &[(usize, &'static str, LayerNumericSnapshot)],
+) -> String {
+    assert_eq!(forward.len(), before.len());
+    assert_eq!(before.len(), after.len());
+    let layers: Vec<String> = forward.iter().zip(before).zip(after)
+        .map(|((f, b), a)| {
+            assert_eq!((f.0, f.1), (b.0, b.1));
+            assert_eq!((b.0, b.1), (a.0, a.1));
+            assert_eq!(b.2.parameters.len(), b.2.gradients.len());
+            let zeros = b.2.gradients.iter().filter(|x| x.v == 0).count();
+            let max_abs = b.2.gradients.iter()
+                .map(|x| (x.v as i64).unsigned_abs()).max().unwrap_or(0);
+            let nonzero: Vec<_> = b.2.gradients.iter()
+                .filter(|x| x.v != 0).map(|x| x.s).collect();
+            let min_scale = nonzero.iter().min().map_or("null".to_string(), |v| v.to_string());
+            let max_scale = nonzero.iter().max().map_or("null".to_string(), |v| v.to_string());
+            let changed = b.2.parameters.iter().zip(&a.2.parameters)
+                .filter(|(x, y)| x != y).count();
+            format!(
+                "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_mantissa\":{},\"nonzero_gradient_min_scale\":{},\"nonzero_gradient_max_scale\":{},\"forward_count\":{},\"forward_zero_count\":{},\"forward_saturated_count\":{},\"changed_parameters\":{},\"unchanged_parameters\":{},\"quantized_to_zero_updates\":null}}",
+                f.0, f.1, b.2.parameters.len(), b.2.parameters.iter().filter(|x| x.v == 0).count(),
+                b.2.gradients.len(), zeros, max_abs, min_scale, max_scale,
+                f.2.forward_outputs, f.2.forward_zeros, f.2.forward_saturated,
+                changed, b.2.parameters.len() - changed
+            )
+        }).collect();
+    format!("{{\"epoch\":{},\"batch_index\":0,\"batch_samples\":{},\"layers\":[{}]}}",
+        epoch, batch, layers.join(","))
+}
+fn trace_fp32(epoch: usize, batch: usize,
+    before: &[cnn_reference::Fp32NumericSnapshot],
+    after: &[cnn_reference::Fp32NumericSnapshot],
+) -> String {
+    assert_eq!(before.len(), after.len());
+    let layers: Vec<String> = before.iter().zip(after).map(|(a, b)| {
+        assert_eq!((a.index, a.kind), (b.index, b.kind));
+        assert_eq!(a.parameters.len(), a.gradients.len());
+        let changed = a.parameters.iter().zip(&b.parameters)
+            .filter(|(x, y)| x != y).count();
+        let abs = a.gradients.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        let abs_json = if abs.is_finite() { format!("{:.8e}", abs) }
+            else { "null".to_owned() };
+        format!(
+            "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_fp32\":{},\"nonfinite_gradient_count\":{},\"forward_saturated_count\":null,\"changed_parameters\":{},\"unchanged_parameters\":{},\"quantized_to_zero_updates\":null}}",
+            a.index, a.kind, a.parameters.len(), a.parameters.iter().filter(|x| **x == 0.0).count(),
+            a.gradients.len(), a.gradients.iter().filter(|x| **x == 0.0).count(),
+            abs_json, a.gradients.iter().filter(|x| !x.is_finite()).count(),
+            changed, a.parameters.len() - changed
+        )
+    }).collect();
+    format!("{{\"epoch\":{},\"batch_index\":0,\"batch_samples\":{},\"layers\":[{}]}}",
+        epoch, batch, layers.join(","))
+}
+
 struct Epoch {
     epoch: usize,
     train_accuracy: f64,
@@ -895,11 +971,13 @@ fn main() {
     };
     let model_initialization_ms = model_start.elapsed().as_millis();
     let mut curve = Vec::new();
+    let mut trace_records: Vec<String> = Vec::new();
     let start = Instant::now();
     for epoch in 0..cfg.epochs {
         let epoch_start = Instant::now();
         let order = protocol::epoch_order(&data.train_ids, cfg.seed, epoch);
         let mut correct = 0usize;
+        let sampled_epoch = cfg.trace_layers && should_trace_epoch(epoch + 1, cfg.epochs);
         let mut profile = TrainingProfile::default();
         if cfg.profile_training && cfg.backend == Backend::Integer {
             profile.backward_layer_ns = vec![0; integer.layers.len()];
@@ -909,7 +987,7 @@ fn main() {
         match cfg.backend {
             Backend::Integer => {
                 integer.set_training(true);
-                for ids in order.chunks(cfg.batch) {
+                for (batch_idx, ids) in order.chunks(cfg.batch).enumerate() {
                     if cfg.profile_training {
                         profile.batches += 1;
                         profile.samples += ids.len();
@@ -941,6 +1019,9 @@ fn main() {
                         let (x, t) = data.pool.minibatch(ids);
                         integer.zero_grad();
                         let y = integer.forward_batch(&x);
+                        let forward_snapshot = if sampled_epoch && batch_idx == 0 {
+                            Some(integer.numeric_snapshots())
+                        } else { None };
                         for (sample, &idx) in y.iter().zip(ids) {
                             if argmax(sample.data) == data.pool.labels[idx] as usize {
                                 correct += 1;
@@ -954,13 +1035,19 @@ fn main() {
                             })
                             .collect();
                         integer.backward_batch_discard_input_grad(&gradient);
+                        let before_update = forward_snapshot.as_ref()
+                            .map(|_| integer.numeric_snapshots());
                         integer.update(cfg.lr_shift);
+                        if let (Some(forward), Some(before)) = (forward_snapshot, before_update) {
+                            trace_records.push(trace_integer(epoch + 1, ids.len(),
+                                &forward, &before, &integer.numeric_snapshots()));
+                        }
                     }
                 }
                 integer.set_training(false);
             }
             Backend::Fp32 => {
-                for ids in order.chunks(cfg.batch) {
+                for (batch_idx, ids) in order.chunks(cfg.batch).enumerate() {
                     if cfg.profile_training {
                         profile.batches += 1;
                         profile.samples += ids.len();
@@ -990,7 +1077,20 @@ fn main() {
                                 correct += 1;
                             }
                         }
+                        let before_update = if sampled_epoch && batch_idx == 0 {
+                            let Fp32Model::Cnn(model) = &fp32 else {
+                                unreachable!("trace requires paired CNN");
+                            };
+                            Some(model.numeric_snapshots())
+                        } else { None };
                         fp32.update(cfg.lr_shift, ids.len());
+                        if let Some(before) = before_update {
+                            let Fp32Model::Cnn(model) = &fp32 else {
+                                unreachable!("trace requires paired CNN");
+                            };
+                            trace_records.push(trace_fp32(epoch + 1, ids.len(), &before,
+                                &model.numeric_snapshots()));
+                        }
                     }
                 }
             }
@@ -1133,8 +1233,12 @@ fn main() {
     let test_accuracy_json = test_correct.map_or("null".to_owned(), |n| {
         format!("{:.6}", pct(n, data.test.len()))
     });
+    let layer_trace_json = if cfg.trace_layers {
+        format!("{{\"schema\":1,\"sampling\":\"first_minibatch_epochs_1_5_10_last\",\"records\":[{}]}}",
+            trace_records.join(","))
+    } else { "null".to_owned() };
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"layer_diagnostics\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
         cfg.ci_sample,
         cfg.seed,
@@ -1157,6 +1261,7 @@ fn main() {
         data.test.len(),
         cfg.validation_only,
         cfg.profile_training,
+        layer_trace_json,
         test_correct.is_some(),
         test_correct_json,
         test_accuracy_json,
