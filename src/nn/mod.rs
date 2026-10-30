@@ -360,10 +360,15 @@ impl Sequential {
         lr_shift: u32,
     ) -> Vec<(usize, &'static str, OptimizerQuantizationStats)> {
         self.check_integer_backend();
-        self.layers.iter_mut().enumerate().filter_map(|(i, layer)| {
-            layer.update_with_quantization_stats(lr_shift)
-                .map(|stats| (i, layer.name(), stats))
-        }).collect()
+        self.layers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, layer)| {
+                layer
+                    .update_with_quantization_stats(lr_shift)
+                    .map(|stats| (i, layer.name(), stats))
+            })
+            .collect()
     }
 
     pub fn update(&mut self, lr_shift: u32) {
@@ -582,16 +587,29 @@ fn apply_updates_mean_observed(
     stats: &mut OptimizerQuantizationStats,
 ) {
     assert!(samples > 0, "apply_updates: no accumulated examples");
-    assert_eq!(params.len(), grads.data.len(), "apply_updates: param/gradient mismatch");
-    assert_eq!(params.len(), vels.len(), "apply_updates: param/velocity mismatch");
+    assert_eq!(
+        params.len(),
+        grads.data.len(),
+        "apply_updates: param/gradient mismatch"
+    );
+    assert_eq!(
+        params.len(),
+        vels.len(),
+        "apply_updates: param/velocity mismatch"
+    );
     match momentum {
-        None => params.iter_mut().zip(grads.data.iter()).for_each(|(w, &g)| {
-            *w = sgd_step_observed(*w, mean_gradient(g, samples), lr_shift, stats);
-        }),
-        Some(m) => params.iter_mut().zip(grads.data.iter())
-            .zip(vels.iter_mut()).for_each(|((w, &g), v)| {
-                *w = momentum_step_observed(*w, mean_gradient(g, samples), v,
-                    lr_shift, m, stats);
+        None => params
+            .iter_mut()
+            .zip(grads.data.iter())
+            .for_each(|(w, &g)| {
+                *w = sgd_step_observed(*w, mean_gradient(g, samples), lr_shift, stats);
+            }),
+        Some(m) => params
+            .iter_mut()
+            .zip(grads.data.iter())
+            .zip(vels.iter_mut())
+            .for_each(|((w, &g), v)| {
+                *w = momentum_step_observed(*w, mean_gradient(g, samples), v, lr_shift, m, stats);
             }),
     }
 }
@@ -723,5 +741,85 @@ mod numeric_snapshot_tests {
         seed_rng(4242);
         let y_plain = plain.forward_batch(&one(127));
         assert_eq!(y_traced.data, y_plain.data);
+    }
+}
+
+#[cfg(test)]
+mod observed_optimizer_tests {
+    use super::{Dyadic, OptimizerQuantizationStats, Tensor,
+        apply_updates_mean, apply_updates_mean_observed};
+    use crate::rng::{rng_next, seed_rng};
+
+    #[test]
+    fn stats_classify_rounding_zero_effective_steps_and_saturation_without_rng_drift() {
+        let weights = [
+            Dyadic::new(0, 0),
+            Dyadic::new(17, 0),
+            Dyadic::new(0, 0),
+            Dyadic::new(i32::MIN, 0),
+        ];
+        let gradients = Tensor::from_vec(vec![
+            Dyadic::new(1, 0),
+            Dyadic::new(0, 0),
+            Dyadic::new(0, 0),
+            Dyadic::new(1, 0),
+        ], vec![4]);
+        let mut original_weights = weights.to_vec();
+        let mut observed_weights = weights.to_vec();
+        let mut original_velocity = vec![Dyadic::new(0, 0); 4];
+        let mut observed_velocity = original_velocity.clone();
+        seed_rng(4242);
+        apply_updates_mean(&mut original_weights, &gradients,
+            &mut original_velocity, 30, None, 1);
+        let next_plain = rng_next();
+        seed_rng(4242);
+        let mut stats = OptimizerQuantizationStats::default();
+        apply_updates_mean_observed(&mut observed_weights, &gradients,
+            &mut observed_velocity, 30, None, 1, &mut stats);
+        let next_traced = rng_next();
+        assert_eq!(original_weights, observed_weights);
+        assert_eq!(original_velocity, observed_velocity);
+        assert_eq!(next_plain, next_traced);
+        assert_eq!(stats.parameters_seen, 4);
+        assert_eq!(stats.zero_effective_steps, 2);
+        assert_eq!(stats.nonzero_effective_steps, 2);
+        assert_eq!(stats.quantized_to_zero_updates, 2);
+        assert_eq!(stats.nonzero_rounded_deltas, 0);
+    }
+
+    #[test]
+    fn observed_optimizer_counts_actual_delta_and_saturation_without_changing_momentum_rng() {
+        let weights = [
+            Dyadic::new(0, 7), Dyadic::new(i32::MIN, 7),
+            Dyadic::new(33, 7),
+        ];
+        let gradients = Tensor::from_vec(vec![
+            Dyadic::new(128, 7), Dyadic::new(128, 7),
+            Dyadic::new(0, 7),
+        ], vec![3]);
+        for momentum in [None, Some(1u32)] {
+            let mut normal = weights.to_vec();
+            let mut observed = weights.to_vec();
+            let mut normal_vel = vec![Dyadic::new(0, 7); 3];
+            let mut traced_vel = normal_vel.clone();
+            seed_rng(1337);
+            apply_updates_mean(&mut normal, &gradients, &mut normal_vel, 0, momentum, 1);
+            let after_normal = rng_next();
+            seed_rng(1337);
+            let mut stats = OptimizerQuantizationStats::default();
+            apply_updates_mean_observed(
+                &mut observed, &gradients, &mut traced_vel, 0, momentum, 1, &mut stats
+            );
+            let after_observed = rng_next();
+            assert_eq!(normal, observed);
+            assert_eq!(normal_vel, traced_vel);
+            assert_eq!(after_normal, after_observed);
+            assert_eq!(stats.parameters_seen, 3);
+            assert_eq!(stats.nonzero_effective_steps, 2);
+            assert_eq!(stats.zero_effective_steps, 1);
+            assert_eq!(stats.nonzero_rounded_deltas, 2);
+            assert_eq!(stats.saturation_blocked_deltas, 1);
+            assert_eq!(stats.quantized_to_zero_updates, 0);
+        }
     }
 }

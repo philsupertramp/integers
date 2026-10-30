@@ -1,10 +1,7 @@
 name: MNIST diagnostic 20-epoch depth recovery (x86_64)
 
 on:
-  pull_request:
-    branches: [research/depth-4-8-paired-abba]
-    paths:
-      - '.github/workflows/depth-diagnostic-20epoch.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read

@@ -2,7 +2,10 @@ use crate::dyadic::{
     Dyadic, Tensor, TensorView, add, discard_mul_with_rng, mul_with_rng, requantize, signed_bounds,
     ste_requantize,
 };
-use crate::nn::{LayerNumericSnapshot, Module, OptimizerQuantizationStats, TrainingArithmetic, apply_updates_mean, apply_updates_mean_observed};
+use crate::nn::{
+    LayerNumericSnapshot, Module, OptimizerQuantizationStats, TrainingArithmetic,
+    apply_updates_mean, apply_updates_mean_observed,
+};
 use crate::rng::{rng_range, with_rng_state};
 
 /// Fully-connected affine layer: `y = ℛ(W⊗x ⊕ b)`.
@@ -444,19 +447,26 @@ impl Module for Linear {
         }
     }
 
-    fn update_with_quantization_stats(
-        &mut self,
-        lr: u32,
-    ) -> Option<OptimizerQuantizationStats> {
+    fn update_with_quantization_stats(&mut self, lr: u32) -> Option<OptimizerQuantizationStats> {
         let mut stats = OptimizerQuantizationStats::default();
         if self.grad_samples != 0 {
             apply_updates_mean_observed(
-                &mut self.weights.data, &self.grad_w, &mut self.vel_w.data,
-                lr, self.momentum_shift, self.grad_samples, &mut stats,
+                &mut self.weights.data,
+                &self.grad_w,
+                &mut self.vel_w.data,
+                lr,
+                self.momentum_shift,
+                self.grad_samples,
+                &mut stats,
             );
             apply_updates_mean_observed(
-                &mut self.biases.data, &self.grad_b, &mut self.vel_b.data,
-                lr, self.momentum_shift, self.grad_samples, &mut stats,
+                &mut self.biases.data,
+                &self.grad_b,
+                &mut self.vel_b.data,
+                lr,
+                self.momentum_shift,
+                self.grad_samples,
+                &mut stats,
             );
         }
         Some(stats)
