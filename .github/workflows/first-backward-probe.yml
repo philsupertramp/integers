@@ -1,0 +1,105 @@
+name: MNIST paired initial-backward precision probe (x86_64)
+
+on:
+  pull_request:
+    branches: [research/depth-numerical-diagnostics]
+    paths:
+      - 'src/nn/**'
+      - 'experiments/cnn_reference.rs'
+      - 'examples/held_out.rs'
+      - 'tests/check_first_backward_probe.py'
+      - '.github/workflows/first-backward-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  invariant-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check format, core tests and pinned experiment protocol
+        run: |
+          test "$(uname -m)" = x86_64
+          cargo fmt --all -- --check
+          cargo test --locked --all-targets
+          python3 -m unittest discover -s tests -p test_depth_paired_abba.py -v
+      - name: Fetch canonical MNIST development data only
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Build independent FP32 and integer pair
+        run: cargo build --locked --release --example held_out
+      - name: Observer on/off must preserve trained integer accuracy and confusion
+        run: python3 tests/check_first_backward_probe.py
+
+  initial-compare:
+    needs: invariant-gate
+    name: ${{ matrix.depth }} convolutions / one original-model epoch / seed 4242
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        depth: [16, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Load MNIST development samples only
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Build frozen diagnostic binary
+        run: cargo build --release --locked --example held_out
+      - name: Observe same first minibatch before optimizer update
+        env:
+          DEPTH: ${{ matrix.depth }}
+        run: |
+          mkdir -p reports
+          target/release/examples/held_out \
+            --dataset mnist --backend integer \
+            --architecture "cnn${DEPTH}" --validation-only \
+            --data-dir data/mnist \
+            --report "reports/initial-backward-d${DEPTH}-s4242.json" \
+            --seed 4242 --epochs 1 --batch-size 32 \
+            --train-limit 8192 --validation-limit 1042 --lr-shift 7 \
+            --trace-layers --probe-first-backward
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+          sha256sum "reports/initial-backward-d${DEPTH}-s4242.json"
+      - name: Validate raw layer boundary and exact gate accounting
+        env:
+          DEPTH: ${{ matrix.depth }}
+        run: |
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          depth=int(os.environ['DEPTH'])
+          f=Path(f'reports/initial-backward-d{depth}-s4242.json')
+          report=json.loads(f.read_text())
+          probe=report['first_backward_probe']
+          assert probe['schema']==1 and probe['samples']==32
+          assert probe['same_indices'] and probe['same_decoded_initial_weights']
+          assert len(probe['gate_agreements'])==depth+1
+          assert len(probe['parameter_gradient_zeros'])==depth+2
+          assert not report['test_evaluated'] and report['test_size']==0
+          for g in probe['gate_agreements']:
+              assert sum(g[k] for k in ('both_active','integer_only','fp32_only','both_inactive')) == g['elements']
+          for b in probe['layer_gradient_boundaries']:
+              for k in ('integer_received','fp32_received'):
+                  assert 0 <= b[k]['zero'] <= b[k]['count']
+          print(f'Validated paired first-backward gate/gradient probe, depth {depth}')
+          PY
+      - name: Preserve raw diagnostic output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnist-first-backward-depth-${{ matrix.depth }}-seed4242
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
