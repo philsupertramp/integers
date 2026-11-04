@@ -242,9 +242,14 @@ impl Config {
                     && cfg.backend == Backend::Integer
                     && cfg.epochs == 1
                     && cfg.task == Task::Mnist
-                    && matches!(cfg.architecture,
-                        Architecture::Cnn4 | Architecture::Cnn8 | Architecture::Cnn12
-                        | Architecture::Cnn16 | Architecture::Cnn20)
+                    && matches!(
+                        cfg.architecture,
+                        Architecture::Cnn4
+                            | Architecture::Cnn8
+                            | Architecture::Cnn12
+                            | Architecture::Cnn16
+                            | Architecture::Cnn20
+                    )
                     && !cfg.profile_training),
             "--probe-first-backward requires one-epoch traced integer CNN validation research"
         );
@@ -861,7 +866,6 @@ impl TrainingProfile {
     }
 }
 
-
 #[derive(Clone, Debug)]
 struct GateAgreement {
     index: usize,
@@ -873,8 +877,14 @@ struct GateAgreement {
 }
 impl GateAgreement {
     fn new(index: usize) -> Self {
-        Self { index, elements: 0, both_active: 0, integer_only: 0,
-            fp32_only: 0, both_inactive: 0 }
+        Self {
+            index,
+            elements: 0,
+            both_active: 0,
+            integer_only: 0,
+            fp32_only: 0,
+            both_inactive: 0,
+        }
     }
 
     fn observe(&mut self, int_mask: &[bool], fp_mask: &[bool]) {
@@ -893,23 +903,34 @@ impl GateAgreement {
     fn json(&self) -> String {
         format!(
             "{{\"index\":{},\"elements\":{},\"both_active\":{},\"integer_only\":{},\"fp32_only\":{},\"both_inactive\":{}}}",
-            self.index, self.elements, self.both_active, self.integer_only,
-            self.fp32_only, self.both_inactive
+            self.index,
+            self.elements,
+            self.both_active,
+            self.integer_only,
+            self.fp32_only,
+            self.both_inactive
         )
     }
 }
 
 fn integer_grad_json(g: &DyadicGradientSummary) -> String {
-    let min = g.min_nonzero_scale.map_or("null".to_owned(), |v| v.to_string());
-    let max = g.max_nonzero_scale.map_or("null".to_owned(), |v| v.to_string());
+    let min = g
+        .min_nonzero_scale
+        .map_or("null".to_owned(), |v| v.to_string());
+    let max = g
+        .max_nonzero_scale
+        .map_or("null".to_owned(), |v| v.to_string());
     format!(
         "{{\"count\":{},\"zero\":{},\"max_abs_mantissa\":{},\"min_nonzero_scale\":{},\"max_nonzero_scale\":{}}}",
         g.count, g.zeros, g.max_abs_mantissa, min, max
     )
 }
 fn fp32_grad_json(g: &cnn_reference::Fp32GradientSummary) -> String {
-    let max = if g.max_abs.is_finite() { format!("{:.9e}", g.max_abs) }
-        else { "null".to_owned() };
+    let max = if g.max_abs.is_finite() {
+        format!("{:.9e}", g.max_abs)
+    } else {
+        "null".to_owned()
+    };
     format!(
         "{{\"count\":{},\"zero\":{},\"nonfinite\":{},\"max_abs\":{},\"nonzero_under_one_weight_lsb\":{}}}",
         g.count, g.zeros, g.nonfinite, max, g.small_nonzero_under_one_lsb
@@ -929,7 +950,9 @@ fn render_first_backward_probe(
     let mut layer_rows = Vec::new();
     for (a, b) in integer_boundaries.iter().zip(fp32_boundaries) {
         assert_eq!((a.index, a.kind), (b.index, b.kind));
-        let iprop = a.propagated.as_ref()
+        let iprop = a
+            .propagated
+            .as_ref()
             .map_or("null".to_owned(), integer_grad_json);
         layer_rows.push(format!(
             "{{\"index\":{},\"kind\":{:?},\"integer_received\":{},\"fp32_received\":{},\"integer_propagated\":{},\"fp32_propagated\":{}}}",
@@ -950,17 +973,27 @@ fn render_first_backward_probe(
         let b_zero = y.gradients.iter().filter(|&&x| x == 0.0).count();
         params.push(format!(
             "{{\"index\":{},\"kind\":{:?},\"count\":{},\"integer_zeros\":{},\"fp32_zeros\":{}}}",
-            ia, kind, x.gradients.len(), a_zero, b_zero
+            ia,
+            kind,
+            x.gradients.len(),
+            a_zero,
+            b_zero
         ));
     }
-    let gates = gate_agreements.iter().map(GateAgreement::json)
-        .collect::<Vec<_>>().join(",");
+    let gates = gate_agreements
+        .iter()
+        .map(GateAgreement::json)
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
         "{{\"schema\":1,\"scope\":\"first_training_minibatch_before_any_optimizer_update\",\
           \"same_indices\":true,\"same_decoded_initial_weights\":true,\"samples\":{},\
           \"gate_agreements\":[{}],\"layer_gradient_boundaries\":[{}],\
           \"parameter_gradient_zeros\":[{}]}}",
-        ids.len(), gates, layer_rows.join(","), params.join(",")
+        ids.len(),
+        gates,
+        layer_rows.join(","),
+        params.join(",")
     )
 }
 
@@ -1218,14 +1251,18 @@ fn main() {
                                 let t = float_target(&data.pool, sample_id);
                                 reference.accumulate(&x, &t);
                                 for (index, fp_mask) in reference.relu_input_signs_last_sample() {
-                                    let (_, _, all_int_mask) = gates.iter().find(|(i, _, _)| *i == index)
+                                    let (_, _, all_int_mask) = gates
+                                        .iter()
+                                        .find(|(i, _, _)| *i == index)
                                         .expect("each FP32 ReLU gate must match an integer layer");
                                     let stride = fp_mask.len();
                                     assert_eq!(all_int_mask.len(), ids.len() * stride);
                                     if sample_index == 0 {
                                         agreements.push(GateAgreement::new(index));
                                     }
-                                    let agreement = agreements.iter_mut().find(|a| a.index == index)
+                                    let agreement = agreements
+                                        .iter_mut()
+                                        .find(|a| a.index == index)
                                         .expect("first sample sets gate identity");
                                     let lo = sample_index * stride;
                                     agreement.observe(&all_int_mask[lo..lo + stride], &fp_mask);
@@ -1235,8 +1272,12 @@ fn main() {
                             let fp_layers = reference.numeric_snapshots();
                             reference.end_forward_observation();
                             first_backward_probe_json = render_first_backward_probe(
-                                ids, &boundaries, &fp_boundaries, &observed_layers,
-                                &fp_layers, &agreements
+                                ids,
+                                &boundaries,
+                                &fp_boundaries,
+                                &observed_layers,
+                                &fp_layers,
+                                &agreements,
                             );
                         }
                         let before_update = forward_snapshot

@@ -321,7 +321,10 @@ impl CnnFp32 {
         self.forward_counts = vec![(0, 0, 0); self.ops.len()];
         self.observe_backward = true;
         self.backward_counts = vec![
-            (Fp32GradientSummary::default(), Fp32GradientSummary::default());
+            (
+                Fp32GradientSummary::default(),
+                Fp32GradientSummary::default()
+            );
             self.ops.len()
         ];
     }
@@ -334,34 +337,42 @@ impl CnnFp32 {
     /// Read the forward pre-ReLU gate at each Conv/Linear from inputs cached
     /// before its immediately following ReLU. The final dense has no gate.
     pub fn relu_input_signs_last_sample(&self) -> Vec<(usize, Vec<bool>)> {
-        self.ops.iter().enumerate().filter_map(|(i, op)| {
-            if matches!(op, Op::Conv(_) | Op::Linear(_))
-                && i + 1 < self.ops.len()
-                && matches!(self.ops[i + 1], Op::Relu)
-            {
-                Some((i, self.inputs[i + 1].iter().map(|&x| x > 0.0).collect()))
-            } else {
-                None
-            }
-        }).collect()
+        self.ops
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| {
+                if matches!(op, Op::Conv(_) | Op::Linear(_))
+                    && i + 1 < self.ops.len()
+                    && matches!(self.ops[i + 1], Op::Relu)
+                {
+                    Some((i, self.inputs[i + 1].iter().map(|&x| x > 0.0).collect()))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     pub fn backward_snapshots(&self) -> Vec<Fp32BackwardBoundary> {
-        self.ops.iter().enumerate().map(|(index, op)| {
-            let kind = match op {
-                Op::Conv(_) => "Conv2D",
-                Op::Linear(_) => "Linear",
-                Op::Relu => "ReLU",
-                Op::Pool(_) => "MaxPool2D",
-                Op::Flatten => "Flatten",
-            };
-            Fp32BackwardBoundary {
-                index,
-                kind,
-                received: self.backward_counts[index].0.clone(),
-                propagated: self.backward_counts[index].1.clone(),
-            }
-        }).collect()
+        self.ops
+            .iter()
+            .enumerate()
+            .map(|(index, op)| {
+                let kind = match op {
+                    Op::Conv(_) => "Conv2D",
+                    Op::Linear(_) => "Linear",
+                    Op::Relu => "ReLU",
+                    Op::Pool(_) => "MaxPool2D",
+                    Op::Flatten => "Flatten",
+                };
+                Fp32BackwardBoundary {
+                    index,
+                    kind,
+                    received: self.backward_counts[index].0.clone(),
+                    propagated: self.backward_counts[index].1.clone(),
+                }
+            })
+            .collect()
     }
 
     pub fn numeric_snapshots(&self) -> Vec<Fp32NumericSnapshot> {

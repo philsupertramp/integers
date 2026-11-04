@@ -105,7 +105,10 @@ pub struct DyadicGradientSummary {
 }
 impl DyadicGradientSummary {
     fn from_tensor(t: &Tensor) -> Self {
-        let mut r = Self { count: t.data.len(), ..Self::default() };
+        let mut r = Self {
+            count: t.data.len(),
+            ..Self::default()
+        };
         for v in &t.data {
             if v.v == 0 {
                 r.zeros += 1;
@@ -388,7 +391,8 @@ impl Sequential {
     /// The first layer uses the original input-gradient-discard operation;
     /// this changes neither the arithmetic sequence nor RNG draws.
     pub fn backward_batch_discard_input_grad_observed(
-        &mut self, grads: &Tensor,
+        &mut self,
+        grads: &Tensor,
     ) -> Vec<BackwardBoundary> {
         self.check_integer_backend();
         let mut g = grads.clone();
@@ -403,7 +407,10 @@ impl Sequential {
                 Some(DyadicGradientSummary::from_tensor(&g))
             };
             boundaries.push(BackwardBoundary {
-                index, kind: layer.name(), received, propagated,
+                index,
+                kind: layer.name(),
+                received,
+                propagated,
             });
         }
         boundaries.reverse();
@@ -411,9 +418,15 @@ impl Sequential {
     }
 
     pub fn numeric_forward_signs(&self) -> Vec<(usize, &'static str, Vec<bool>)> {
-        self.layers.iter().enumerate().filter_map(|(i, layer)| {
-            layer.numeric_forward_signs().map(|mask| (i, layer.name(), mask))
-        }).collect()
+        self.layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, layer)| {
+                layer
+                    .numeric_forward_signs()
+                    .map(|mask| (i, layer.name(), mask))
+            })
+            .collect()
     }
 
     pub fn numeric_snapshots(&self) -> Vec<(usize, &'static str, LayerNumericSnapshot)> {
@@ -933,9 +946,7 @@ mod backward_boundary_tests {
             model.add(ReLU::new());
             model.add(Linear::new(2, 1, 7, 7, 31));
             model.set_training(true);
-            let x = Tensor::from_vec(vec![
-                Dyadic::new(32, 7), Dyadic::new(-64, 7),
-            ], vec![1, 2]);
+            let x = Tensor::from_vec(vec![Dyadic::new(32, 7), Dyadic::new(-64, 7)], vec![1, 2]);
             let y = model.forward_batch(&x);
             model.zero_grad();
             let dy = Tensor::from_vec(vec![Dyadic::new(127, 7)], vec![1, 1]);

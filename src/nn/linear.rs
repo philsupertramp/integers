@@ -282,7 +282,13 @@ impl Linear {
 
 impl Module for Linear {
     fn numeric_forward_signs(&self) -> Option<Vec<bool>> {
-        Some(self.output_batch_cache.data.iter().map(|v| v.v > 0).collect())
+        Some(
+            self.output_batch_cache
+                .data
+                .iter()
+                .map(|v| v.v > 0)
+                .collect(),
+        )
     }
 
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
