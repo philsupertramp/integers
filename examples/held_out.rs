@@ -19,7 +19,10 @@ use std::time::Instant;
 
 use integers::data::Dataset;
 use integers::dyadic::{Dyadic, Tensor};
-use integers::nn::{LayerNumericSnapshot, Linear, OptimizerQuantizationStats, ReLU, Sequential};
+use integers::nn::{
+    BackwardBoundary, DyadicGradientSummary, LayerNumericSnapshot, Linear,
+    OptimizerQuantizationStats, ReLU, Sequential,
+};
 use integers::rng::seed_rng;
 use integers::{argmax, mse_grad};
 
@@ -71,6 +74,7 @@ struct Config {
     final_test: bool,
     profile_training: bool,
     trace_layers: bool,
+    probe_first_backward: bool,
     split_seed: u64,
 }
 impl Config {
@@ -95,6 +99,7 @@ impl Config {
             final_test: false,
             profile_training: false,
             trace_layers: false,
+            probe_first_backward: false,
             split_seed: SPLIT_SEED,
         };
         let mut i = 0;
@@ -133,6 +138,11 @@ impl Config {
             }
             if key == "--trace-layers" {
                 cfg.trace_layers = true;
+                i += 1;
+                continue;
+            }
+            if key == "--probe-first-backward" {
+                cfg.probe_first_backward = true;
                 i += 1;
                 continue;
             }
@@ -224,6 +234,19 @@ impl Config {
             !cfg.profile_training
                 || (cfg.architecture == Architecture::Dense && cfg.validation_only),
             "training profiling requires dense --validation-only mode"
+        );
+        assert!(
+            !cfg.probe_first_backward
+                || (cfg.validation_only
+                    && cfg.trace_layers
+                    && cfg.backend == Backend::Integer
+                    && cfg.epochs == 1
+                    && cfg.task == Task::Mnist
+                    && matches!(cfg.architecture,
+                        Architecture::Cnn4 | Architecture::Cnn8 | Architecture::Cnn12
+                        | Architecture::Cnn16 | Architecture::Cnn20)
+                    && !cfg.profile_training),
+            "--probe-first-backward requires one-epoch traced integer CNN validation research"
         );
         assert!(
             !cfg.trace_layers
@@ -838,6 +861,109 @@ impl TrainingProfile {
     }
 }
 
+
+#[derive(Clone, Debug)]
+struct GateAgreement {
+    index: usize,
+    elements: usize,
+    both_active: usize,
+    integer_only: usize,
+    fp32_only: usize,
+    both_inactive: usize,
+}
+impl GateAgreement {
+    fn new(index: usize) -> Self {
+        Self { index, elements: 0, both_active: 0, integer_only: 0,
+            fp32_only: 0, both_inactive: 0 }
+    }
+
+    fn observe(&mut self, int_mask: &[bool], fp_mask: &[bool]) {
+        assert_eq!(int_mask.len(), fp_mask.len(), "paired gate length mismatch");
+        for (&integer, &float) in int_mask.iter().zip(fp_mask) {
+            self.elements += 1;
+            match (integer, float) {
+                (true, true) => self.both_active += 1,
+                (true, false) => self.integer_only += 1,
+                (false, true) => self.fp32_only += 1,
+                (false, false) => self.both_inactive += 1,
+            }
+        }
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"index\":{},\"elements\":{},\"both_active\":{},\"integer_only\":{},\"fp32_only\":{},\"both_inactive\":{}}}",
+            self.index, self.elements, self.both_active, self.integer_only,
+            self.fp32_only, self.both_inactive
+        )
+    }
+}
+
+fn integer_grad_json(g: &DyadicGradientSummary) -> String {
+    let min = g.min_nonzero_scale.map_or("null".to_owned(), |v| v.to_string());
+    let max = g.max_nonzero_scale.map_or("null".to_owned(), |v| v.to_string());
+    format!(
+        "{{\"count\":{},\"zero\":{},\"max_abs_mantissa\":{},\"min_nonzero_scale\":{},\"max_nonzero_scale\":{}}}",
+        g.count, g.zeros, g.max_abs_mantissa, min, max
+    )
+}
+fn fp32_grad_json(g: &cnn_reference::Fp32GradientSummary) -> String {
+    let max = if g.max_abs.is_finite() { format!("{:.9e}", g.max_abs) }
+        else { "null".to_owned() };
+    format!(
+        "{{\"count\":{},\"zero\":{},\"nonfinite\":{},\"max_abs\":{},\"nonzero_under_one_weight_lsb\":{}}}",
+        g.count, g.zeros, g.nonfinite, max, g.small_nonzero_under_one_lsb
+    )
+}
+
+fn render_first_backward_probe(
+    ids: &[usize],
+    integer_boundaries: &[BackwardBoundary],
+    fp32_boundaries: &[cnn_reference::Fp32BackwardBoundary],
+    integer_layers: &[(usize, &'static str, LayerNumericSnapshot)],
+    fp32_layers: &[cnn_reference::Fp32NumericSnapshot],
+    gate_agreements: &[GateAgreement],
+) -> String {
+    assert_eq!(integer_boundaries.len(), fp32_boundaries.len());
+    assert_eq!(integer_layers.len(), fp32_layers.len());
+    let mut layer_rows = Vec::new();
+    for (a, b) in integer_boundaries.iter().zip(fp32_boundaries) {
+        assert_eq!((a.index, a.kind), (b.index, b.kind));
+        let iprop = a.propagated.as_ref()
+            .map_or("null".to_owned(), integer_grad_json);
+        layer_rows.push(format!(
+            "{{\"index\":{},\"kind\":{:?},\"integer_received\":{},\"fp32_received\":{},\"integer_propagated\":{},\"fp32_propagated\":{}}}",
+            a.index, a.kind, integer_grad_json(&a.received),
+            fp32_grad_json(&b.received), iprop,
+            if a.propagated.is_none() {
+                "null".to_owned()
+            } else {
+                fp32_grad_json(&b.propagated)
+            }
+        ));
+    }
+    let mut params = Vec::new();
+    for ((ia, kind, x), y) in integer_layers.iter().zip(fp32_layers) {
+        assert_eq!((*ia, *kind), (y.index, y.kind));
+        assert_eq!(x.gradients.len(), y.gradients.len());
+        let a_zero = x.gradients.iter().filter(|x| x.v == 0).count();
+        let b_zero = y.gradients.iter().filter(|&&x| x == 0.0).count();
+        params.push(format!(
+            "{{\"index\":{},\"kind\":{:?},\"count\":{},\"integer_zeros\":{},\"fp32_zeros\":{}}}",
+            ia, kind, x.gradients.len(), a_zero, b_zero
+        ));
+    }
+    let gates = gate_agreements.iter().map(GateAgreement::json)
+        .collect::<Vec<_>>().join(",");
+    format!(
+        "{{\"schema\":1,\"scope\":\"first_training_minibatch_before_any_optimizer_update\",\
+          \"same_indices\":true,\"same_decoded_initial_weights\":true,\"samples\":{},\
+          \"gate_agreements\":[{}],\"layer_gradient_boundaries\":[{}],\
+          \"parameter_gradient_zeros\":[{}]}}",
+        ids.len(), gates, layer_rows.join(","), params.join(",")
+    )
+}
+
 fn should_trace_epoch(epoch: usize, total: usize) -> bool {
     epoch == 1 || epoch == 5 || epoch == 10 || epoch == total
 }
@@ -1000,6 +1126,7 @@ fn main() {
     let model_initialization_ms = model_start.elapsed().as_millis();
     let mut curve = Vec::new();
     let mut trace_records: Vec<String> = Vec::new();
+    let mut first_backward_probe_json = "null".to_owned();
     let start = Instant::now();
     for epoch in 0..cfg.epochs {
         let epoch_start = Instant::now();
@@ -1052,6 +1179,12 @@ fn main() {
                         } else {
                             None
                         };
+                        let compare_now = cfg.probe_first_backward && epoch == 0 && batch_idx == 0;
+                        let integer_gate_masks = if compare_now {
+                            Some(integer.numeric_forward_signs())
+                        } else {
+                            None
+                        };
                         for (sample, &idx) in y.iter().zip(ids) {
                             if argmax(sample.data) == data.pool.labels[idx] as usize {
                                 correct += 1;
@@ -1064,7 +1197,48 @@ fn main() {
                                 Tensor::from_vec(mse_grad(y.data, t.data), y.shape.to_vec())
                             })
                             .collect();
-                        integer.backward_batch_discard_input_grad(&gradient);
+                        let int_boundaries = if compare_now {
+                            Some(integer.backward_batch_discard_input_grad_observed(&gradient))
+                        } else {
+                            integer.backward_batch_discard_input_grad(&gradient);
+                            None
+                        };
+                        if let (Some(boundaries), Some(gates)) =
+                            (int_boundaries, integer_gate_masks)
+                        {
+                            let observed_layers = integer.numeric_snapshots();
+                            let Fp32Model::Cnn(reference) = &mut fp32 else {
+                                unreachable!("initial probe requires paired CNN");
+                            };
+                            reference.zero_grad();
+                            reference.begin_forward_observation();
+                            let mut agreements: Vec<GateAgreement> = Vec::new();
+                            for (sample_index, &sample_id) in ids.iter().enumerate() {
+                                let x = float_row(&data.pool, sample_id);
+                                let t = float_target(&data.pool, sample_id);
+                                reference.accumulate(&x, &t);
+                                for (index, fp_mask) in reference.relu_input_signs_last_sample() {
+                                    let (_, _, all_int_mask) = gates.iter().find(|(i, _, _)| *i == index)
+                                        .expect("each FP32 ReLU gate must match an integer layer");
+                                    let stride = fp_mask.len();
+                                    assert_eq!(all_int_mask.len(), ids.len() * stride);
+                                    if sample_index == 0 {
+                                        agreements.push(GateAgreement::new(index));
+                                    }
+                                    let agreement = agreements.iter_mut().find(|a| a.index == index)
+                                        .expect("first sample sets gate identity");
+                                    let lo = sample_index * stride;
+                                    agreement.observe(&all_int_mask[lo..lo + stride], &fp_mask);
+                                }
+                            }
+                            let fp_boundaries = reference.backward_snapshots();
+                            let fp_layers = reference.numeric_snapshots();
+                            reference.end_forward_observation();
+                            first_backward_probe_json = render_first_backward_probe(
+                                ids, &boundaries, &fp_boundaries, &observed_layers,
+                                &fp_layers, &agreements
+                            );
+                        }
                         let before_update = forward_snapshot
                             .as_ref()
                             .map(|_| integer.numeric_snapshots());
@@ -1299,7 +1473,7 @@ fn main() {
         "null".to_owned()
     };
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"layer_diagnostics\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"layer_diagnostics\": {}, \"first_backward_probe\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
         cfg.ci_sample,
         cfg.seed,
@@ -1323,6 +1497,7 @@ fn main() {
         cfg.validation_only,
         cfg.profile_training,
         layer_trace_json,
+        first_backward_probe_json,
         test_correct.is_some(),
         test_correct_json,
         test_accuracy_json,
