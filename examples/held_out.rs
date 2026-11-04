@@ -233,11 +233,19 @@ impl Config {
             "training profiling requires dense --validation-only mode"
         );
         assert!(
-            !cfg.subunit_carry || (cfg.validation_only && cfg.backend == Backend::Integer
-                && cfg.task == Task::Mnist
-                && matches!(cfg.architecture, Architecture::Cnn4 | Architecture::Cnn8
-                    | Architecture::Cnn12 | Architecture::Cnn16 | Architecture::Cnn20)
-                && !cfg.profile_training),
+            !cfg.subunit_carry
+                || (cfg.validation_only
+                    && cfg.backend == Backend::Integer
+                    && cfg.task == Task::Mnist
+                    && matches!(
+                        cfg.architecture,
+                        Architecture::Cnn4
+                            | Architecture::Cnn8
+                            | Architecture::Cnn12
+                            | Architecture::Cnn16
+                            | Architecture::Cnn20
+                    )
+                    && !cfg.profile_training),
             "--subunit-carry only supports integer depth CNN validation research"
         );
         assert!(

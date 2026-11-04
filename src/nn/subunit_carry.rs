@@ -18,8 +18,7 @@ fn units_from_effective_step(weight: Dyadic, velocity: Dyadic, lr_shift: u32) ->
         // The legacy non-fractional step saturates the integer delta after a
         // capped shift. Preserve that policy for extremely coarse scales.
         let shift = (-eff).min(30) as u32;
-        let delta = ((velocity.v as i64) << shift)
-            .clamp(i32::MIN as i64, i32::MAX as i64);
+        let delta = ((velocity.v as i64) << shift).clamp(i32::MIN as i64, i32::MAX as i64);
         return delta as i128 * DENOMINATOR;
     }
     if eff <= CARRY_BITS as i64 {
@@ -28,7 +27,9 @@ fn units_from_effective_step(weight: Dyadic, velocity: Dyadic, lr_shift: u32) ->
         let shift = eff - CARRY_BITS as i64;
         // At this point even the largest i32 mantissa is less than 2^-24
         // weight-LSB, so truncation yields no representable fine units.
-        if shift >= 32 { 0 } else {
+        if shift >= 32 {
+            0
+        } else {
             (velocity.v as i128) / (1i128 << shift as u32)
         }
     }
@@ -51,7 +52,9 @@ fn update_one(
     // Do not accumulate unbounded carry when storage is saturated.
     *carry = if applied == proposed {
         pending - applied * DENOMINATOR
-    } else { 0 };
+    } else {
+        0
+    };
     weight.v = next;
     if let Some(stats) = stats {
         stats.parameters_seen += 1;
@@ -63,8 +66,12 @@ fn update_one(
                 stats.subunit_deferred_steps += 1;
             }
         }
-        if proposed != 0 { stats.nonzero_rounded_deltas += 1; }
-        if proposed != applied { stats.saturation_blocked_deltas += 1; }
+        if proposed != 0 {
+            stats.nonzero_rounded_deltas += 1;
+        }
+        if proposed != applied {
+            stats.saturation_blocked_deltas += 1;
+        }
     }
 }
 
@@ -81,26 +88,39 @@ pub(super) fn apply_updates_mean_carry(
     mut stats: Option<&mut OptimizerQuantizationStats>,
 ) {
     assert!(samples > 0, "carry optimizer requires accumulated samples");
-    assert_eq!(weights.len(), grads.data.len(), "weight / gradient mismatch");
-    assert_eq!(weights.len(), velocities.len(), "weight / velocity mismatch");
+    assert_eq!(
+        weights.len(),
+        grads.data.len(),
+        "weight / gradient mismatch"
+    );
+    assert_eq!(
+        weights.len(),
+        velocities.len(),
+        "weight / velocity mismatch"
+    );
     assert_eq!(weights.len(), carry.len(), "weight / carry mismatch");
-    for (((w, &gradient), v), residue) in weights.iter_mut()
-        .zip(&grads.data).zip(velocities.iter_mut()).zip(carry.iter_mut())
+    for (((w, &gradient), v), residue) in weights
+        .iter_mut()
+        .zip(&grads.data)
+        .zip(velocities.iter_mut())
+        .zip(carry.iter_mut())
     {
         let averaged = mean_gradient(gradient, samples);
         let effective_step = if let Some(m) = momentum_shift {
             let decayed = Dyadic::new(stochastic_round(v.v, m), v.s);
             *v = add(decayed, averaged);
             *v
-        } else { averaged };
+        } else {
+            averaged
+        };
         update_one(w, effective_step, residue, lr_shift, stats.as_deref_mut());
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::apply_updates_mean;
+    use super::*;
     use crate::rng::{rng_next, seed_rng};
 
     #[test]
@@ -118,8 +138,16 @@ mod tests {
         let base_rng = rng_next();
         seed_rng(1337);
         for _ in 0..128 {
-            apply_updates_mean_carry(&mut fixed, &grad, &mut v_fixed,
-                &mut carry, 7, None, 1, None);
+            apply_updates_mean_carry(
+                &mut fixed,
+                &grad,
+                &mut v_fixed,
+                &mut carry,
+                7,
+                None,
+                1,
+                None,
+            );
         }
         let fixed_rng = rng_next();
         assert_eq!(base_rng, fixed_rng, "same stochastic round draws");
@@ -131,14 +159,11 @@ mod tests {
     #[test]
     fn observed_and_unobserved_carry_produce_exact_same_weights_rng_and_residue() {
         for momentum in [None, Some(1)] {
-            let g = Tensor::from_vec(vec![
-                Dyadic::new(3, 7), Dyadic::new(0, 7),
-                Dyadic::new(-70, 7),
-            ], vec![3]);
-            let initial = vec![
-                Dyadic::new(19, 7), Dyadic::new(-24, 7),
-                Dyadic::new(10, 7)
-            ];
+            let g = Tensor::from_vec(
+                vec![Dyadic::new(3, 7), Dyadic::new(0, 7), Dyadic::new(-70, 7)],
+                vec![3],
+            );
+            let initial = vec![Dyadic::new(19, 7), Dyadic::new(-24, 7), Dyadic::new(10, 7)];
             let mut p = initial.clone();
             let mut q = initial;
             let mut pv = vec![Dyadic::new(0, 7); 3];
@@ -147,17 +172,27 @@ mod tests {
             let mut qc = pc.clone();
             seed_rng(2027);
             for _ in 0..40 {
-                apply_updates_mean_carry(&mut p, &g, &mut pv,
-                    &mut pc, 7, momentum, 1, None);
+                apply_updates_mean_carry(&mut p, &g, &mut pv, &mut pc, 7, momentum, 1, None);
             }
             let next_plain = rng_next();
             seed_rng(2027);
             for _ in 0..40 {
                 let mut observed = OptimizerQuantizationStats::default();
-                apply_updates_mean_carry(&mut q, &g, &mut qv,
-                    &mut qc, 7, momentum, 1, Some(&mut observed));
+                apply_updates_mean_carry(
+                    &mut q,
+                    &g,
+                    &mut qv,
+                    &mut qc,
+                    7,
+                    momentum,
+                    1,
+                    Some(&mut observed),
+                );
                 assert_eq!(observed.parameters_seen, 3);
-                assert_eq!(observed.zero_effective_steps + observed.nonzero_effective_steps, 3);
+                assert_eq!(
+                    observed.zero_effective_steps + observed.nonzero_effective_steps,
+                    3
+                );
             }
             let next_trace = rng_next();
             assert_eq!(p, q);
@@ -172,8 +207,7 @@ mod tests {
         let mut weight = Dyadic::new(i32::MIN, 7);
         let mut carry = 0i128;
         for _ in 0..100 {
-            update_one(&mut weight, Dyadic::new(128, 7),
-                &mut carry, 0, None);
+            update_one(&mut weight, Dyadic::new(128, 7), &mut carry, 0, None);
         }
         assert_eq!(weight.v, i32::MIN);
         assert_eq!(carry, 0);
