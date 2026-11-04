@@ -149,6 +149,34 @@ class DepthPairedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only"):
             depth.parse_numbers("12,24", depth.DEPTHS)
 
+    def test_carry_optimizer_mode_is_frozen_and_fail_closed(self):
+        with mock.patch.object(depth.subprocess, "check_output", return_value="a" * 40):
+            plan = depth.build_plan(self.binary, self.data, [4242], [16],
+                                    1, 20, 10, 2, 7, single_pass=True,
+                                    optimizer_mode="subunit_carry24")
+        self.assertEqual(plan["optimizer_mode"], "subunit_carry24")
+        self.assertIs(depth.verify_plan(plan), plan)
+        trial_integer, trial_fp32 = plan["trials"]
+        for trial in (trial_integer, trial_fp32):
+            report = fixture(trial, plan)
+            report["optimizer_mode"] = ("subunit_carry24"
+                                       if trial["backend"] == "integer"
+                                       else "fp32_reference")
+            depth.validate_record(report, trial, plan)
+            report["optimizer_mode"] = "baseline"
+            with self.assertRaisesRegex(ValueError, "unmatched"):
+                depth.validate_record(report, trial, plan)
+        changed = json.loads(json.dumps(plan))
+        changed["optimizer_mode"] = "baseline"
+        with self.assertRaisesRegex(ValueError, "altered"):
+            depth.verify_plan(changed)
+        changed = json.loads(json.dumps(plan))
+        changed["optimizer_mode"] = "unknown"
+        changed["integrity_sha256"] = depth.digest(depth.canonical({
+            k: v for k, v in changed.items() if k != "integrity_sha256"}))
+        with self.assertRaisesRegex(ValueError, "unsupported optimizer"):
+            depth.verify_plan(changed)
+
     def test_rejects_changed_binary_and_dataset(self):
         plan = self.plan()
         depth.check_environment(plan)
