@@ -67,6 +67,9 @@ pub use regularization::{BatchNorm1D, BatchNorm2D, Dropout, MaxPool2D};
 mod conv;
 pub use conv::Conv2D;
 
+mod subunit_carry;
+use subunit_carry::apply_updates_mean_carry;
+
 use crate::dyadic::{Dyadic, Tensor, TensorView, add, stochastic_round};
 use std::time::Instant;
 
@@ -92,6 +95,7 @@ pub struct OptimizerQuantizationStats {
     pub quantized_to_zero_updates: usize,
     pub nonzero_rounded_deltas: usize,
     pub saturation_blocked_deltas: usize,
+    pub subunit_deferred_steps: usize,
 }
 
 // ─── Module trait ──────────────────────────────────────────────────────────────
@@ -167,6 +171,10 @@ pub trait Module {
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
         None
     }
+
+    /// Optional research-only error-feedback update mode. Ordinary modules
+    /// remain unchanged; trainable integer Conv2D/Linear override it.
+    fn enable_subunit_carry(&mut self) {}
 
     /// Sample one normal optimizer update with direct stochastic-round counters.
     /// Unsupported modules execute their ordinary update and return no stats.
@@ -342,6 +350,15 @@ impl Sequential {
                 g = layer.backward_batch(&g);
             }
             layer_ns[index] += started.elapsed().as_nanos();
+        }
+    }
+
+    /// Opt-in only: allocate integer fixed-point sub-LSB update carry after
+    /// matched integer/FP32 initialization. Does not touch weight values/RNG.
+    pub fn enable_subunit_carry(&mut self) {
+        self.check_integer_backend();
+        for layer in &mut self.layers {
+            layer.enable_subunit_carry();
         }
     }
 

@@ -4,7 +4,7 @@ use crate::dyadic::{
 };
 use crate::nn::{
     LayerNumericSnapshot, Module, OptimizerQuantizationStats, TrainingArithmetic,
-    apply_updates_mean, apply_updates_mean_observed,
+    apply_updates_mean, apply_updates_mean_carry, apply_updates_mean_observed,
 };
 use crate::rng::{rng_range, with_rng_state};
 
@@ -32,6 +32,8 @@ pub struct Linear {
     vel_w: Tensor,
     vel_b: Tensor,
     grad_samples: usize,
+    subunit_carry_weights: Option<Vec<i128>>,
+    subunit_carry_biases: Option<Vec<i128>>,
 
     q_min: i32,
     q_max: i32,
@@ -90,6 +92,8 @@ impl Linear {
             vel_w: Tensor::zeros(vec![n_w]),
             vel_b: Tensor::zeros(vec![out_features]),
             grad_samples: 0,
+            subunit_carry_weights: None,
+            subunit_carry_biases: None,
             q_min,
             q_max,
         }
@@ -281,6 +285,13 @@ impl Linear {
 }
 
 impl Module for Linear {
+    fn enable_subunit_carry(&mut self) {
+        assert!(self.subunit_carry_weights.is_none() && self.subunit_carry_biases.is_none(),
+            "subunit carry may only be enabled once before training");
+        self.subunit_carry_weights = Some(vec![0; self.weights.data.len()]);
+        self.subunit_carry_biases = Some(vec![0; self.biases.data.len()]);
+    }
+
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
         let out = &self.output_batch_cache.data;
         Some(LayerNumericSnapshot {
@@ -449,7 +460,20 @@ impl Module for Linear {
 
     fn update_with_quantization_stats(&mut self, lr: u32) -> Option<OptimizerQuantizationStats> {
         let mut stats = OptimizerQuantizationStats::default();
-        if self.grad_samples != 0 {
+        if self.grad_samples != 0 && self.subunit_carry_weights.is_some() {
+            apply_updates_mean_carry(
+                &mut self.weights.data, &self.grad_w,
+                &mut self.vel_w.data,
+                self.subunit_carry_weights.as_mut().expect("carry initialized"),
+                lr, self.momentum_shift, self.grad_samples, Some(&mut stats),
+            );
+            apply_updates_mean_carry(
+                &mut self.biases.data, &self.grad_b,
+                &mut self.vel_b.data,
+                self.subunit_carry_biases.as_mut().expect("carry initialized"),
+                lr, self.momentum_shift, self.grad_samples, Some(&mut stats),
+            );
+        } else if self.grad_samples != 0 {
             apply_updates_mean_observed(
                 &mut self.weights.data,
                 &self.grad_w,
@@ -474,6 +498,20 @@ impl Module for Linear {
 
     fn update(&mut self, lr: u32) {
         if self.grad_samples == 0 {
+            return;
+        }
+        if let Some(carry) = self.subunit_carry_weights.as_mut() {
+            apply_updates_mean_carry(
+                &mut self.weights.data, &self.grad_w,
+                &mut self.vel_w.data, carry,
+                lr, self.momentum_shift, self.grad_samples, None
+            );
+            apply_updates_mean_carry(
+                &mut self.biases.data, &self.grad_b,
+                &mut self.vel_b.data,
+                self.subunit_carry_biases.as_mut().expect("carry initialized"),
+                lr, self.momentum_shift, self.grad_samples, None
+            );
             return;
         }
         apply_updates_mean(
