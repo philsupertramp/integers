@@ -434,6 +434,9 @@ impl CnnFp32 {
         // d/dy [0.5 sum_j (y_j - t_j)^2] = y - t.
         let mut grad: Vec<f32> = y.iter().zip(target).map(|(&v, &t)| v - t).collect();
         for (index, (op, x)) in self.ops.iter_mut().zip(&self.inputs).enumerate().rev() {
+            if self.observe_backward {
+                self.backward_counts[index].0.observe(&grad);
+            }
             let next = match op {
                 Op::Conv(layer) => layer.backward(x, &grad),
                 Op::Relu => {
@@ -448,7 +451,6 @@ impl CnnFp32 {
                 Op::Linear(layer) => layer.backward(x, &grad),
             };
             if self.observe_backward {
-                self.backward_counts[index].0.observe(&grad);
                 self.backward_counts[index].1.observe(&next);
             }
             grad = next;
