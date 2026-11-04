@@ -8,7 +8,8 @@ from pathlib import Path
 BINARY = Path("target/release/examples/held_out").resolve()
 DATA = Path("data/mnist").resolve()
 for depth in (16, 20):
-    for backend in ("integer", "fp32"):
+    for backend, carry in (("integer", False), ("fp32", False),
+                           ("integer", True)):
         with tempfile.TemporaryDirectory(prefix="layer-trace-contract-") as tmp:
             outcomes = {}
             for traced in (False, True):
@@ -22,6 +23,8 @@ for depth in (16, 20):
                 ]
                 if traced:
                     args.append("--trace-layers")
+                if carry:
+                    args.append("--subunit-carry")
                 subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
                 outcomes[traced] = json.loads(path.read_text())
             plain, traced = outcomes[False], outcomes[True]
@@ -40,12 +43,15 @@ for depth in (16, 20):
                     assert layer["forward_count"] > 0
                     if backend == "integer":
                         assert 0 <= layer["forward_saturated_count"] <= layer["forward_count"]
-                        assert layer["quantized_to_zero_updates"] >= 0
                         assert layer["effective_zero_step_count"] + layer["effective_nonzero_step_count"] == layer["parameter_count"]
-                        assert layer["quantized_to_zero_updates"] <= layer["effective_nonzero_step_count"]
-                        assert layer["nonzero_rounded_delta_count"] + layer["quantized_to_zero_updates"] == layer["effective_nonzero_step_count"]
                         assert layer["saturation_blocked_delta_count"] <= layer["nonzero_rounded_delta_count"]
                         assert layer["changed_parameters"] == layer["nonzero_rounded_delta_count"] - layer["saturation_blocked_delta_count"]
+                        if carry:
+                            assert layer["quantized_to_zero_updates"] is None
+                            assert 0 <= layer["subunit_deferred_steps"] <= layer["effective_nonzero_step_count"]
+                        else:
+                            assert layer["quantized_to_zero_updates"] >= 0
+                            assert layer["nonzero_rounded_delta_count"] + layer["quantized_to_zero_updates"] == layer["effective_nonzero_step_count"]
                     else:
                         assert layer["forward_saturated_count"] is None
                         assert layer["quantized_to_zero_updates"] is None
@@ -55,5 +61,5 @@ for depth in (16, 20):
                             "nonfinite_outputs", "extreme_outputs",
                             "nonfinite_fp32_parameters"):
                     assert a[key] == b[key], (depth, backend, key, a[key], b[key])
-            print(f"OK unchanged learning and valid trace depth={depth} backend={backend}",
+            print(f"OK unchanged learning and valid trace depth={depth} backend={backend} carry={carry}",
                   flush=True)
