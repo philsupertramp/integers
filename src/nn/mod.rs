@@ -94,6 +94,39 @@ pub struct OptimizerQuantizationStats {
     pub saturation_blocked_deltas: usize,
 }
 
+/// Raw integer gradient tensor summary; no float conversion or RNG.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DyadicGradientSummary {
+    pub count: usize,
+    pub zeros: usize,
+    pub max_abs_mantissa: u64,
+    pub min_nonzero_scale: Option<u32>,
+    pub max_nonzero_scale: Option<u32>,
+}
+impl DyadicGradientSummary {
+    fn from_tensor(t: &Tensor) -> Self {
+        let mut r = Self { count: t.data.len(), ..Self::default() };
+        for v in &t.data {
+            if v.v == 0 {
+                r.zeros += 1;
+            } else {
+                r.max_abs_mantissa = r.max_abs_mantissa.max((v.v as i64).unsigned_abs());
+                r.min_nonzero_scale = Some(r.min_nonzero_scale.map_or(v.s, |s| s.min(v.s)));
+                r.max_nonzero_scale = Some(r.max_nonzero_scale.map_or(v.s, |s| s.max(v.s)));
+            }
+        }
+        r
+    }
+}
+#[derive(Clone, Debug)]
+pub struct BackwardBoundary {
+    pub index: usize,
+    pub kind: &'static str,
+    pub received: DyadicGradientSummary,
+    /// None only at model-input gradient which is intentionally discarded.
+    pub propagated: Option<DyadicGradientSummary>,
+}
+
 // ─── Module trait ──────────────────────────────────────────────────────────────
 
 /// Declares whether a layer may execute in the ADR-002 integer training backend.
@@ -165,6 +198,12 @@ pub trait Module {
     /// Diagnostic snapshots are disabled unless an experiment explicitly calls
     /// this. New modules are never implicitly included in the report.
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
+        None
+    }
+
+    /// Read-only cached pre-ReLU forward signs, used only on the frozen
+    /// first minibatch. Others return None (including activation layers).
+    fn numeric_forward_signs(&self) -> Option<Vec<bool>> {
         None
     }
 
@@ -343,6 +382,38 @@ impl Sequential {
             }
             layer_ns[index] += started.elapsed().as_nanos();
         }
+    }
+
+    /// One real backwards traversal with per-boundary zero-gradient counts.
+    /// The first layer uses the original input-gradient-discard operation;
+    /// this changes neither the arithmetic sequence nor RNG draws.
+    pub fn backward_batch_discard_input_grad_observed(
+        &mut self, grads: &Tensor,
+    ) -> Vec<BackwardBoundary> {
+        self.check_integer_backend();
+        let mut g = grads.clone();
+        let mut boundaries = Vec::with_capacity(self.layers.len());
+        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            let received = DyadicGradientSummary::from_tensor(&g);
+            let propagated = if index == 0 {
+                layer.backward_batch_discard_input_grad(&g);
+                None
+            } else {
+                g = layer.backward_batch(&g);
+                Some(DyadicGradientSummary::from_tensor(&g))
+            };
+            boundaries.push(BackwardBoundary {
+                index, kind: layer.name(), received, propagated,
+            });
+        }
+        boundaries.reverse();
+        boundaries
+    }
+
+    pub fn numeric_forward_signs(&self) -> Vec<(usize, &'static str, Vec<bool>)> {
+        self.layers.iter().enumerate().filter_map(|(i, layer)| {
+            layer.numeric_forward_signs().map(|mask| (i, layer.name(), mask))
+        }).collect()
     }
 
     pub fn numeric_snapshots(&self) -> Vec<(usize, &'static str, LayerNumericSnapshot)> {
@@ -845,5 +916,48 @@ mod observed_optimizer_tests {
             assert_eq!(stats.saturation_blocked_deltas, 1);
             assert_eq!(stats.quantized_to_zero_updates, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod backward_boundary_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    #[test]
+    fn tracing_produces_identical_parameter_gradients_and_next_rng_state() {
+        let run = |traced: bool| {
+            seed_rng(4242);
+            let mut model = Sequential::new();
+            model.add(Linear::new(2, 2, 7, 7, 31));
+            model.add(ReLU::new());
+            model.add(Linear::new(2, 1, 7, 7, 31));
+            model.set_training(true);
+            let x = Tensor::from_vec(vec![
+                Dyadic::new(32, 7), Dyadic::new(-64, 7),
+            ], vec![1, 2]);
+            let y = model.forward_batch(&x);
+            model.zero_grad();
+            let dy = Tensor::from_vec(vec![Dyadic::new(127, 7)], vec![1, 1]);
+            let boundaries = if traced {
+                model.backward_batch_discard_input_grad_observed(&dy)
+            } else {
+                model.backward_batch_discard_input_grad(&dy);
+                Vec::new()
+            };
+            if traced {
+                assert_eq!(boundaries.len(), 3);
+                assert!(boundaries[0].propagated.is_none());
+                assert_eq!(boundaries[1].kind, "ReLU");
+                assert_eq!(boundaries[2].received.count, 1);
+                assert_eq!(boundaries[2].propagated.as_ref().unwrap().count, 2);
+            }
+            (model.numeric_snapshots(), y, rng_next())
+        };
+        let (without, yw, rw) = run(false);
+        let (with, yt, rt) = run(true);
+        assert_eq!(without, with);
+        assert_eq!(yw.data, yt.data);
+        assert_eq!(rw, rt);
     }
 }

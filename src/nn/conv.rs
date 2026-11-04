@@ -239,6 +239,10 @@ impl Conv2D {
 }
 
 impl Module for Conv2D {
+    fn numeric_forward_signs(&self) -> Option<Vec<bool>> {
+        Some(self.output_batch_cache.data.iter().map(|v| v.v > 0).collect())
+    }
+
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
         let out = &self.output_batch_cache.data;
         Some(LayerNumericSnapshot {

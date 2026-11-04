@@ -270,21 +270,98 @@ pub struct Fp32NumericSnapshot {
     pub forward_nonpositive_count: usize,
 }
 
+/// This scalar FP32 observation is counted during actual backpropagation;
+/// no second backward/forward evaluation is performed.
+#[derive(Clone, Debug, Default)]
+pub struct Fp32GradientSummary {
+    pub count: usize,
+    pub zeros: usize,
+    pub nonfinite: usize,
+    pub max_abs: f32,
+    pub small_nonzero_under_one_lsb: usize,
+}
+impl Fp32GradientSummary {
+    fn observe(&mut self, values: &[f32]) {
+        self.count += values.len();
+        for &v in values {
+            if v == 0.0 {
+                self.zeros += 1;
+            } else if !v.is_finite() {
+                self.nonfinite += 1;
+            } else {
+                self.max_abs = self.max_abs.max(v.abs());
+                if v.abs() < 2f32.powi(-(SHIFT as i32)) {
+                    self.small_nonzero_under_one_lsb += 1;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Fp32BackwardBoundary {
+    pub index: usize,
+    pub kind: &'static str,
+    pub received: Fp32GradientSummary,
+    pub propagated: Fp32GradientSummary,
+}
+
 pub struct CnnFp32 {
     ops: Vec<Op>,
     inputs: Vec<Vec<f32>>,
     observe_forward: bool,
     forward_counts: Vec<(usize, usize, usize)>,
+    observe_backward: bool,
+    backward_counts: Vec<(Fp32GradientSummary, Fp32GradientSummary)>,
 }
 impl CnnFp32 {
     /// Reset and start observation on precisely the sampled minibatch.
     pub fn begin_forward_observation(&mut self) {
         self.observe_forward = true;
         self.forward_counts = vec![(0, 0, 0); self.ops.len()];
+        self.observe_backward = true;
+        self.backward_counts = vec![
+            (Fp32GradientSummary::default(), Fp32GradientSummary::default());
+            self.ops.len()
+        ];
     }
 
     pub fn end_forward_observation(&mut self) {
         self.observe_forward = false;
+        self.observe_backward = false;
+    }
+
+    /// Read the forward pre-ReLU gate at each Conv/Linear from inputs cached
+    /// before its immediately following ReLU. The final dense has no gate.
+    pub fn relu_input_signs_last_sample(&self) -> Vec<(usize, Vec<bool>)> {
+        self.ops.iter().enumerate().filter_map(|(i, op)| {
+            if matches!(op, Op::Conv(_) | Op::Linear(_))
+                && i + 1 < self.ops.len()
+                && matches!(self.ops[i + 1], Op::Relu)
+            {
+                Some((i, self.inputs[i + 1].iter().map(|&x| x > 0.0).collect()))
+            } else {
+                None
+            }
+        }).collect()
+    }
+
+    pub fn backward_snapshots(&self) -> Vec<Fp32BackwardBoundary> {
+        self.ops.iter().enumerate().map(|(index, op)| {
+            let kind = match op {
+                Op::Conv(_) => "Conv2D",
+                Op::Linear(_) => "Linear",
+                Op::Relu => "ReLU",
+                Op::Pool(_) => "MaxPool2D",
+                Op::Flatten => "Flatten",
+            };
+            Fp32BackwardBoundary {
+                index,
+                kind,
+                received: self.backward_counts[index].0.clone(),
+                propagated: self.backward_counts[index].1.clone(),
+            }
+        }).collect()
     }
 
     pub fn numeric_snapshots(&self) -> Vec<Fp32NumericSnapshot> {
@@ -345,8 +422,8 @@ impl CnnFp32 {
         }
         // d/dy [0.5 sum_j (y_j - t_j)^2] = y - t.
         let mut grad: Vec<f32> = y.iter().zip(target).map(|(&v, &t)| v - t).collect();
-        for (op, x) in self.ops.iter_mut().zip(&self.inputs).rev() {
-            grad = match op {
+        for (index, (op, x)) in self.ops.iter_mut().zip(&self.inputs).enumerate().rev() {
+            let next = match op {
                 Op::Conv(layer) => layer.backward(x, &grad),
                 Op::Relu => {
                     assert_eq!(x.len(), grad.len());
@@ -359,6 +436,11 @@ impl CnnFp32 {
                 Op::Flatten => grad,
                 Op::Linear(layer) => layer.backward(x, &grad),
             };
+            if self.observe_backward {
+                self.backward_counts[index].0.observe(&grad);
+                self.backward_counts[index].1.observe(&next);
+            }
+            grad = next;
         }
         assert_eq!(grad.len(), 784);
         prediction
@@ -441,6 +523,8 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
             inputs: Vec::new(),
             observe_forward: false,
             forward_counts: Vec::new(),
+            observe_backward: false,
+            backward_counts: Vec::new(),
         },
     )
 }
@@ -542,6 +626,8 @@ pub fn build_depth_models(seed: u64, conv_layers: usize) -> (Sequential, CnnFp32
             inputs: Vec::new(),
             observe_forward: false,
             forward_counts: Vec::new(),
+            observe_backward: false,
+            backward_counts: Vec::new(),
         },
     )
 }
