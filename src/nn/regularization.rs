@@ -932,7 +932,7 @@ impl Module for MaxPool2D {
 
     fn numeric_pool_winners(&self) -> Option<PoolWinnerSnapshot> {
         let inputs = self.observed_batch_input.as_ref()?;
-        assert_eq!(inputs.len(), self.batch_max_masks.len());
+        assert_eq!(inputs.shape[0], self.batch_max_masks.len());
         let mut tie_flags = Vec::with_capacity(self.batch_max_masks.len());
         for (sample, winners) in inputs.iter().zip(&self.batch_max_masks) {
             let mut ties = Vec::with_capacity(winners.len());
