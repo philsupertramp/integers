@@ -294,7 +294,6 @@ impl Module for Linear {
         self.subunit_carry_biases = Some(vec![0; self.biases.data.len()]);
     }
 
-
     fn numeric_forward_signs(&self) -> Option<Vec<bool>> {
         Some(
             self.output_batch_cache
