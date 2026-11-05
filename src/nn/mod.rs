@@ -496,7 +496,10 @@ impl Sequential {
     /// Fixed-scale (not per-layer increasing) backward propagation experiment.
     pub fn set_conv_backward_propagation_guard_bits(&mut self, guard_bits: u32) {
         self.check_integer_backend();
-        assert!(guard_bits == 0 || guard_bits == 3, "only baseline/guard3 supported");
+        assert!(
+            guard_bits == 0 || guard_bits == 3,
+            "only baseline/guard3 supported"
+        );
         for layer in &mut self.layers {
             layer.set_backward_propagation_guard_bits(guard_bits);
         }
