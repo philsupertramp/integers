@@ -130,6 +130,51 @@ pub struct BackwardBoundary {
     pub propagated: Option<DyadicGradientSummary>,
 }
 
+/// One sampled MaxPool2D forward pass, with the actual chosen source
+/// indices. tie_flags means another input in the SAME 2x2 window equals the
+/// chosen maximum; it is not evidence of incorrect routing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolWinnerSnapshot {
+    pub winners: Vec<Vec<usize>>,
+    pub tie_flags: Vec<Vec<bool>>,
+}
+
+/// Counts rounding at the ORIGINAL dyadic multiply site, after exactly one
+/// original stochastic draw. The exact product is the pre-shift i64 mantissa.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MulRoundingCounts {
+    pub products: u64,
+    pub nonzero_exact_products: u64,
+    pub nonzero_below_one_lsb: u64,
+    pub nonzero_rounded_to_zero: u64,
+    pub nonzero_quantized_products: u64,
+    /// A nonzero dyadic multiply result left its destination accumulator
+    /// unchanged. This does not alone identify rounding versus saturation.
+    pub nonzero_term_unchanged_accumulator: u64,
+}
+impl MulRoundingCounts {
+    pub fn record(&mut self, a: Dyadic, b: Dyadic, q: u32, out: Dyadic) {
+        self.products += 1;
+        let exact = (a.v as i64) * (b.v as i64);
+        if exact != 0 {
+            self.nonzero_exact_products += 1;
+            if q >= 64 || exact.unsigned_abs() < (1u64 << q) {
+                self.nonzero_below_one_lsb += 1;
+            }
+            if out.v == 0 {
+                self.nonzero_rounded_to_zero += 1;
+            } else {
+                self.nonzero_quantized_products += 1;
+            }
+        }
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConvBackwardRounding {
+    pub parameter_product: MulRoundingCounts,
+    pub propagated_product: MulRoundingCounts,
+}
+
 // ─── Module trait ──────────────────────────────────────────────────────────────
 
 /// Declares whether a layer may execute in the ADR-002 integer training backend.
@@ -209,6 +254,14 @@ pub trait Module {
     fn numeric_forward_signs(&self) -> Option<Vec<bool>> {
         None
     }
+
+    /// Bounded first-minibatch pooling trace, disabled by default.
+    fn set_pool_winner_observation(&mut self, _enable: bool) {}
+    fn numeric_pool_winners(&self) -> Option<PoolWinnerSnapshot> { None }
+
+    /// Bounded first-minibatch convolution backward multiplication trace.
+    fn set_backward_rounding_observation(&mut self, _enable: bool) {}
+    fn numeric_backward_rounding(&self) -> Option<ConvBackwardRounding> { None }
 
     /// Sample one normal optimizer update with direct stochastic-round counters.
     /// Unsupported modules execute their ordinary update and return no stats.
@@ -415,6 +468,30 @@ impl Sequential {
         }
         boundaries.reverse();
         boundaries
+    }
+
+    pub fn set_pool_winner_observation(&mut self, enable: bool) {
+        for layer in &mut self.layers {
+            layer.set_pool_winner_observation(enable);
+        }
+    }
+
+    pub fn numeric_pool_winners(&self) -> Vec<(usize, PoolWinnerSnapshot)> {
+        self.layers.iter().enumerate().filter_map(|(i, layer)| {
+            layer.numeric_pool_winners().map(|x| (i, x))
+        }).collect()
+    }
+
+    pub fn set_backward_rounding_observation(&mut self, enable: bool) {
+        for layer in &mut self.layers {
+            layer.set_backward_rounding_observation(enable);
+        }
+    }
+
+    pub fn numeric_backward_rounding(&self) -> Vec<(usize, ConvBackwardRounding)> {
+        self.layers.iter().enumerate().filter_map(|(i, layer)| {
+            layer.numeric_backward_rounding().map(|x| (i, x))
+        }).collect()
     }
 
     pub fn numeric_forward_signs(&self) -> Vec<(usize, &'static str, Vec<bool>)> {

@@ -1,5 +1,5 @@
 use crate::dyadic::{Dyadic, Tensor, TensorView, add, mul};
-use crate::nn::{Module, TrainingArithmetic, apply_updates};
+use crate::nn::{Module, PoolWinnerSnapshot, TrainingArithmetic, apply_updates};
 
 // ─── Dropout ──────────────────────────────────────────────────────────────────
 
@@ -821,6 +821,8 @@ pub struct MaxPool2D {
     out_w: usize,
     max_mask: Vec<usize>,
     batch_max_masks: Vec<Vec<usize>>,
+    observed_batch_input: Option<Tensor>,
+    observe_pool_winners: bool,
 }
 
 impl MaxPool2D {
@@ -845,6 +847,8 @@ impl MaxPool2D {
             out_w,
             max_mask: Vec::new(),
             batch_max_masks: Vec::new(),
+            observed_batch_input: None,
+            observe_pool_winners: false,
         }
     }
 
@@ -919,6 +923,42 @@ impl MaxPool2D {
 }
 
 impl Module for MaxPool2D {
+    fn set_pool_winner_observation(&mut self, enable: bool) {
+        self.observe_pool_winners = enable;
+        if !enable { self.observed_batch_input = None; }
+    }
+
+    fn numeric_pool_winners(&self) -> Option<PoolWinnerSnapshot> {
+        let inputs = self.observed_batch_input.as_ref()?;
+        assert_eq!(inputs.len(), self.batch_max_masks.len());
+        let mut tie_flags = Vec::with_capacity(self.batch_max_masks.len());
+        for (sample, winners) in inputs.iter().zip(&self.batch_max_masks) {
+            let mut ties = Vec::with_capacity(winners.len());
+            for (output, &winner) in winners.iter().enumerate() {
+                let c = output / (self.out_h * self.out_w);
+                let pos = output % (self.out_h * self.out_w);
+                let oh = pos / self.out_w;
+                let ow = pos % self.out_w;
+                let mut equals = 0usize;
+                for kh in 0..self.kernel {
+                    for kw in 0..self.kernel {
+                        let idx = self.in_idx(c, oh * self.stride + kh,
+                            ow * self.stride + kw);
+                        if !dyadic_greater(sample.data[idx], sample.data[winner])
+                            && !dyadic_greater(sample.data[winner], sample.data[idx]) {
+                            equals += 1;
+                        }
+                    }
+                }
+                ties.push(equals > 1);
+            }
+            tie_flags.push(ties);
+        }
+        Some(PoolWinnerSnapshot {
+            winners: self.batch_max_masks.clone(), tie_flags
+        })
+    }
+
     fn training_arithmetic(&self) -> TrainingArithmetic {
         TrainingArithmetic::IntegerOnly
     }
@@ -967,6 +1007,9 @@ impl Module for MaxPool2D {
             })
             .collect();
         self.batch_max_masks = all_masks;
+        self.observed_batch_input = if self.observe_pool_winners {
+            Some(inputs.clone())
+        } else { None };
         outputs
     }
 

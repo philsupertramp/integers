@@ -353,6 +353,32 @@ impl CnnFp32 {
             .collect()
     }
 
+    /// Original independent FP32 pooling winners for the last accumulated
+    /// sample, with tie flags computed from its actual cached pooling inputs.
+    pub fn pool_winners_last_sample(&self) -> Vec<(usize, Vec<usize>, Vec<bool>)> {
+        self.ops.iter().enumerate().filter_map(|(index, op)| {
+            let Op::Pool(pool) = op else { return None };
+            let input = &self.inputs[index];
+            let (out_h, out_w) = pool.output_dims();
+            let flags = pool.winners.iter().enumerate().map(|(out, &winner)| {
+                let c = out / (out_h * out_w);
+                let pos = out % (out_h * out_w);
+                let oh = pos / out_w;
+                let ow = pos % out_w;
+                let mut equal = 0usize;
+                for kh in 0..pool.kernel {
+                    for kw in 0..pool.kernel {
+                        let at = (c * pool.h + oh * pool.stride + kh) * pool.w
+                            + ow * pool.stride + kw;
+                        if input[at] == input[winner] { equal += 1; }
+                    }
+                }
+                equal > 1
+            }).collect();
+            Some((index, pool.winners.clone(), flags))
+        }).collect()
+    }
+
     pub fn backward_snapshots(&self) -> Vec<Fp32BackwardBoundary> {
         self.ops
             .iter()
