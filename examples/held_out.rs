@@ -1702,9 +1702,13 @@ fn main() {
     } else {
         "null".to_owned()
     };
-    let precision_arm = if cfg.backward_guard3 { "guard3" }
-        else if cfg.backend == Backend::Fp32 { "fp32" }
-        else { "baseline" };
+    let precision_arm = if cfg.backward_guard3 {
+        "guard3"
+    } else if cfg.backend == Backend::Fp32 {
+        "fp32"
+    } else {
+        "baseline"
+    };
     let payload = format!(
         "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"backward_precision\": \"{precision_arm}\", \"layer_diagnostics\": {}, \"first_backward_probe\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
