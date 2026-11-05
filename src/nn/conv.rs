@@ -2,8 +2,8 @@ use crate::dyadic::{
     Dyadic, Tensor, TensorView, add, mul, requantize, signed_bounds, ste_requantize,
 };
 use crate::nn::{
-    ConvBackwardRounding, LayerNumericSnapshot, Module, OptimizerQuantizationStats, TrainingArithmetic,
-    apply_updates_mean, apply_updates_mean_observed,
+    ConvBackwardRounding, LayerNumericSnapshot, Module, OptimizerQuantizationStats,
+    TrainingArithmetic, apply_updates_mean, apply_updates_mean_observed,
 };
 use crate::rng::rng_range;
 
@@ -223,23 +223,35 @@ impl Conv2D {
                                 let prev_param = self.grad_k.data[ki];
                                 let next_param = add(prev_param, param_product);
                                 if let Some(stats) = &mut self.sampled_backward_rounding {
-                                    stats.parameter_product.record(gj, input.data[ii],
-                                        self.quant_shift, param_product);
+                                    stats.parameter_product.record(
+                                        gj,
+                                        input.data[ii],
+                                        self.quant_shift,
+                                        param_product,
+                                    );
                                     if param_product.v != 0 && next_param == prev_param {
-                                        stats.parameter_product.nonzero_term_unchanged_accumulator += 1;
+                                        stats
+                                            .parameter_product
+                                            .nonzero_term_unchanged_accumulator += 1;
                                     }
                                 }
                                 self.grad_k.data[ki] = next_param;
 
-                                let propagated_product = mul(gj, self.kernels.data[ki],
-                                    self.quant_shift);
+                                let propagated_product =
+                                    mul(gj, self.kernels.data[ki], self.quant_shift);
                                 let prev_input = gi[ii];
                                 let next_input = add(prev_input, propagated_product);
                                 if let Some(stats) = &mut self.sampled_backward_rounding {
-                                    stats.propagated_product.record(gj, self.kernels.data[ki],
-                                        self.quant_shift, propagated_product);
+                                    stats.propagated_product.record(
+                                        gj,
+                                        self.kernels.data[ki],
+                                        self.quant_shift,
+                                        propagated_product,
+                                    );
                                     if propagated_product.v != 0 && next_input == prev_input {
-                                        stats.propagated_product.nonzero_term_unchanged_accumulator += 1;
+                                        stats
+                                            .propagated_product
+                                            .nonzero_term_unchanged_accumulator += 1;
                                     }
                                 }
                                 gi[ii] = next_input;
@@ -262,7 +274,9 @@ impl Module for Conv2D {
     fn set_backward_rounding_observation(&mut self, enable: bool) {
         self.sampled_backward_rounding = if enable {
             Some(ConvBackwardRounding::default())
-        } else { None };
+        } else {
+            None
+        };
     }
 
     fn numeric_backward_rounding(&self) -> Option<ConvBackwardRounding> {
