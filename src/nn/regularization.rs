@@ -1043,3 +1043,36 @@ impl Module for MaxPool2D {
     fn update(&mut self, _: u32) {}
     fn zero_grad(&mut self) {}
 }
+
+
+#[cfg(test)]
+mod pool_winner_trace_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    #[test]
+    fn reports_real_winners_and_true_tied_maxima_without_changing_rng() {
+        let input = Tensor::from_vec(
+            vec![0, 0, -1, 2, 0, 0, 3, 1].into_iter()
+                .map(|v| Dyadic::new(v, 7)).collect(),
+            vec![1, 1, 2, 4],
+        );
+        let run = |observe: bool| {
+            seed_rng(1337);
+            let mut pool = MaxPool2D::new(1, 2, 4, 2, 2);
+            pool.set_pool_winner_observation(observe);
+            let outputs = pool.forward_batch(&input);
+            let snap = pool.numeric_pool_winners();
+            let next_rng = rng_next();
+            (outputs, snap, next_rng)
+        };
+        let (plain, hidden, rng_plain) = run(false);
+        let (observed, snapshot, rng_trace) = run(true);
+        assert_eq!(plain.data, observed.data);
+        assert_eq!(rng_plain, rng_trace);
+        assert!(hidden.is_none());
+        let snapshot = snapshot.unwrap();
+        assert_eq!(snapshot.winners, vec![vec![0, 6]]);
+        assert_eq!(snapshot.tie_flags, vec![vec![true, false]]);
+    }
+}

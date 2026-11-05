@@ -1,0 +1,106 @@
+name: MNIST MaxPool routing and backward rounding (x86_64)
+
+on:
+  pull_request:
+    branches: [research/first-backward-gate-probe]
+    paths:
+      - 'src/nn/**'
+      - 'experiments/cnn_reference.rs'
+      - 'examples/held_out.rs'
+      - 'tests/check_first_backward_probe.py'
+      - '.github/workflows/pool-backward-rounding-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  trace-invariants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Formatting, unit, and immutable protocol tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked --all-targets
+          python3 -m unittest discover -s tests -p 'test_depth_paired_abba.py' -v
+      - name: Canonical MNIST development-training data only
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Build matched integer and independent FP32 probe
+        run: cargo build --release --locked --example held_out
+      - name: Trace-on versus trace-off must preserve learning outcomes
+        run: python3 tests/check_first_backward_probe.py
+
+  first-minibatch:
+    needs: trace-invariants
+    name: ${{ matrix.depth }}-conv first-minibatch / seed 4242
+    runs-on: ubuntu-24.04
+    timeout-minutes: 32
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        depth: [16, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Load only canonical MNIST development data
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Compile frozen binary
+        run: cargo build --release --locked --example held_out
+      - name: Observe MaxPool winners and true Conv2D round-to-zero events
+        env:
+          DEPTH: ${{ matrix.depth }}
+        run: |
+          mkdir -p reports
+          target/release/examples/held_out \
+            --dataset mnist --backend integer \
+            --architecture "cnn${DEPTH}" --validation-only \
+            --data-dir data/mnist --report "reports/pool-rounding-d${DEPTH}-s4242.json" \
+            --seed 4242 --epochs 1 --batch-size 32 \
+            --train-limit 8192 --validation-limit 1042 --lr-shift 7 \
+            --trace-layers --probe-first-backward
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+          sha256sum "reports/pool-rounding-d${DEPTH}-s4242.json"
+      - name: Verify matched per-operation count invariants
+        env:
+          DEPTH: ${{ matrix.depth }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          d = int(os.environ["DEPTH"])
+          r = json.loads(Path(f"reports/pool-rounding-d{d}-s4242.json").read_text())
+          p = r["first_backward_probe"]
+          assert p["schema"] == 2 and p["samples"] == 32
+          assert not r["test_evaluated"] and r["test_size"] == 0
+          assert len(p["pool_winner_agreements"]) == 2
+          assert len(p["conv_backward_product_rounding"]) == d
+          for x in p["pool_winner_agreements"]:
+              assert x["windows"] == x["same_winner"] + x["different_winner"]
+              assert x["different_winner"] == (
+                  x["mismatches_with_tie"] + x["mismatches_without_tie"]
+              )
+          for layer in p["conv_backward_product_rounding"]:
+              for side in ("parameter_product", "propagated_product"):
+                  v = layer[side]
+                  assert v["nonzero_exact_products"] == (
+                      v["nonzero_rounded_to_zero"] + v["nonzero_quantized_products"]
+                  )
+          print(f"Validated MaxPool winner and actual rounding events: {d} convolutions")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mnist-pool-rounding-d${{ matrix.depth }}-s4242
+          path: reports/
+          retention-days: 30
+          if-no-files-found: warn

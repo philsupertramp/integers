@@ -1049,3 +1049,23 @@ mod backward_boundary_tests {
         assert_eq!(rw, rt);
     }
 }
+
+
+#[cfg(test)]
+mod exact_backward_mul_trace_tests {
+    use super::{Dyadic, MulRoundingCounts};
+
+    #[test]
+    fn distinguishes_actual_rounded_zero_from_exact_zero_product() {
+        let mut trace = MulRoundingCounts::default();
+        trace.record(Dyadic::new(0, 7), Dyadic::new(127, 7), 7, Dyadic::new(0, 7));
+        trace.record(Dyadic::new(1, 7), Dyadic::new(1, 7), 7, Dyadic::new(0, 7));
+        trace.record(Dyadic::new(-1, 7), Dyadic::new(1, 7), 7, Dyadic::new(-1, 7));
+        trace.record(Dyadic::new(128, 7), Dyadic::new(128, 7), 7, Dyadic::new(128, 7));
+        assert_eq!(trace.products, 4);
+        assert_eq!(trace.nonzero_exact_products, 3);
+        assert_eq!(trace.nonzero_below_one_lsb, 2);
+        assert_eq!(trace.nonzero_rounded_to_zero, 1);
+        assert_eq!(trace.nonzero_quantized_products, 2);
+    }
+}

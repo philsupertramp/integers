@@ -29,12 +29,40 @@ for depth in (16, 20):
         plain, observed = reports[False], reports[True]
         assert plain["first_backward_probe"] is None
         probe = observed["first_backward_probe"]
-        assert probe["schema"] == 1
+        assert probe["schema"] == 2
         assert probe["scope"] == "first_training_minibatch_before_any_optimizer_update"
         assert probe["samples"] == 16
         assert probe["same_indices"] and probe["same_decoded_initial_weights"]
         assert len(probe["parameter_gradient_zeros"]) == depth + 2
         assert len(probe["gate_agreements"]) == depth + 1
+        pools = probe["pool_winner_agreements"]
+        assert len(pools) == 2
+        for pool in pools:
+            assert pool["windows"] == pool["same_winner"] + pool["different_winner"]
+            assert pool["different_winner"] == (
+                pool["mismatches_with_tie"] + pool["mismatches_without_tie"]
+            )
+            assert 0 <= pool["integer_tie_windows"] <= pool["windows"]
+            assert 0 <= pool["fp32_tie_windows"] <= pool["windows"]
+            assert pool["windows"] > 0
+            assert len(pool["first_different_positions"]) <= 8
+            for sample, output in pool["first_different_positions"]:
+                assert 0 <= sample < 16
+                assert output >= 0
+        conv_roundings = probe["conv_backward_product_rounding"]
+        assert len(conv_roundings) == depth
+        for conv in conv_roundings:
+            for side in ("parameter_product", "propagated_product"):
+                counts = conv[side]
+                assert 0 <= counts["nonzero_exact_products"] <= counts["products"]
+                assert counts["nonzero_exact_products"] == (
+                    counts["nonzero_rounded_to_zero"]
+                    + counts["nonzero_quantized_products"]
+                )
+                assert counts["nonzero_below_one_lsb"] <= counts["nonzero_exact_products"]
+                assert counts["nonzero_term_unchanged_accumulator"] <= (
+                    counts["nonzero_quantized_products"]
+                )
         boundaries = probe["layer_gradient_boundaries"]
         assert len(boundaries) == 2 * depth + 6  # conv/relu + pools + flatten + dense/relu/head
         assert boundaries[0]["integer_propagated"] is None
