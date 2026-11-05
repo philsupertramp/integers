@@ -302,7 +302,6 @@ impl Module for Conv2D {
         self.subunit_carry_biases = Some(vec![0; self.biases.data.len()]);
     }
 
-
     fn set_backward_propagation_guard_bits(&mut self, bits: u32) {
         assert!(
             bits == 0 || bits == 3,
