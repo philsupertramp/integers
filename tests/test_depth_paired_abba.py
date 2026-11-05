@@ -149,6 +149,35 @@ class DepthPairedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only"):
             depth.parse_numbers("12,24", depth.DEPTHS)
 
+    def test_guard3_precision_arm_is_checksums_locked_and_backend_specific(self):
+        with mock.patch.object(depth.subprocess, "check_output",
+                               return_value="a" * 40):
+            plan = depth.build_plan(self.binary, self.data, [4242], [16],
+                                    1, 20, 10, 2, 7, single_pass=True,
+                                    backward_precision="guard3")
+        self.assertEqual(plan["backward_precision"], "guard3")
+        self.assertIs(depth.verify_plan(plan), plan)
+        for trial in plan["trials"]:
+            record = fixture(trial, plan)
+            record["backward_precision"] = (
+                "guard3" if trial["backend"] == "integer" else "fp32"
+            )
+            depth.validate_record(record, trial, plan)
+            record["backward_precision"] = "baseline"
+            with self.assertRaisesRegex(ValueError, "unmatched"):
+                depth.validate_record(record, trial, plan)
+        tampered = json.loads(json.dumps(plan))
+        tampered["backward_precision"] = "baseline"
+        with self.assertRaisesRegex(ValueError, "altered"):
+            depth.verify_plan(tampered)
+        tampered = json.loads(json.dumps(plan))
+        tampered["backward_precision"] = "anything"
+        tampered["integrity_sha256"] = depth.digest(depth.canonical({
+            k: v for k, v in tampered.items() if k != "integrity_sha256"
+        }))
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            depth.verify_plan(tampered)
+
     def test_rejects_changed_binary_and_dataset(self):
         plan = self.plan()
         depth.check_environment(plan)

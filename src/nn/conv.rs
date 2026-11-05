@@ -503,3 +503,56 @@ impl Module for Conv2D {
         self.grad_b.data.iter_mut().for_each(|g| g.v = 0);
     }
 }
+
+
+#[cfg(test)]
+mod backward_guard3_tests {
+    use super::*;
+    use crate::rng::{rng_next, seed_rng};
+
+    #[test]
+    fn propagation_guard_retains_fixed_scale_without_changing_forward_or_rng() {
+        let sample = Tensor::from_vec(vec![Dyadic::new(64, 7)], vec![1, 1, 1, 1]);
+        let grad = Tensor::from_vec(vec![Dyadic::new(8, 7)], vec![1, 1]);
+        let trial = |guard: u32| {
+            seed_rng(4242);
+            let mut conv = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+            conv.kernels.data[0] = Dyadic::new(8, 7);
+            conv.biases.data[0] = Dyadic::new(0, 7);
+            conv.set_backward_propagation_guard_bits(guard);
+            let forward = conv.forward_batch(&sample);
+            conv.zero_grad();
+            let back = conv.backward_batch(&grad);
+            let weight_grads = (conv.grad_k.data.clone(), conv.grad_b.data.clone());
+            let next_rng = rng_next();
+            (forward.data, back.data, weight_grads, next_rng)
+        };
+        let (out0, back0, weights0, rng0) = trial(0);
+        let (out3, back3, weights3, rng3) = trial(3);
+        assert_eq!(out0, out3);
+        assert_eq!(weights0, weights3, "weight-gradient multiplication is unchanged");
+        assert_eq!(rng0, rng3, "one stochastic draw per multiply in both arms");
+        assert_eq!(back0[0].s, 7);
+        assert_eq!(back3[0].s, 10);
+    }
+
+    #[test]
+    fn target_scale_is_bounded_across_convolution_depth() {
+        let x = Tensor::from_vec(vec![Dyadic::new(127, 7)], vec![1, 1, 1, 1]);
+        seed_rng(2027);
+        let mut convs: Vec<_> = (0..4).map(|_| {
+            let mut m = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+            m.set_backward_propagation_guard_bits(3);
+            m
+        }).collect();
+        for conv in &mut convs {
+            conv.forward_batch(&x);
+            conv.zero_grad();
+        }
+        let mut g = Tensor::from_vec(vec![Dyadic::new(16, 7)], vec![1, 1]);
+        for conv in convs.iter_mut().rev() {
+            g = conv.backward_batch(&g);
+            assert_eq!(g.data[0].s, 10, "guard bits must not grow with each layer");
+        }
+    }
+}
