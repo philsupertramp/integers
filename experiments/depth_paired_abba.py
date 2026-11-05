@@ -62,9 +62,12 @@ def build_plan(binary: Path, data_dir: Path, seeds: list[int],
                depths: list[int], epochs: int, train: int, validation: int,
                batch: int, lr_shift: int, single_pass: bool = False,
                trace_layers: bool = False,
-               backward_precision: str = "baseline") -> dict:
+               backward_precision: str = "baseline",
+               optimizer_mode: str = "baseline") -> dict:
     if backward_precision not in ("baseline", "guard3"):
         raise ValueError("unsupported backward-only precision arm")
+    if optimizer_mode not in ("baseline", "subunit_carry24"):
+        raise ValueError("unsupported optimizer arm")
     binary = binary.resolve(strict=True)
     data_dir = data_dir.resolve(strict=True)
     if not binary.is_file() or not all((data_dir / p).is_file() for p in DATA_FILES):
@@ -104,6 +107,8 @@ def build_plan(binary: Path, data_dir: Path, seeds: list[int],
     }
     if backward_precision != "baseline":
         plan["backward_precision"] = backward_precision
+    if optimizer_mode != "baseline":
+        plan["optimizer_mode"] = optimizer_mode
     if trace_layers:
         plan["diagnostics"] = {"layer_trace": True, "schema": 1,
                                "sampling": "first_minibatch_epochs_1_5_10_last"}
@@ -119,6 +124,8 @@ def verify_plan(plan: dict):
         raise ValueError("experiment plan was altered")
     if plan.get("backward_precision", "baseline") not in ("baseline", "guard3"):
         raise ValueError("unsupported frozen backward precision arm")
+    if plan.get("optimizer_mode", "baseline") not in ("baseline", "subunit_carry24"):
+        raise ValueError("unsupported frozen optimizer arm")
     diagnostics = plan.get("diagnostics")
     if diagnostics is not None and diagnostics != {
             "layer_trace": True, "schema": 1,
@@ -168,6 +175,12 @@ def validate_record(record: dict, trial: dict, plan: dict):
                     else plan.get("backward_precision", "baseline")))
             or (plan.get("backward_precision") == "guard3"
                 and record.get("backward_precision") is None)
+            or (record.get("optimizer_mode") is not None
+                and record["optimizer_mode"] != (
+                    "fp32_reference" if trial["backend"] == "fp32"
+                    else plan.get("optimizer_mode", "baseline")))
+            or (plan.get("optimizer_mode") == "subunit_carry24"
+                and record.get("optimizer_mode") is None)
             or record.get("architecture_kind") != f"mnist_cnn_{trial['depth']}conv_he_v2"
             or record.get("validation_only") is not True
             or record.get("test_evaluated") is not False
@@ -201,6 +214,10 @@ def validate_record(record: dict, trial: dict, plan: dict):
                         or layer["changed_parameters"] + layer["unchanged_parameters"] != p
                         or not 0 <= layer.get("zero_gradient_count", -1) <= p):
                     raise ValueError("invalid layer gradient/update diagnostic counts")
+                if trial["backend"] == "integer" and plan.get("optimizer_mode") == "subunit_carry24":
+                    if (layer.get("quantized_to_zero_updates") is not None
+                            or not 0 <= layer.get("subunit_deferred_steps", -1) <= p):
+                        raise ValueError("carry step mislabeled as stochastic zero rounding")
     elif trace is not None:
         raise ValueError("unexpected layer diagnostics in untraced plan")
     curve = record.get("learning_curve")
@@ -278,6 +295,9 @@ def run(root: Path):
             if (trial["backend"] == "integer"
                     and plan.get("backward_precision") == "guard3"):
                 cmd.append("--backward-guard3")
+            if (trial["backend"] == "integer"
+                    and plan.get("optimizer_mode") == "subunit_carry24"):
+                cmd.append("--subunit-carry")
             print(f"[{trial['index'] + 1}/{len(plan['trials'])}] "
                   f"{trial_name(trial)}", flush=True)
             result = subprocess.run(cmd, text=True, capture_output=True, check=True)
@@ -374,7 +394,8 @@ def analyze(root: Path):
         "binary_sha256": plan["binary_sha256"],
         "source_sha": plan["source_sha"], "dataset_sha256": plan["dataset_sha256"],
         "workload": plan["workload"], "design": plan["design"],
-        "backward_precision": plan.get("backward_precision", "baseline"), "depths": by_depth,
+        "backward_precision": plan.get("backward_precision", "baseline"),
+        "optimizer_mode": plan.get("optimizer_mode", "baseline"), "depths": by_depth,
         "caveat": "ABBA repetitions control timing drift; only distinct seeds inform learning. "
                   "No Pi speed/energy claim; no official test evaluation; no library-wide "
                   "correctness claim; numerical equivalence not assumed.",
@@ -429,6 +450,8 @@ def main(argv=None):
     p.add_argument("--lr-shift", type=int, default=7)
     p.add_argument("--backward-precision", choices=["baseline", "guard3"],
                    default="baseline", help="checksum-locked integer Conv2D backward-propagation precision arm")
+    p.add_argument("--optimizer-mode", choices=["baseline", "subunit_carry24"],
+                   default="baseline", help="checksum-locked integer optimizer treatment arm")
     p.add_argument("--trace-layers", action="store_true",
                    help="opt-in bounded per-layer snapshots at selected epochs")
     p.add_argument("--single-pass", action="store_true",
@@ -445,7 +468,8 @@ def main(argv=None):
                               parse_numbers(args.depths, DEPTHS),
                               args.epochs, args.train_limit,
                               args.validation_limit, args.batch_size, args.lr_shift,
-                              args.single_pass, args.trace_layers, args.backward_precision)
+                              args.single_pass, args.trace_layers, args.backward_precision,
+                              args.optimizer_mode)
             args.dir.mkdir(parents=True, exist_ok=False)
             (args.dir / "plan.json").write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
             print(f"Planned {len(plan['trials'])} validation-only trials "

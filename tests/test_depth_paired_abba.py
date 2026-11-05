@@ -178,6 +178,41 @@ class DepthPairedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported"):
             depth.verify_plan(tampered)
 
+    def test_two_by_two_precision_carry_factorial_modes_are_checksums_locked(self):
+        for precision in ("baseline", "guard3"):
+            for optimizer in ("baseline", "subunit_carry24"):
+                with mock.patch.object(depth.subprocess, "check_output",
+                                       return_value="a" * 40):
+                    plan = depth.build_plan(
+                        self.binary, self.data, [4242], [16],
+                        1, 20, 10, 2, 7, single_pass=True,
+                        backward_precision=precision, optimizer_mode=optimizer
+                    )
+                depth.verify_plan(plan)
+                for trial in plan["trials"]:
+                    record = fixture(trial, plan)
+                    record["backward_precision"] = (
+                        "fp32" if trial["backend"] == "fp32" else precision
+                    )
+                    record["optimizer_mode"] = (
+                        "fp32_reference" if trial["backend"] == "fp32" else optimizer
+                    )
+                    depth.validate_record(record, trial, plan)
+                    record["optimizer_mode"] = "other"
+                    with self.assertRaisesRegex(ValueError, "unmatched"):
+                        depth.validate_record(record, trial, plan)
+                tampered = json.loads(json.dumps(plan))
+                tampered["optimizer_mode"] = "subunit_carry24" if optimizer == "baseline" else "baseline"
+                with self.assertRaisesRegex(ValueError, "altered"):
+                    depth.verify_plan(tampered)
+        invalid = json.loads(json.dumps(plan))
+        invalid["optimizer_mode"] = "custom"
+        invalid["integrity_sha256"] = depth.digest(depth.canonical({
+            k: v for k, v in invalid.items() if k != "integrity_sha256"
+        }))
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            depth.verify_plan(invalid)
+
     def test_rejects_changed_binary_and_dataset(self):
         plan = self.plan()
         depth.check_environment(plan)
