@@ -257,11 +257,15 @@ pub trait Module {
 
     /// Bounded first-minibatch pooling trace, disabled by default.
     fn set_pool_winner_observation(&mut self, _enable: bool) {}
-    fn numeric_pool_winners(&self) -> Option<PoolWinnerSnapshot> { None }
+    fn numeric_pool_winners(&self) -> Option<PoolWinnerSnapshot> {
+        None
+    }
 
     /// Bounded first-minibatch convolution backward multiplication trace.
     fn set_backward_rounding_observation(&mut self, _enable: bool) {}
-    fn numeric_backward_rounding(&self) -> Option<ConvBackwardRounding> { None }
+    fn numeric_backward_rounding(&self) -> Option<ConvBackwardRounding> {
+        None
+    }
 
     /// Sample one normal optimizer update with direct stochastic-round counters.
     /// Unsupported modules execute their ordinary update and return no stats.
@@ -477,9 +481,11 @@ impl Sequential {
     }
 
     pub fn numeric_pool_winners(&self) -> Vec<(usize, PoolWinnerSnapshot)> {
-        self.layers.iter().enumerate().filter_map(|(i, layer)| {
-            layer.numeric_pool_winners().map(|x| (i, x))
-        }).collect()
+        self.layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, layer)| layer.numeric_pool_winners().map(|x| (i, x)))
+            .collect()
     }
 
     pub fn set_backward_rounding_observation(&mut self, enable: bool) {
@@ -489,9 +495,11 @@ impl Sequential {
     }
 
     pub fn numeric_backward_rounding(&self) -> Vec<(usize, ConvBackwardRounding)> {
-        self.layers.iter().enumerate().filter_map(|(i, layer)| {
-            layer.numeric_backward_rounding().map(|x| (i, x))
-        }).collect()
+        self.layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, layer)| layer.numeric_backward_rounding().map(|x| (i, x)))
+            .collect()
     }
 
     pub fn numeric_forward_signs(&self) -> Vec<(usize, &'static str, Vec<bool>)> {
@@ -1050,7 +1058,6 @@ mod backward_boundary_tests {
     }
 }
 
-
 #[cfg(test)]
 mod exact_backward_mul_trace_tests {
     use super::{Dyadic, MulRoundingCounts};
@@ -1061,7 +1068,12 @@ mod exact_backward_mul_trace_tests {
         trace.record(Dyadic::new(0, 7), Dyadic::new(127, 7), 7, Dyadic::new(0, 7));
         trace.record(Dyadic::new(1, 7), Dyadic::new(1, 7), 7, Dyadic::new(0, 7));
         trace.record(Dyadic::new(-1, 7), Dyadic::new(1, 7), 7, Dyadic::new(-1, 7));
-        trace.record(Dyadic::new(128, 7), Dyadic::new(128, 7), 7, Dyadic::new(128, 7));
+        trace.record(
+            Dyadic::new(128, 7),
+            Dyadic::new(128, 7),
+            7,
+            Dyadic::new(128, 7),
+        );
         assert_eq!(trace.products, 4);
         assert_eq!(trace.nonzero_exact_products, 3);
         assert_eq!(trace.nonzero_below_one_lsb, 2);
