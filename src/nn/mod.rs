@@ -67,6 +67,9 @@ pub use regularization::{BatchNorm1D, BatchNorm2D, Dropout, MaxPool2D};
 mod conv;
 pub use conv::Conv2D;
 
+mod subunit_carry;
+use subunit_carry::apply_updates_mean_carry;
+
 use crate::dyadic::{Dyadic, Tensor, TensorView, add, stochastic_round};
 use std::time::Instant;
 
@@ -92,6 +95,7 @@ pub struct OptimizerQuantizationStats {
     pub quantized_to_zero_updates: usize,
     pub nonzero_rounded_deltas: usize,
     pub saturation_blocked_deltas: usize,
+    pub subunit_deferred_steps: usize,
 }
 
 /// Raw integer gradient tensor summary; no float conversion or RNG.
@@ -248,6 +252,9 @@ pub trait Module {
     fn numeric_snapshot(&self) -> Option<LayerNumericSnapshot> {
         None
     }
+
+    /// Research-only: allocate fractional carry once after seeded initialization.
+    fn enable_subunit_carry(&mut self) {}
 
     /// Read-only cached pre-ReLU forward signs, used only on the frozen
     /// first minibatch. Others return None (including activation layers).
@@ -529,6 +536,15 @@ impl Sequential {
                     .map(|mask| (i, layer.name(), mask))
             })
             .collect()
+    }
+
+    /// Opt-in integer-only carry residues; no RNG draws or changes to weights
+    /// when this mode is enabled before training.
+    pub fn enable_subunit_carry(&mut self) {
+        self.check_integer_backend();
+        for layer in &mut self.layers {
+            layer.enable_subunit_carry();
+        }
     }
 
     pub fn numeric_snapshots(&self) -> Vec<(usize, &'static str, LayerNumericSnapshot)> {

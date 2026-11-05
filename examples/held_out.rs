@@ -76,6 +76,7 @@ struct Config {
     trace_layers: bool,
     probe_first_backward: bool,
     backward_guard3: bool,
+    subunit_carry: bool,
     split_seed: u64,
 }
 impl Config {
@@ -102,6 +103,7 @@ impl Config {
             trace_layers: false,
             probe_first_backward: false,
             backward_guard3: false,
+            subunit_carry: false,
             split_seed: SPLIT_SEED,
         };
         let mut i = 0;
@@ -150,6 +152,11 @@ impl Config {
             }
             if key == "--backward-guard3" {
                 cfg.backward_guard3 = true;
+                i += 1;
+                continue;
+            }
+            if key == "--subunit-carry" {
+                cfg.subunit_carry = true;
                 i += 1;
                 continue;
             }
@@ -241,6 +248,15 @@ impl Config {
             !cfg.profile_training
                 || (cfg.architecture == Architecture::Dense && cfg.validation_only),
             "training profiling requires dense --validation-only mode"
+        );
+        assert!(
+            !cfg.subunit_carry
+                || (cfg.validation_only
+                    && cfg.task == Task::Mnist
+                    && cfg.backend == Backend::Integer
+                    && matches!(cfg.architecture, Architecture::Cnn16 | Architecture::Cnn20)
+                    && !cfg.profile_training),
+            "--subunit-carry requires integer validation-only 16/20-layer CNN"
         );
         assert!(
             !cfg.backward_guard3
@@ -1141,6 +1157,7 @@ fn trace_integer(
     before: &[(usize, &'static str, LayerNumericSnapshot)],
     after: &[(usize, &'static str, LayerNumericSnapshot)],
     stats: &[(usize, &'static str, OptimizerQuantizationStats)],
+    carry_mode: bool,
 ) -> String {
     assert_eq!(forward.len(), before.len());
     assert_eq!(before.len(), after.len());
@@ -1161,8 +1178,12 @@ fn trace_integer(
             let max_scale = nonzero.iter().max().map_or("null".to_string(), |v| v.to_string());
             let changed = b.2.parameters.iter().zip(&a.2.parameters)
                 .filter(|(x, y)| x != y).count();
+            let rounded_zero = if carry_mode { "null".to_string() }
+                else { s.2.quantized_to_zero_updates.to_string() };
+            let deferred = if carry_mode { s.2.subunit_deferred_steps.to_string() }
+                else { "null".to_string() };
             format!(
-                "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_mantissa\":{},\"nonzero_gradient_min_scale\":{},\"nonzero_gradient_max_scale\":{},\"forward_count\":{},\"forward_zero_count\":{},\"forward_nonpositive_count\":{},\"forward_saturated_count\":{},\"changed_parameters\":{},\"unchanged_parameters\":{},\"effective_zero_step_count\":{},\"effective_nonzero_step_count\":{},\"nonzero_rounded_delta_count\":{},\"saturation_blocked_delta_count\":{},\"quantized_to_zero_updates\":{}}}",
+                "{{\"index\":{},\"kind\":{:?},\"parameter_count\":{},\"zero_parameter_count\":{},\"gradient_count\":{},\"zero_gradient_count\":{},\"max_abs_gradient_mantissa\":{},\"nonzero_gradient_min_scale\":{},\"nonzero_gradient_max_scale\":{},\"forward_count\":{},\"forward_zero_count\":{},\"forward_nonpositive_count\":{},\"forward_saturated_count\":{},\"changed_parameters\":{},\"unchanged_parameters\":{},\"effective_zero_step_count\":{},\"effective_nonzero_step_count\":{},\"nonzero_rounded_delta_count\":{},\"saturation_blocked_delta_count\":{},\"quantized_to_zero_updates\":{},\"subunit_deferred_steps\":{}}}",
                 f.0, f.1, b.2.parameters.len(), b.2.parameters.iter().filter(|x| x.v == 0).count(),
                 b.2.gradients.len(), zeros, max_abs, min_scale, max_scale,
                 f.2.forward_outputs, f.2.forward_zeros, f.2.forward_nonpositive,
@@ -1170,7 +1191,7 @@ fn trace_integer(
                 changed, b.2.parameters.len() - changed,
                 s.2.zero_effective_steps, s.2.nonzero_effective_steps,
                 s.2.nonzero_rounded_deltas, s.2.saturation_blocked_deltas,
-                s.2.quantized_to_zero_updates
+                rounded_zero, deferred
             )
         }).collect();
     format!(
@@ -1291,6 +1312,9 @@ fn main() {
     };
     if cfg.backward_guard3 {
         integer.set_conv_backward_propagation_guard_bits(3);
+    }
+    if cfg.subunit_carry {
+        integer.enable_subunit_carry();
     }
     let model_initialization_ms = model_start.elapsed().as_millis();
     let mut curve = Vec::new();
@@ -1488,6 +1512,7 @@ fn main() {
                                 &before,
                                 &integer.numeric_snapshots(),
                                 &stats,
+                                cfg.subunit_carry,
                             ));
                         }
                     }
@@ -1709,8 +1734,15 @@ fn main() {
     } else {
         "baseline"
     };
+    let optimizer_mode = if cfg.backend == Backend::Fp32 {
+        "fp32_reference"
+    } else if cfg.subunit_carry {
+        "subunit_carry24"
+    } else {
+        "baseline"
+    };
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"backward_precision\": \"{precision_arm}\", \"layer_diagnostics\": {}, \"first_backward_probe\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"backward_precision\": \"{precision_arm}\", \"optimizer_mode\": \"{optimizer_mode}\", \"layer_diagnostics\": {}, \"first_backward_probe\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
         cfg.ci_sample,
         cfg.seed,
