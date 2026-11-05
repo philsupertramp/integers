@@ -245,9 +245,11 @@ impl Conv2D {
                                     self.quant_shift
                                 } else {
                                     let target = self.quant_shift + self.propagation_guard_bits;
-                                    let combined = gj.s.checked_add(weight.s)
-                                        .expect("backward guarded scale overflow");
-                                    let q = combined.checked_sub(target)
+                                    let combined =
+                                        gj.s.checked_add(weight.s)
+                                            .expect("backward guarded scale overflow");
+                                    let q = combined
+                                        .checked_sub(target)
                                         .expect("guarded precision exceeds product scale");
                                     // Both baseline and guard3 consume exactly one RNG draw
                                     // per multiply; do not silently change the draw schedule.
@@ -288,7 +290,10 @@ impl Conv2D {
 
 impl Module for Conv2D {
     fn set_backward_propagation_guard_bits(&mut self, bits: u32) {
-        assert!(bits == 0 || bits == 3, "only baseline/guard3 precision arm supported");
+        assert!(
+            bits == 0 || bits == 3,
+            "only baseline/guard3 precision arm supported"
+        );
         self.propagation_guard_bits = bits;
     }
 
@@ -504,7 +509,6 @@ impl Module for Conv2D {
     }
 }
 
-
 #[cfg(test)]
 mod backward_guard3_tests {
     use super::*;
@@ -530,7 +534,10 @@ mod backward_guard3_tests {
         let (out0, back0, weights0, rng0) = trial(0);
         let (out3, back3, weights3, rng3) = trial(3);
         assert_eq!(out0, out3);
-        assert_eq!(weights0, weights3, "weight-gradient multiplication is unchanged");
+        assert_eq!(
+            weights0, weights3,
+            "weight-gradient multiplication is unchanged"
+        );
         assert_eq!(rng0, rng3, "one stochastic draw per multiply in both arms");
         assert_eq!(back0[0].s, 7);
         assert_eq!(back3[0].s, 10);
@@ -540,11 +547,13 @@ mod backward_guard3_tests {
     fn target_scale_is_bounded_across_convolution_depth() {
         let x = Tensor::from_vec(vec![Dyadic::new(127, 7)], vec![1, 1, 1, 1]);
         seed_rng(2027);
-        let mut convs: Vec<_> = (0..4).map(|_| {
-            let mut m = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
-            m.set_backward_propagation_guard_bits(3);
-            m
-        }).collect();
+        let mut convs: Vec<_> = (0..4)
+            .map(|_| {
+                let mut m = Conv2D::new(1, 1, 1, 1, 1, 1, 7, 7, 31);
+                m.set_backward_propagation_guard_bits(3);
+                m
+            })
+            .collect();
         for conv in &mut convs {
             conv.forward_batch(&x);
             conv.zero_grad();
