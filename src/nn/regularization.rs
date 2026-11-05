@@ -925,7 +925,9 @@ impl MaxPool2D {
 impl Module for MaxPool2D {
     fn set_pool_winner_observation(&mut self, enable: bool) {
         self.observe_pool_winners = enable;
-        if !enable { self.observed_batch_input = None; }
+        if !enable {
+            self.observed_batch_input = None;
+        }
     }
 
     fn numeric_pool_winners(&self) -> Option<PoolWinnerSnapshot> {
@@ -942,10 +944,10 @@ impl Module for MaxPool2D {
                 let mut equals = 0usize;
                 for kh in 0..self.kernel {
                     for kw in 0..self.kernel {
-                        let idx = self.in_idx(c, oh * self.stride + kh,
-                            ow * self.stride + kw);
+                        let idx = self.in_idx(c, oh * self.stride + kh, ow * self.stride + kw);
                         if !dyadic_greater(sample.data[idx], sample.data[winner])
-                            && !dyadic_greater(sample.data[winner], sample.data[idx]) {
+                            && !dyadic_greater(sample.data[winner], sample.data[idx])
+                        {
                             equals += 1;
                         }
                     }
@@ -955,7 +957,8 @@ impl Module for MaxPool2D {
             tie_flags.push(ties);
         }
         Some(PoolWinnerSnapshot {
-            winners: self.batch_max_masks.clone(), tie_flags
+            winners: self.batch_max_masks.clone(),
+            tie_flags,
         })
     }
 
@@ -1009,7 +1012,9 @@ impl Module for MaxPool2D {
         self.batch_max_masks = all_masks;
         self.observed_batch_input = if self.observe_pool_winners {
             Some(inputs.clone())
-        } else { None };
+        } else {
+            None
+        };
         outputs
     }
 
@@ -1044,7 +1049,6 @@ impl Module for MaxPool2D {
     fn zero_grad(&mut self) {}
 }
 
-
 #[cfg(test)]
 mod pool_winner_trace_tests {
     use super::*;
@@ -1053,8 +1057,10 @@ mod pool_winner_trace_tests {
     #[test]
     fn reports_real_winners_and_true_tied_maxima_without_changing_rng() {
         let input = Tensor::from_vec(
-            vec![0, 0, -1, 2, 0, 0, 3, 1].into_iter()
-                .map(|v| Dyadic::new(v, 7)).collect(),
+            vec![0, 0, -1, 2, 0, 0, 3, 1]
+                .into_iter()
+                .map(|v| Dyadic::new(v, 7))
+                .collect(),
             vec![1, 1, 2, 4],
         );
         let run = |observe: bool| {
