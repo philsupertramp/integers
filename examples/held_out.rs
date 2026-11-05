@@ -913,7 +913,6 @@ impl GateAgreement {
     }
 }
 
-
 #[derive(Debug)]
 struct PoolAgreement {
     index: usize,
@@ -929,21 +928,33 @@ struct PoolAgreement {
 impl PoolAgreement {
     fn new(index: usize) -> Self {
         Self {
-            index, windows: 0, same_winner: 0, different_winner: 0,
-            integer_tie_windows: 0, fp32_tie_windows: 0,
-            mismatches_with_tie: 0, mismatches_without_tie: 0,
+            index,
+            windows: 0,
+            same_winner: 0,
+            different_winner: 0,
+            integer_tie_windows: 0,
+            fp32_tie_windows: 0,
+            mismatches_with_tie: 0,
+            mismatches_without_tie: 0,
             first_different_positions: Vec::new(),
         }
     }
     fn observe(
-        &mut self, sample_id: usize, int_winners: &[usize], int_ties: &[bool],
-        fp_winners: &[usize], fp_ties: &[bool],
+        &mut self,
+        sample_id: usize,
+        int_winners: &[usize],
+        int_ties: &[bool],
+        fp_winners: &[usize],
+        fp_ties: &[bool],
     ) {
         assert_eq!(int_winners.len(), fp_winners.len());
         assert_eq!(int_winners.len(), int_ties.len());
         assert_eq!(int_winners.len(), fp_ties.len());
-        for (output_index, ((&iw, &fw), (&it, &ft))) in int_winners.iter()
-            .zip(fp_winners).zip(int_ties.iter().zip(fp_ties)).enumerate()
+        for (output_index, ((&iw, &fw), (&it, &ft))) in int_winners
+            .iter()
+            .zip(fp_winners)
+            .zip(int_ties.iter().zip(fp_ties))
+            .enumerate()
         {
             self.windows += 1;
             self.integer_tie_windows += usize::from(it);
@@ -952,31 +963,47 @@ impl PoolAgreement {
                 self.same_winner += 1;
             } else {
                 self.different_winner += 1;
-                if it || ft { self.mismatches_with_tie += 1; }
-                else { self.mismatches_without_tie += 1; }
+                if it || ft {
+                    self.mismatches_with_tie += 1;
+                } else {
+                    self.mismatches_without_tie += 1;
+                }
                 if self.first_different_positions.len() < 8 {
-                    self.first_different_positions.push((sample_id, output_index));
+                    self.first_different_positions
+                        .push((sample_id, output_index));
                 }
             }
         }
     }
     fn json(&self) -> String {
-        let examples = self.first_different_positions.iter()
+        let examples = self
+            .first_different_positions
+            .iter()
             .map(|(sample, output)| format!("[{sample},{output}]"))
-            .collect::<Vec<_>>().join(",");
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
             "{{\"index\":{},\"windows\":{},\"same_winner\":{},\"different_winner\":{},\"integer_tie_windows\":{},\"fp32_tie_windows\":{},\"mismatches_with_tie\":{},\"mismatches_without_tie\":{},\"first_different_positions\":[{}]}}",
-            self.index, self.windows, self.same_winner, self.different_winner,
-            self.integer_tie_windows, self.fp32_tie_windows,
-            self.mismatches_with_tie, self.mismatches_without_tie, examples
+            self.index,
+            self.windows,
+            self.same_winner,
+            self.different_winner,
+            self.integer_tie_windows,
+            self.fp32_tie_windows,
+            self.mismatches_with_tie,
+            self.mismatches_without_tie,
+            examples
         )
     }
 }
 fn mul_rounding_json(x: &integers::nn::MulRoundingCounts) -> String {
     format!(
         "{{\"products\":{},\"nonzero_exact_products\":{},\"nonzero_below_one_lsb\":{},\"nonzero_rounded_to_zero\":{},\"nonzero_quantized_products\":{},\"nonzero_term_unchanged_accumulator\":{}}}",
-        x.products, x.nonzero_exact_products, x.nonzero_below_one_lsb,
-        x.nonzero_rounded_to_zero, x.nonzero_quantized_products,
+        x.products,
+        x.nonzero_exact_products,
+        x.nonzero_below_one_lsb,
+        x.nonzero_rounded_to_zero,
+        x.nonzero_quantized_products,
         x.nonzero_term_unchanged_accumulator
     )
 }
@@ -1055,15 +1082,23 @@ fn render_first_backward_probe(
         .map(GateAgreement::json)
         .collect::<Vec<_>>()
         .join(",");
-    let pools = pool_agreements.iter().map(PoolAgreement::json)
-        .collect::<Vec<_>>().join(",");
-    let conv_round = conv_rounding.iter().map(|(i, c)| {
-        format!(
-            "{{\"index\":{},\"parameter_product\":{},\"propagated_product\":{}}}",
-            i, mul_rounding_json(&c.parameter_product),
-            mul_rounding_json(&c.propagated_product)
-        )
-    }).collect::<Vec<_>>().join(",");
+    let pools = pool_agreements
+        .iter()
+        .map(PoolAgreement::json)
+        .collect::<Vec<_>>()
+        .join(",");
+    let conv_round = conv_rounding
+        .iter()
+        .map(|(i, c)| {
+            format!(
+                "{{\"index\":{},\"parameter_product\":{},\"propagated_product\":{}}}",
+                i,
+                mul_rounding_json(&c.parameter_product),
+                mul_rounding_json(&c.propagated_product)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
         "{{\"schema\":2,\"scope\":\"first_training_minibatch_before_any_optimizer_update\",\
           \"same_indices\":true,\"same_decoded_initial_weights\":true,\"samples\":{},\
@@ -1297,7 +1332,9 @@ fn main() {
                             let observations = integer.numeric_pool_winners();
                             integer.set_pool_winner_observation(false);
                             Some(observations)
-                        } else { None };
+                        } else {
+                            None
+                        };
                         let forward_snapshot = if sampled_epoch && batch_idx == 0 {
                             Some(integer.numeric_snapshots())
                         } else {
@@ -1333,10 +1370,20 @@ fn main() {
                             let observed = integer.numeric_backward_rounding();
                             integer.set_backward_rounding_observation(false);
                             Some(observed)
-                        } else { None };
-                        if let (Some(boundaries), Some(gates), Some(pool_winners), Some(conv_round)) =
-                            (int_boundaries, integer_gate_masks, integer_pool_winners, rounding)
-                        {
+                        } else {
+                            None
+                        };
+                        if let (
+                            Some(boundaries),
+                            Some(gates),
+                            Some(pool_winners),
+                            Some(conv_round),
+                        ) = (
+                            int_boundaries,
+                            integer_gate_masks,
+                            integer_pool_winners,
+                            rounding,
+                        ) {
                             let observed_layers = integer.numeric_snapshots();
                             let Fp32Model::Cnn(reference) = &mut fp32 else {
                                 unreachable!("initial probe requires paired CNN");
@@ -1349,20 +1396,27 @@ fn main() {
                                 let x = float_row(&data.pool, sample_id);
                                 let t = float_target(&data.pool, sample_id);
                                 reference.accumulate(&x, &t);
-                                for (index, fp_winners, fp_ties) in reference.pool_winners_last_sample() {
-                                    let (_, integer_pool) = pool_winners.iter()
+                                for (index, fp_winners, fp_ties) in
+                                    reference.pool_winners_last_sample()
+                                {
+                                    let (_, integer_pool) = pool_winners
+                                        .iter()
                                         .find(|(i, _)| *i == index)
                                         .expect("FP32 pool must match integer pool index");
                                     if sample_index == 0 {
                                         pool_agreements.push(PoolAgreement::new(index));
                                     }
-                                    let agreement = pool_agreements.iter_mut()
+                                    let agreement = pool_agreements
+                                        .iter_mut()
                                         .find(|v| v.index == index)
                                         .expect("first sample sets pool identity");
-                                    agreement.observe(sample_index,
+                                    agreement.observe(
+                                        sample_index,
                                         &integer_pool.winners[sample_index],
                                         &integer_pool.tie_flags[sample_index],
-                                        &fp_winners, &fp_ties);
+                                        &fp_winners,
+                                        &fp_ties,
+                                    );
                                 }
                                 for (index, fp_mask) in reference.relu_input_signs_last_sample() {
                                     let (_, _, all_int_mask) = gates
