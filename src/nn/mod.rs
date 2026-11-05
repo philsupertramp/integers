@@ -267,6 +267,11 @@ pub trait Module {
         None
     }
 
+    /// Research-only: extra fractional guard bits for gradients propagated
+    /// into earlier convolution layers. A non-convolution module ignores it.
+    /// No alteration to forward values, weight-gradient multiply or SGD.
+    fn set_backward_propagation_guard_bits(&mut self, _guard_bits: u32) {}
+
     /// Sample one normal optimizer update with direct stochastic-round counters.
     /// Unsupported modules execute their ordinary update and return no stats.
     fn update_with_quantization_stats(
@@ -486,6 +491,15 @@ impl Sequential {
             .enumerate()
             .filter_map(|(i, layer)| layer.numeric_pool_winners().map(|x| (i, x)))
             .collect()
+    }
+
+    /// Fixed-scale (not per-layer increasing) backward propagation experiment.
+    pub fn set_conv_backward_propagation_guard_bits(&mut self, guard_bits: u32) {
+        self.check_integer_backend();
+        assert!(guard_bits == 0 || guard_bits == 3, "only baseline/guard3 supported");
+        for layer in &mut self.layers {
+            layer.set_backward_propagation_guard_bits(guard_bits);
+        }
     }
 
     pub fn set_backward_rounding_observation(&mut self, enable: bool) {

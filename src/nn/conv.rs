@@ -37,6 +37,8 @@ pub struct Conv2D {
     vel_b: Tensor,
     grad_samples: usize,
     sampled_backward_rounding: Option<ConvBackwardRounding>,
+    /// Experimental fixed target scale = quant_shift + guard bits.
+    propagation_guard_bits: u32,
 
     q_min: i32,
     q_max: i32,
@@ -101,6 +103,7 @@ impl Conv2D {
             vel_b: Tensor::zeros(vec![out_channels]),
             grad_samples: 0,
             sampled_backward_rounding: None,
+            propagation_guard_bits: 0,
             q_min,
             q_max,
         }
@@ -237,15 +240,28 @@ impl Conv2D {
                                 }
                                 self.grad_k.data[ki] = next_param;
 
-                                let propagated_product =
-                                    mul(gj, self.kernels.data[ki], self.quant_shift);
+                                let weight = self.kernels.data[ki];
+                                let propagation_q = if self.propagation_guard_bits == 0 {
+                                    self.quant_shift
+                                } else {
+                                    let target = self.quant_shift + self.propagation_guard_bits;
+                                    let combined = gj.s.checked_add(weight.s)
+                                        .expect("backward guarded scale overflow");
+                                    let q = combined.checked_sub(target)
+                                        .expect("guarded precision exceeds product scale");
+                                    // Both baseline and guard3 consume exactly one RNG draw
+                                    // per multiply; do not silently change the draw schedule.
+                                    assert!((1..64).contains(&q), "guard3 needs one-draw rounding");
+                                    q
+                                };
+                                let propagated_product = mul(gj, weight, propagation_q);
                                 let prev_input = gi[ii];
                                 let next_input = add(prev_input, propagated_product);
                                 if let Some(stats) = &mut self.sampled_backward_rounding {
                                     stats.propagated_product.record(
                                         gj,
-                                        self.kernels.data[ki],
-                                        self.quant_shift,
+                                        weight,
+                                        propagation_q,
                                         propagated_product,
                                     );
                                     if propagated_product.v != 0 && next_input == prev_input {
@@ -271,6 +287,11 @@ impl Conv2D {
 }
 
 impl Module for Conv2D {
+    fn set_backward_propagation_guard_bits(&mut self, bits: u32) {
+        assert!(bits == 0 || bits == 3, "only baseline/guard3 precision arm supported");
+        self.propagation_guard_bits = bits;
+    }
+
     fn set_backward_rounding_observation(&mut self, enable: bool) {
         self.sampled_backward_rounding = if enable {
             Some(ConvBackwardRounding::default())

@@ -8,7 +8,8 @@ from pathlib import Path
 BINARY = Path("target/release/examples/held_out").resolve()
 DATA = Path("data/mnist").resolve()
 for depth in (16, 20):
-    for backend in ("integer", "fp32"):
+    for backend, guard in (("integer", False), ("fp32", False),
+                           ("integer", True)):
         with tempfile.TemporaryDirectory(prefix="layer-trace-contract-") as tmp:
             outcomes = {}
             for traced in (False, True):
@@ -22,6 +23,8 @@ for depth in (16, 20):
                 ]
                 if traced:
                     args.append("--trace-layers")
+                if guard:
+                    args.append("--backward-guard3")
                 subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
                 outcomes[traced] = json.loads(path.read_text())
             plain, traced = outcomes[False], outcomes[True]
@@ -55,5 +58,5 @@ for depth in (16, 20):
                             "nonfinite_outputs", "extreme_outputs",
                             "nonfinite_fp32_parameters"):
                     assert a[key] == b[key], (depth, backend, key, a[key], b[key])
-            print(f"OK unchanged learning and valid trace depth={depth} backend={backend}",
+            print(f"OK unchanged learning and valid trace depth={depth} backend={backend} guard={guard}",
                   flush=True)

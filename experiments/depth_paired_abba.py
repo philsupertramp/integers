@@ -61,7 +61,10 @@ def trial_order(block: int, single_pass: bool) -> str:
 def build_plan(binary: Path, data_dir: Path, seeds: list[int],
                depths: list[int], epochs: int, train: int, validation: int,
                batch: int, lr_shift: int, single_pass: bool = False,
-               trace_layers: bool = False) -> dict:
+               trace_layers: bool = False,
+               backward_precision: str = "baseline") -> dict:
+    if backward_precision not in ("baseline", "guard3"):
+        raise ValueError("unsupported backward-only precision arm")
     binary = binary.resolve(strict=True)
     data_dir = data_dir.resolve(strict=True)
     if not binary.is_file() or not all((data_dir / p).is_file() for p in DATA_FILES):
@@ -99,6 +102,8 @@ def build_plan(binary: Path, data_dir: Path, seeds: list[int],
         "test_set": "never_loaded",
         "interpretation": "three or more seeds for learning; duplicated runs are timing controls only",
     }
+    if backward_precision != "baseline":
+        plan["backward_precision"] = backward_precision
     if trace_layers:
         plan["diagnostics"] = {"layer_trace": True, "schema": 1,
                                "sampling": "first_minibatch_epochs_1_5_10_last"}
@@ -112,6 +117,8 @@ def verify_plan(plan: dict):
     if digest(canonical(copy)) != checksum or plan.get("schema") != 1 or (
             plan.get("design") not in ("paired-depth-AB", "paired-depth-ABBA-BAAB")):
         raise ValueError("experiment plan was altered")
+    if plan.get("backward_precision", "baseline") not in ("baseline", "guard3"):
+        raise ValueError("unsupported frozen backward precision arm")
     diagnostics = plan.get("diagnostics")
     if diagnostics is not None and diagnostics != {
             "layer_trace": True, "schema": 1,
@@ -155,6 +162,12 @@ def validate_record(record: dict, trial: dict, plan: dict):
     if (record.get("schema") != 1 or record.get("dataset") != "mnist"
             or record.get("seed") != trial["seed"]
             or record.get("backend") != trial["backend"]
+            or (record.get("backward_precision") is not None
+                and record["backward_precision"] != (
+                    "fp32" if trial["backend"] == "fp32"
+                    else plan.get("backward_precision", "baseline")))
+            or (plan.get("backward_precision") == "guard3"
+                and record.get("backward_precision") is None)
             or record.get("architecture_kind") != f"mnist_cnn_{trial['depth']}conv_he_v2"
             or record.get("validation_only") is not True
             or record.get("test_evaluated") is not False
@@ -262,6 +275,9 @@ def run(root: Path):
             ]
             if plan.get("diagnostics"):
                 cmd.append("--trace-layers")
+            if (trial["backend"] == "integer"
+                    and plan.get("backward_precision") == "guard3"):
+                cmd.append("--backward-guard3")
             print(f"[{trial['index'] + 1}/{len(plan['trials'])}] "
                   f"{trial_name(trial)}", flush=True)
             result = subprocess.run(cmd, text=True, capture_output=True, check=True)
@@ -357,7 +373,8 @@ def analyze(root: Path):
         "schema": 1, "plan_sha256": plan["integrity_sha256"],
         "binary_sha256": plan["binary_sha256"],
         "source_sha": plan["source_sha"], "dataset_sha256": plan["dataset_sha256"],
-        "workload": plan["workload"], "design": plan["design"], "depths": by_depth,
+        "workload": plan["workload"], "design": plan["design"],
+        "backward_precision": plan.get("backward_precision", "baseline"), "depths": by_depth,
         "caveat": "ABBA repetitions control timing drift; only distinct seeds inform learning. "
                   "No Pi speed/energy claim; no official test evaluation; no library-wide "
                   "correctness claim; numerical equivalence not assumed.",
@@ -410,6 +427,8 @@ def main(argv=None):
     p.add_argument("--validation-limit", type=int, default=512)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr-shift", type=int, default=7)
+    p.add_argument("--backward-precision", choices=["baseline", "guard3"],
+                   default="baseline", help="checksum-locked integer Conv2D backward-propagation precision arm")
     p.add_argument("--trace-layers", action="store_true",
                    help="opt-in bounded per-layer snapshots at selected epochs")
     p.add_argument("--single-pass", action="store_true",
@@ -426,7 +445,7 @@ def main(argv=None):
                               parse_numbers(args.depths, DEPTHS),
                               args.epochs, args.train_limit,
                               args.validation_limit, args.batch_size, args.lr_shift,
-                              args.single_pass, args.trace_layers)
+                              args.single_pass, args.trace_layers, args.backward_precision)
             args.dir.mkdir(parents=True, exist_ok=False)
             (args.dir / "plan.json").write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
             print(f"Planned {len(plan['trials'])} validation-only trials "

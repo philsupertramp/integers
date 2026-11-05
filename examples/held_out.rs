@@ -75,6 +75,7 @@ struct Config {
     profile_training: bool,
     trace_layers: bool,
     probe_first_backward: bool,
+    backward_guard3: bool,
     split_seed: u64,
 }
 impl Config {
@@ -100,6 +101,7 @@ impl Config {
             profile_training: false,
             trace_layers: false,
             probe_first_backward: false,
+            backward_guard3: false,
             split_seed: SPLIT_SEED,
         };
         let mut i = 0;
@@ -143,6 +145,11 @@ impl Config {
             }
             if key == "--probe-first-backward" {
                 cfg.probe_first_backward = true;
+                i += 1;
+                continue;
+            }
+            if key == "--backward-guard3" {
+                cfg.backward_guard3 = true;
                 i += 1;
                 continue;
             }
@@ -234,6 +241,15 @@ impl Config {
             !cfg.profile_training
                 || (cfg.architecture == Architecture::Dense && cfg.validation_only),
             "training profiling requires dense --validation-only mode"
+        );
+        assert!(
+            !cfg.backward_guard3
+                || (cfg.validation_only
+                    && cfg.task == Task::Mnist
+                    && cfg.backend == Backend::Integer
+                    && matches!(cfg.architecture, Architecture::Cnn16 | Architecture::Cnn20)
+                    && !cfg.profile_training),
+            "--backward-guard3 requires integer validation-only 16/20-layer CNN"
         );
         assert!(
             !cfg.probe_first_backward
@@ -1273,6 +1289,9 @@ fn main() {
             (model, Fp32Model::Cnn(reference))
         }
     };
+    if cfg.backward_guard3 {
+        integer.set_conv_backward_propagation_guard_bits(3);
+    }
     let model_initialization_ms = model_start.elapsed().as_millis();
     let mut curve = Vec::new();
     let mut trace_records: Vec<String> = Vec::new();
@@ -1683,8 +1702,11 @@ fn main() {
     } else {
         "null".to_owned()
     };
+    let precision_arm = if cfg.backward_guard3 { "guard3" }
+        else if cfg.backend == Backend::Fp32 { "fp32" }
+        else { "baseline" };
     let payload = format!(
-        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"layer_diagnostics\": {}, \"first_backward_probe\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
+        "{{\n  \"schema\": 1, \"dataset\": \"{task}\", \"backend\": \"{backend}\", \"smoke\": {}, \"ci_sample\": {},\n  \"seed\": {}, \"split_seed\": {}, \"epochs\": {}, \"batch_size\": {}, \"architecture_kind\": {:?}, \"train_limit\": {}, \"validation_limit\": {},\n  \"architecture\": {:?}, \"quantization_shift\": {}, \"output_bits\": {}, \"lr_shift\": {}, \"momentum_shift\": {}, \"grad_clip_mantissa\": {},\n  \"train_size\": {}, \"validation_size\": {}, \"test_size\": {},\n  \"validation_only\": {}, \"profile_training\": {}, \"backward_precision\": \"{precision_arm}\", \"layer_diagnostics\": {}, \"first_backward_probe\": {}, \"test_evaluated\": {}, \"test_correct\": {}, \"test_accuracy_pct\": {}, \"wall_ms\": {}, \"peak_rss_kb\": {}, \"dataset_loading_ms\": {}, \"model_initialization_ms\": {}, \"test_evaluation_ms\": {},\n  \"learning_curve\": [{}]\n}}\n",
         cfg.smoke,
         cfg.ci_sample,
         cfg.seed,
