@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "environment": {
+    "git_commit": "9b79a1450b51ab4cb2befb264bf8c1a8a4a75108",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "platform": "Linux-6.12.95-1-MANJARO-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "lr_shift": 7,
+    "timestamp_utc": "2026-10-24T12:21:27.976478+00:00"
+  },
+  "sources_sha256": {
+    "data/mnist/train-images-idx3-ubyte": "ba891046e6505d7aadcbbe25680a0738ad16aec93bde7f9b65e87a2fc25776db",
+    "data/mnist/train-labels-idx1-ubyte": "65a50cbbf4e906d70832878ad85ccda5333a97f0f4c3dd2ef09a8a9eef7101c5"
+  },
+  "runs": [
+    "integer-seed-1337.json",
+    "fp32-seed-1337.json",
+    "integer-seed-2027.json",
+    "fp32-seed-2027.json",
+    "integer-seed-4242.json",
+    "fp32-seed-4242.json"
+  ]
+}

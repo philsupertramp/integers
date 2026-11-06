@@ -1,0 +1,23 @@
+MNIST dataset attribution and redistribution notice
+==================================================
+Dataset: MNIST database of handwritten digits, derived from NIST data.
+Copyright attributed to Yann LeCun and Corinna Cortes.
+Original homepage: http://yann.lecun.com/exdb/mnist/
+Authenticated source mirror: https://github.com/cvdfoundation/mnist
+Source bytes: https://storage.googleapis.com/cvdf-datasets/mnist/
+License information: https://keras.io/api/datasets/mnist/
+Terms stated there: Creative Commons Attribution-ShareAlike 3.0 (CC BY-SA 3.0).
+License text and terms: https://creativecommons.org/licenses/by-sa/3.0/legalcode
+
+Changes to the original dataset in this image:
+- Uncompressed the canonical four IDX files after SHA256 verification.
+- Converted each raw pixel into a signed i8 mantissa representing the project's
+  established input mapping: round((pixel/255)*254 - 127), with dyadic shift 7.
+- Retained all original observations in their original order and preserved
+  original class labels byte-for-byte.
+- Generated a deterministic manifest recording the pinned source SHA256 hashes,
+  transformed hashes, and the previously established 55k/5k split definition.
+
+All data in /opt/dataset is subject to the upstream dataset terms;
+redistribution rights for the dataset do not set the Rust library's license.
+The author of this benchmark infrastructure does not claim ownership of MNIST.
