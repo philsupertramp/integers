@@ -1,5 +1,7 @@
 # Project status — candidate branch
 
+**Historical detail below reflects the 2026-10-23 snapshot** and is retained for provenance; the status has advanced since then. Current numerical summary (2026-11-06): [deep CNN research consolidation](DEEP_CNN_NUMERICAL_RESEARCH.md). [#15](https://github.com/philsupertramp/integers/issues/15) and [#35](https://github.com/philsupertramp/integers/issues/35) are closed: reproducible integer-only dense and shallow CNN learning has been demonstrated. [#38](https://github.com/philsupertramp/integers/issues/38) and [#37](https://github.com/philsupertramp/integers/issues/37) document why deeper plain CNN training remains unreliable and how precision-only interventions failed. Physical Pi 5 profiling **has** been performed under [#18](https://github.com/philsupertramp/integers/issues/18) and [#47](https://github.com/philsupertramp/integers/issues/47); accepted end-to-end acceleration is not yet demonstrated. All research PRs #58–#64 and foundation PR #9 remain unmerged.
+
 **Updated:** 2026-10-23. This tracks the selected `big-refactor` **candidate**, not the legacy `master` API. Architectural authority remains with [issue #10](https://github.com/philsupertramp/integers/issues/10) and the [decision register](ARCHITECTURE_DECISIONS.md).
 
 ## Branch distinction and verified evidence
