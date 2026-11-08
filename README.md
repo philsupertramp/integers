@@ -34,7 +34,7 @@ model.backward(&g.view());
 model.update(6); // integer shift for learning rate
 ```
 
-For mini-batches use `forward_batch` / `backward_batch`. `set_training(bool)` toggles supported stochastic/batch-dependent layers. Other candidate components are `ReLU`, `Softmax`, `Conv2D`, `MaxPool2D`, `Flatten`, `Dropout`, `BatchNorm1D` and `BatchNorm2D`; not all have verified gradients or integer-only implementations.
+For mini-batches use `forward_batch` / `backward_batch`. The default `Sequential::backward_batch` is for parameter training and does **not** return model-input gradients. To compute those gradients explicitly, use `backward_batch_with_input_grad`; the timed variants follow the same convention (`backward_batch_timed` / `backward_batch_timed_with_input_grad`). Per-sample `backward` still returns full gradients. `set_training(bool)` toggles supported stochastic/batch-dependent layers. Other candidate components are `ReLU`, `Softmax`, `Conv2D`, `MaxPool2D`, `Flatten`, `Dropout`, `BatchNorm1D` and `BatchNorm2D`; not all have verified gradients or integer-only implementations.
 
 ## Repository layout and examples
 

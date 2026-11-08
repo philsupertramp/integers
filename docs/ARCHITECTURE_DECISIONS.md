@@ -65,3 +65,33 @@
 - Link architecture-dependent changes to [#10](https://github.com/philsupertramp/integers/issues/10) and any relevant acceptance-gate issues. Record actual validation results, including failures; no undocumented reinterpretation of dyadic scale or integer-only semantics.
 - No direct pushes to `master`. No merge of [PR #9](https://github.com/philsupertramp/integers/pull/9) without subsequent explicit approval. Use reviewable branches/PRs.
 - The first approved record lives in [foundation PR #22](https://github.com/philsupertramp/integers/pull/22) against legacy `master`; this adapted copy is proposed for `big-refactor` through [#25](https://github.com/philsupertramp/integers/issues/25). Neither copy approves merging PR #9 or waiving its correctness and integration gates.
+
+## Training policy #56 — default elision of unused input-gradient draws (2026-10-29)
+
+**Maintainer direction, refined 2026-11-08:** Optimize ordinary
+`Sequential::backward_batch` parameter training by default, without
+adding a user-facing feature gate. It returns no model-input gradient;
+`Sequential::backward_batch_with_input_grad` explicitly requests full
+input gradients. The timed batch methods follow the same split.
+`Sequential::backward` still returns per-sample input gradients and
+the `Module` trait is unchanged. Intermediate layers continue to
+propagate the gradients needed for preceding parameters. The first
+`Linear` may omit unused input-gradient products and their RNG draws.
+This supersedes the initial #56 expectation that ordinary
+`Sequential::backward_batch` would return input gradients.
+
+**Numerical consequence:** Eliminating unneeded draws intentionally
+changes later stochastic-rounding choices, so exact fixed-seed
+prediction/parameter parity is no longer required across this
+training optimization. The integer arithmetic and gradient
+formula contracts in ADR-002 remain unchanged.
+
+**Activation gate:** Merge PR #57 only after independent arithmetic
+oracles, held-out multi-seed non-inferiority, and actual Pi
+ABBA/BAAB speed validation. A hosted ARM64 microbenchmark is
+not physical Pi evidence. The previously merged conservative
+implementation remains the immutable control image until then.
+
+**Scope:** Operational behavior within the existing
+`big-refactor` candidate, **not** approval of a stable public
+release policy under pending ADR-005, and not approval to merge PR #9.

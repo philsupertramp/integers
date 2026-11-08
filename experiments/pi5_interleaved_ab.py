@@ -9,6 +9,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import re
 import statistics
 import subprocess
 from pathlib import Path
@@ -39,7 +40,7 @@ def utc_now():
 
 
 def build_plan(run_id, image_a=IMAGE_A, image_b=IMAGE_B, seeds=STANDARD_SEEDS,
-               namespace="default"):
+               namespace="default", commit_a=COMMIT_A, commit_b=COMMIT_B):
     valid_name(run_id)
     if len(run_id) > 24:
         raise ValueError("run ID must be <=24 chars to keep Job names short")
@@ -47,6 +48,10 @@ def build_plan(run_id, image_a=IMAGE_A, image_b=IMAGE_B, seeds=STANDARD_SEEDS,
         raise ValueError("both images must be immutable pinned benchmark digests")
     if image_a == image_b:
         raise ValueError("A and B images must differ")
+    if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (commit_a, commit_b)):
+        raise ValueError("both commits must be complete lowercase 40-char git SHA IDs")
+    if commit_a == commit_b:
+        raise ValueError("A and B source commits must differ")
     seeds = list(seeds)
     if len(seeds) != 5 or len(set(seeds)) != 5 or any(not 0 < s < 1 << 64 for s in seeds):
         raise ValueError("experiment requires five distinct positive u64 seeds")
@@ -64,7 +69,7 @@ def build_plan(run_id, image_a=IMAGE_A, image_b=IMAGE_B, seeds=STANDARD_SEEDS,
     return {
         "schema_version": 1, "design": "mirrored-ABBA-BAAB", "run_id": run_id,
         "namespace": namespace, "images": {"A": image_a, "B": image_b},
-        "commits": {"A": COMMIT_A, "B": COMMIT_B},
+        "commits": {"A": commit_a, "B": commit_b},
         "dataset_manifest_sha256": DATASET_SHA, "seeds": seeds,
         "workload": {"epochs": 2, "train_limit": 8192,
                      "validation_limit": 1042, "batch_size": 32,
@@ -85,7 +90,8 @@ def validate_plan(plan):
     if plan.get("schema_version") != 1 or plan.get("design") != "mirrored-ABBA-BAAB":
         raise ValueError("unsupported experiment plan")
     expected = build_plan(plan["run_id"], plan["images"]["A"],
-                          plan["images"]["B"], plan["seeds"], plan["namespace"])
+                          plan["images"]["B"], plan["seeds"], plan["namespace"],
+                          plan["commits"]["A"], plan["commits"]["B"])
     if expected != plan:
         raise ValueError("experiment plan modified or acceptance gates changed")
     return plan
@@ -461,6 +467,8 @@ def main(argv=None):
     plan_cmd.add_argument("--run-id", required=True)
     plan_cmd.add_argument("--image-a", default=IMAGE_A)
     plan_cmd.add_argument("--image-b", default=IMAGE_B)
+    plan_cmd.add_argument("--commit-a", default=COMMIT_A)
+    plan_cmd.add_argument("--commit-b", default=COMMIT_B)
     plan_cmd.add_argument("--seeds", default=DEFAULT_SEEDS)
     plan_cmd.add_argument("--namespace", default="default")
     execute = sub.add_parser("run", help="sequentially create/wait/collect 20 Jobs")
@@ -473,7 +481,8 @@ def main(argv=None):
     try:
         if args.action == "plan":
             p = build_plan(args.run_id, args.image_a, args.image_b,
-                           parse_seeds(args.seeds), args.namespace)
+                           parse_seeds(args.seeds), args.namespace,
+                           args.commit_a, args.commit_b)
             save_plan(args.dir, p)
             print(f"Wrote {len(p['trials'])} serial pinned-image trials to {args.dir / 'plan.json'}")
         else:
