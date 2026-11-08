@@ -897,10 +897,7 @@ fn main() {
                                 .collect()
                         });
                         let started = Instant::now();
-                        integer.backward_batch_timed(
-                            &gradient,
-                            &mut profile.backward_layer_ns,
-                        );
+                        integer.backward_batch_timed(&gradient, &mut profile.backward_layer_ns);
                         profile.backward_ns += started.elapsed().as_nanos();
                         timed(&mut profile.update_ns, || integer.update(cfg.lr_shift));
                     } else {

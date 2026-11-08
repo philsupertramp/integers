@@ -179,7 +179,7 @@ fn experimental_batch_norm_matches_fp64_and_zero_variance_cases() {
     let outputs = batch1d.forward_batch(&zero);
     assert!(outputs.data.iter().all(|x| x.v == 0));
     let grads = t(&[128, 128], S, &[2, 1]);
-    let dx = batch1d.backward_batch(&grads);
+    let dx = batch1d.backward_batch_with_input_grad(&grads);
     assert_eq!(dx.data.len(), 2);
     assert!(dx.data.iter().all(|x| x.v == 0));
 
@@ -194,7 +194,7 @@ fn experimental_batch_norm_matches_fp64_and_zero_variance_cases() {
     let zero2d = t(&[64, 64, 64, 64], S, &[2, 2]);
     let z = batch2d.forward_batch(&zero2d);
     assert!(z.data.iter().all(|x| x.v == 0));
-    let zero_g = batch2d.backward_batch(&t(&[128; 4], S, &[2, 2]));
+    let zero_g = batch2d.backward_batch_with_input_grad(&t(&[128; 4], S, &[2, 2]));
     assert!(zero_g.data.iter().all(|x| x.v == 0));
 }
 
@@ -223,7 +223,7 @@ fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_s
         }
     }
     let grads1 = t(&[128, 0, 0, 128, -128, 128], S, &[3, 2]);
-    assert_eq!(bn1.backward_batch(&grads1).shape, vec![3, 2]);
+    assert_eq!(bn1.backward_batch_with_input_grad(&grads1).shape, vec![3, 2]);
     panics(|| {
         bn1.backward_batch(&t(&[128; 4], S, &[2, 2]));
     });
@@ -255,7 +255,7 @@ fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_s
         }
     }
     let grads2 = t(&[128, 0, 0, 128, 0, 128, 128, 0], S, &[2, 4]);
-    let backward = bn2.backward_batch(&grads2);
+    let backward = bn2.backward_batch_with_input_grad(&grads2);
     assert_eq!(backward.shape, vec![2, 4]);
     for channel in 0..2 {
         let vals = [
