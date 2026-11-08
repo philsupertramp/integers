@@ -1,0 +1,62 @@
+name: Iris validation-only hyperparameter study
+
+# Deliberately NOT a routine pull-request job. Trigger on a change to the
+# study itself in the candidate issue branch; later runs can be dispatched
+# manually once the workflow is present on GitHub's default branch.
+on:
+  push:
+    branches: [issue-15-heldout-baselines]
+    paths:
+      - experiments/iris_hpo.py
+      - .github/workflows/iris-hpo.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build reproducible release experiment once
+        run: cargo build --locked --release --example held_out
+      - name: Run predeclared Iris-only validation grid (3 splits × 3 seeds)
+        run: |
+          python3 experiments/iris_hpo.py \
+            --lr-shifts 4 5 6 7 8 \
+            --batch-sizes 8 32 \
+            --checkpoints 100 200 400 \
+            --seeds 1337 2027 4242 \
+            --output-dir /tmp/integers-iris-hpo
+      - name: Validate selection and test-data isolation
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/tmp/integers-iris-hpo")
+          study = json.loads((root / "selection.json").read_text())
+          assert study["protocol"]["test_evaluated"] is False
+          assert study["environment"]["test_source_read"] is False
+          assert len(study["ranking"]) == 30
+          assert len(study["observations"]) == 540 # 30 configs × 9 runs × 2 backends
+          assert len(list((root / "curves").glob("*.json"))) == 180
+          assert study["selected"] == study["ranking"][0]
+          for path in (root / "curves").glob("*.json"):
+              row = json.loads(path.read_text())
+              assert row["validation_only"] is True and row["test_evaluated"] is False
+              assert row["test_size"] == 0
+              assert row["test_correct"] is None and row["test_accuracy_pct"] is None
+              assert row["train_size"] == 106 and row["validation_size"] == 24
+              assert len(row["learning_curve"]) == 400
+          PY
+      - name: Print selected configuration and complete candidate ranking
+        run: cat /tmp/integers-iris-hpo/summary.md
+      - name: Archive validation-only HPO (no test, dataset or checkpoints)
+        uses: actions/upload-artifact@v4
+        with:
+          name: iris-validation-only-hpo
+          path: /tmp/integers-iris-hpo/
+          retention-days: 30
