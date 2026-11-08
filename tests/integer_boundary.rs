@@ -223,7 +223,10 @@ fn experimental_batchnorm_multifeature_and_multichannel_layouts_use_real_batch_s
         }
     }
     let grads1 = t(&[128, 0, 0, 128, -128, 128], S, &[3, 2]);
-    assert_eq!(bn1.backward_batch_with_input_grad(&grads1).shape, vec![3, 2]);
+    assert_eq!(
+        bn1.backward_batch_with_input_grad(&grads1).shape,
+        vec![3, 2]
+    );
     panics(|| {
         bn1.backward_batch(&t(&[128; 4], S, &[2, 2]));
     });
