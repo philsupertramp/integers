@@ -612,8 +612,9 @@ the training loop then discarded the result. Only the **first** layer may
 omit the input gradient: intermediate layers still need it for earlier
 trainable parameters. Public backward methods remain unchanged.
 
-The new explicit opt-in `backward_batch_discard_input_grad` plus
-timed equivalent skips the unused input-gradient tensor allocation and
+At the time of PR #53, the explicit opt-in
+`backward_batch_discard_input_grad` and its timed equivalent skipped
+the unused input-gradient tensor allocation and
 accumulation for the first `Linear` only. The conservative
 implementation preserves the original XorShift64 draws: shifts 1–63
 consume one draw even on zero products; q=0 consumes none; q>=64 falls
@@ -774,13 +775,14 @@ run. It cannot be inferred from GitHub-hosted ARM64 CI.
 
 ## 17. Default first-layer RNG elision: numerical-quality and Pi performance gates (#56)
 
-The model-input gradient is not trainable, and the caller already discards
-it using `Sequential::backward_batch_discard_input_grad`. For the first
-`Linear`, this method now **automatically** skips the corresponding
-multiplications *and* their unused random draws. There is no feature
-flag or new public algorithm selector. The ordinary
-`backward_batch` and single-example `backward` methods continue
-to compute and return all requested input gradients.
+For ordinary parameter training, `Sequential::backward_batch` now
+returns no model-input gradients. It skips unused first-layer
+input-gradient products **and** their stochastic RNG draws; intermediate
+gradients still propagate. Use `Sequential::backward_batch_with_input_grad`
+when the caller needs the full input derivative. The timed batch
+methods follow the same split. Per-sample `Sequential::backward`
+continues to return input gradients. The `Module` trait is unchanged;
+there is no runtime feature flag or new algorithm selector.
 
 This does change the sequence of random draws used in later
 integer stochastic rounding and may produce different fixed-seed
@@ -792,8 +794,8 @@ formulas, integer-only computation or held-out evaluation.
 
 1. Rust correctness tests retain the prior RNG-preserving implementation
    **only as a test oracle** and establish expected first-sample parameter
-   gradient and dropped-draw behavior. Standard public full backward
-   remains unchanged.
+   gradient and dropped-draw behavior. Explicit full-gradient backward
+   remains available as `Sequential::backward_batch_with_input_grad`.
 2. A native ARM64 **candidate PR image** is compared to the immutable
    merged PR #53 image for matching MNIST five-seed training:
    seeds `1337,2026,2027,4242,42069`, 8192/1042,

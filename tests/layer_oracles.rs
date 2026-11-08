@@ -602,9 +602,9 @@ fn sequential_backward_layer_timing_preserves_values_and_rng() {
         let output = model.forward_batch(&x);
         let mut per_layer = vec![0u128; model.layers.len()];
         let dx = if profile {
-            model.backward_batch_timed(&grad, &mut per_layer)
+            model.backward_batch_timed_with_input_grad(&grad, &mut per_layer)
         } else {
-            model.backward_batch(&grad)
+            model.backward_batch_with_input_grad(&grad)
         };
         model.update(7);
         let updated = model.forward_batch(&x);
@@ -620,4 +620,43 @@ fn sequential_backward_layer_timing_preserves_values_and_rng() {
     assert_eq!(timings.len(), 3);
     // Durations can be zero under extremely coarse timer granularity.
     assert!(timings.iter().all(|&duration| duration < 600_000_000_000));
+}
+
+#[test]
+fn sequential_default_batch_backward_omits_input_grad_but_full_api_returns_it() {
+    use integers::nn::Sequential;
+
+    fn model() -> Sequential {
+        let mut linear = Linear::new(2, 1, 0, 0, 31);
+        linear.weights.data[0] = d(3, 0);
+        linear.weights.data[1] = d(4, 0);
+        linear.biases.data[0] = d(0, 0);
+        let mut model = Sequential::new();
+        model.add(linear);
+        model
+    }
+
+    // q=0: exact integer arithmetic, so both gradient paths must update
+    // the parameters identically while only the explicit API returns dx.
+    let input = t(&[1, 2], 0, &[1, 2]);
+    let gradient = t(&[1], 0, &[1, 1]);
+    let mut train = model();
+    let mut full = model();
+    let mut timed = model();
+
+    for model in [&mut train, &mut full, &mut timed] {
+        model.zero_grad();
+        assert_eq!(model.forward_batch(&input).data, vec![d(11, 0)]);
+    }
+    let _: () = train.backward_batch(&gradient);
+    let input_gradient = full.backward_batch_with_input_grad(&gradient);
+    assert_eq!(input_gradient.shape, input.shape);
+    assert_eq!(input_gradient.data, vec![d(3, 0), d(4, 0)]);
+    let mut layer_ns = [0u128; 1];
+    let _: () = timed.backward_batch_timed(&gradient, &mut layer_ns);
+
+    for model in [&mut train, &mut full, &mut timed] {
+        model.update(0);
+        assert_eq!(model.forward_batch(&input).data, vec![d(5, 0)]);
+    }
 }

@@ -1046,7 +1046,7 @@ mod discarded_input_gradient_tests {
         for _ in 0..4 {
             full.zero_grad();
             expected.push(full.forward_batch(&input).data);
-            full.backward_batch_discard_input_grad(&grads);
+            full.backward_batch(&grads);
             full.update(7);
         }
         let expected_after = full.forward_batch(&input).data;
@@ -1059,9 +1059,9 @@ mod discarded_input_gradient_tests {
             actual.push(optimized.forward_batch(&input).data);
             if step % 2 == 0 {
                 let mut layer_ns = [0u128; 3];
-                optimized.backward_batch_timed_discard_input_grad(&grads, &mut layer_ns);
+                optimized.backward_batch_timed(&grads, &mut layer_ns);
             } else {
-                optimized.backward_batch_discard_input_grad(&grads);
+                optimized.backward_batch(&grads);
             }
             optimized.update(7);
         }

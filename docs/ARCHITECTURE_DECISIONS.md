@@ -68,14 +68,17 @@
 
 ## Training policy #56 — default elision of unused input-gradient draws (2026-10-29)
 
-**Maintainer direction:** Optimize the existing public training path as its
-default behavior, **not** as a new user-facing feature gate. The
-`Sequential::backward_batch_discard_input_grad` contract means
-model-input gradients are already unused. The first `Linear` may
-elide those products and the associated stochastic RNG draws.
-The ordinary `backward_batch` API must still return complete
-input gradients; intermediate layers must still propagate
-gradients required by earlier trainable parameters.
+**Maintainer direction, refined 2026-11-08:** Optimize ordinary
+`Sequential::backward_batch` parameter training by default, without
+adding a user-facing feature gate. It returns no model-input gradient;
+`Sequential::backward_batch_with_input_grad` explicitly requests full
+input gradients. The timed batch methods follow the same split.
+`Sequential::backward` still returns per-sample input gradients and
+the `Module` trait is unchanged. Intermediate layers continue to
+propagate the gradients needed for preceding parameters. The first
+`Linear` may omit unused input-gradient products and their RNG draws.
+This supersedes the initial #56 expectation that ordinary
+`Sequential::backward_batch` would return input gradients.
 
 **Numerical consequence:** Eliminating unneeded draws intentionally
 changes later stochastic-rounding choices, so exact fixed-seed

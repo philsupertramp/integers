@@ -233,37 +233,65 @@ impl Sequential {
         x
     }
 
-    /// Batch backward.
-    pub fn backward_batch(&mut self, grads: &Tensor) -> Tensor {
+    /// Batch backward for ordinary parameter training. The caller does not
+    /// need gradients with respect to the model input, so only the first
+    /// layer may omit them. Intermediate input gradients are still required
+    /// to accumulate the parameters of preceding layers.
+    ///
+    /// This can consume a different stochastic RNG stream from
+    /// `backward_batch_with_input_grad`. Use that explicit API when input
+    /// derivatives are needed, for example in input-gradient analysis.
+    pub fn backward_batch(&mut self, grads: &Tensor) {
         self.check_integer_backend();
-        let mut g: Tensor = grads.clone();
+        let mut g = grads.clone();
+        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            if index == 0 {
+                layer.backward_batch_discard_input_grad(&g);
+            } else {
+                g = layer.backward_batch(&g);
+            }
+        }
+    }
+
+    /// Batch backward that computes and returns full model-input gradients.
+    /// Use when the caller needs derivatives with respect to the inputs.
+    pub fn backward_batch_with_input_grad(&mut self, grads: &Tensor) -> Tensor {
+        self.check_integer_backend();
+        let mut g = grads.clone();
         for layer in self.layers.iter_mut().rev() {
             g = layer.backward_batch(&g);
         }
         g
     }
 
-    /// Backpropagate for a training step that never consumes model-input
-    /// gradients. Only the first layer can safely omit them: all subsequent
-    /// layer input gradients are needed for the preceding layer's parameters.
-    /// The full-gradient backward_batch API is unchanged.
-    pub fn backward_batch_discard_input_grad(&mut self, grads: &Tensor) {
+    /// Time the ordinary training backward path, including the optimized
+    /// first layer that does not produce unused model-input gradients.
+    /// Stopwatch overhead is diagnostic, not a cycle count.
+    pub fn backward_batch_timed(&mut self, grads: &Tensor, layer_ns: &mut [u128]) {
         self.check_integer_backend();
+        assert_eq!(
+            layer_ns.len(),
+            self.layers.len(),
+            "layer timing count mismatch"
+        );
         let mut g = grads.clone();
         for (index, layer) in self.layers.iter_mut().enumerate().rev() {
+            let started = Instant::now();
             if index == 0 {
                 layer.backward_batch_discard_input_grad(&g);
             } else {
                 g = layer.backward_batch(&g);
             }
+            layer_ns[index] += started.elapsed().as_nanos();
         }
     }
 
-    /// Profile individual backward layers, recording time in forward layer
-    /// order. This method calls every layer exactly once and in the same
-    /// sequence as backward_batch; no RNG draws are added or moved.
-    /// Stopwatch overhead means these figures are diagnostic, not cycle counts.
-    pub fn backward_batch_timed(&mut self, grads: &Tensor, layer_ns: &mut [u128]) -> Tensor {
+    /// Time the full-gradient backward path and return input gradients.
+    pub fn backward_batch_timed_with_input_grad(
+        &mut self,
+        grads: &Tensor,
+        layer_ns: &mut [u128],
+    ) -> Tensor {
         self.check_integer_backend();
         assert_eq!(
             layer_ns.len(),
@@ -277,32 +305,6 @@ impl Sequential {
             layer_ns[index] += started.elapsed().as_nanos();
         }
         g
-    }
-
-    /// Same timing attribution as backward_batch_timed, but do not compute
-    /// the model's unconsumed input gradients. Profile the first layer's
-    /// specialized work rather than a full-backward surrogate.
-    pub fn backward_batch_timed_discard_input_grad(
-        &mut self,
-        grads: &Tensor,
-        layer_ns: &mut [u128],
-    ) {
-        self.check_integer_backend();
-        assert_eq!(
-            layer_ns.len(),
-            self.layers.len(),
-            "layer timing count mismatch"
-        );
-        let mut g = grads.clone();
-        for (index, layer) in self.layers.iter_mut().enumerate().rev() {
-            let started = Instant::now();
-            if index == 0 {
-                layer.backward_batch_discard_input_grad(&g);
-            } else {
-                g = layer.backward_batch(&g);
-            }
-            layer_ns[index] += started.elapsed().as_nanos();
-        }
     }
 
     pub fn update(&mut self, lr_shift: u32) {

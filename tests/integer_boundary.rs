@@ -141,7 +141,7 @@ fn strict_integer_only_model_can_train_with_momentum_and_dropout() {
     model.zero_grad();
     let out = model.forward_batch(&x);
     let grad = Tensor::from_vec(mse_grad(&out.data, &target.data), out.shape.clone());
-    let dx = model.backward_batch(&grad);
+    let dx = model.backward_batch_with_input_grad(&grad);
     assert_eq!(dx.shape, x.shape);
     assert_eq!(dx.data.len(), x.data.len());
     model.update(7);
