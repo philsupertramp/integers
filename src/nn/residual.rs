@@ -89,7 +89,10 @@ impl Module for ResidualBlock {
     }
 
     fn describe(&self) -> String {
-        format!("ResidualBlock(identity + {} layers)", self.branch.layers.len())
+        format!(
+            "ResidualBlock(identity + {} layers)",
+            self.branch.layers.len()
+        )
     }
 
     fn forward(&mut self, input: &TensorView) -> Tensor {
@@ -168,11 +171,17 @@ mod tests {
 
     #[test]
     fn skip_add_rejects_unrepresentable_results() {
-        assert!(std::panic::catch_unwind(|| {
-            checked_skip_add(Dyadic::new(i32::MAX, 0), Dyadic::new(1, 0))
-        }).is_err());
-        assert!(std::panic::catch_unwind(|| {
-            checked_skip_add(Dyadic::new(i32::MAX, 0), Dyadic::new(1, 2))
-        }).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                checked_skip_add(Dyadic::new(i32::MAX, 0), Dyadic::new(1, 0))
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                checked_skip_add(Dyadic::new(i32::MAX, 0), Dyadic::new(1, 2))
+            })
+            .is_err()
+        );
     }
 }

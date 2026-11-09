@@ -1,8 +1,8 @@
 //! Small exact integer fixtures for the #39 identity-shortcut POC.
 //! They do not establish deep ResNet convergence.
 use integers::nn::{Conv2D, Linear, Module, ResidualBlock, Sequential};
-use integers::{Dyadic, Tensor};
 use integers::rng::seed_rng;
+use integers::{Dyadic, Tensor};
 
 fn d(v: i32) -> Dyadic {
     Dyadic::new(v, 0)
@@ -63,8 +63,15 @@ fn nested_block_propagates_input_gradients_to_earlier_trainable_layers() {
     full.update(0);
     let train_y = train.forward_batch(&input);
     let full_y = full.forward_batch(&input);
-    assert_eq!(train_y.data, full_y.data, "training and full backward changed parameters differently");
-    assert_ne!(train_y.data, vec![d(9), d(15)], "earlier parameter update was lost");
+    assert_eq!(
+        train_y.data, full_y.data,
+        "training and full backward changed parameters differently"
+    );
+    assert_ne!(
+        train_y.data,
+        vec![d(9), d(15)],
+        "earlier parameter update was lost"
+    );
 }
 
 #[test]
@@ -73,14 +80,20 @@ fn residual_rejects_shape_changing_branch_and_stale_gradients() {
     branch.add(Linear::new(1, 2, 0, 0, 31));
     let mut block = ResidualBlock::new(branch);
     let input = Tensor::from_vec(vec![d(1)], vec![1, 1]);
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        block.forward_batch(&input);
-    })).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block.forward_batch(&input);
+        }))
+        .is_err()
+    );
 
     let mut valid = ResidualBlock::new(self::branch());
     valid.forward_batch(&input);
     let wrong = Tensor::from_vec(vec![d(1), d(1)], vec![2, 1]);
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        valid.backward_batch(&wrong);
-    })).is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            valid.backward_batch(&wrong);
+        }))
+        .is_err()
+    );
 }
