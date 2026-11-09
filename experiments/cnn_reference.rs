@@ -597,7 +597,10 @@ mod tests {
                     Op::Linear(c) => pairs.push((c.params.weights.clone(), c.params.bias.clone())),
                     Op::Residual(r) => {
                         pairs.push((r.first.params.weights.clone(), r.first.params.bias.clone()));
-                        pairs.push((r.second.params.weights.clone(), r.second.params.bias.clone()));
+                        pairs.push((
+                            r.second.params.weights.clone(),
+                            r.second.params.bias.clone(),
+                        ));
                     }
                     _ => {}
                 }
