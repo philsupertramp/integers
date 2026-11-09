@@ -851,11 +851,11 @@ fn main() {
     let dims = match (cfg.task, cfg.architecture) {
         (Task::Iris, _) => vec![4, 8, 8, 3],
         (Task::Mnist, Architecture::Dense) => vec![784, 128, 128, 10],
-        (Task::Mnist, Architecture::Cnn)
-        | (Task::Mnist, Architecture::CnnPlainControl)
+        (Task::Mnist, Architecture::Cnn) => vec![784, 2704, 676, 968, 200, 64, 10],
+        (Task::Mnist, Architecture::CnnPlainControl)
         | (Task::Mnist, Architecture::CnnResidualControl) => {
             vec![784, 2704, 676, 676, 676, 968, 200, 64, 10]
-        },
+        }
     };
     let (mut integer, mut fp32) = match cfg.architecture {
         Architecture::Dense => {
