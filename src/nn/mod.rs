@@ -67,6 +67,9 @@ pub use regularization::{BatchNorm1D, BatchNorm2D, Dropout, MaxPool2D};
 mod conv;
 pub use conv::Conv2D;
 
+mod residual;
+pub use residual::ResidualBlock;
+
 use crate::dyadic::{Dyadic, Tensor, TensorView, add, stochastic_round};
 use std::time::Instant;
 

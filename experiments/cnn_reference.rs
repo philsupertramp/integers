@@ -2,7 +2,7 @@
 //! No dyadic forward/backward/update helpers are called. Only initialization
 //! copies decoded integer parameters, before either backend begins training.
 use integers::dyadic::Dyadic;
-use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, Sequential};
+use integers::nn::{Conv2D, Flatten, Linear, MaxPool2D, ReLU, ResidualBlock, Sequential};
 use integers::rng::seed_rng;
 
 const SHIFT: u32 = 7;
@@ -253,12 +253,67 @@ impl Pool {
     }
 }
 
+/// Independent scalar FP32 implementation of y = x + W2 ReLU(W1 x).
+///
+/// The cache belongs to this FP32 reference, never to the integer residual
+/// module. No dyadic arithmetic is called here during training.
+struct IdentityResidual {
+    first: Convolution,
+    second: Convolution,
+    pre_relu: Vec<f32>,
+    activated: Vec<f32>,
+}
+impl IdentityResidual {
+    fn new(a: &Conv2D, b: &Conv2D) -> Self {
+        Self {
+            first: Convolution::from_integer(a),
+            second: Convolution::from_integer(b),
+            pre_relu: Vec::new(),
+            activated: Vec::new(),
+        }
+    }
+    fn forward(&mut self, input: &[f32]) -> Vec<f32> {
+        self.pre_relu = self.first.forward(input);
+        self.activated = self.pre_relu.iter().map(|&v| v.max(0.0)).collect();
+        let branch = self.second.forward(&self.activated);
+        assert_eq!(branch.len(), input.len(), "FP32 residual shape mismatch");
+        input.iter().zip(branch).map(|(&x, f)| x + f).collect()
+    }
+    fn backward(&mut self, input: &[f32], grad: &[f32]) -> Vec<f32> {
+        assert_eq!(input.len(), grad.len(), "FP32 residual gradient mismatch");
+        assert_eq!(self.pre_relu.len(), self.activated.len());
+        let mut dh = self.second.backward(&self.activated, grad);
+        for (g, &v) in dh.iter_mut().zip(&self.pre_relu) {
+            if v <= 0.0 {
+                *g = 0.0;
+            }
+        }
+        let dbranch = self.first.backward(input, &dh);
+        grad.iter()
+            .zip(dbranch)
+            .map(|(&identity, f)| identity + f)
+            .collect()
+    }
+    fn zero_grad(&mut self) {
+        self.first.params.zero_grad();
+        self.second.params.zero_grad();
+    }
+    fn update(&mut self, lr_shift: u32, samples: usize) {
+        self.first.params.update(lr_shift, samples);
+        self.second.params.update(lr_shift, samples);
+    }
+    fn nonfinite(&self) -> usize {
+        self.first.params.nonfinite() + self.second.params.nonfinite()
+    }
+}
+
 enum Op {
     Conv(Convolution),
     Relu,
     Pool(Pool),
     Flatten,
     Linear(Dense),
+    Residual(Box<IdentityResidual>),
 }
 pub struct CnnFp32 {
     ops: Vec<Op>,
@@ -277,6 +332,7 @@ impl CnnFp32 {
                 Op::Pool(layer) => layer.forward(&current),
                 Op::Flatten => current,
                 Op::Linear(layer) => layer.forward(&current),
+                Op::Residual(layer) => layer.forward(&current),
             };
         }
         assert_eq!(current.len(), 10);
@@ -307,6 +363,7 @@ impl CnnFp32 {
                 Op::Pool(layer) => layer.backward(&grad),
                 Op::Flatten => grad,
                 Op::Linear(layer) => layer.backward(x, &grad),
+                Op::Residual(layer) => layer.backward(x, &grad),
             };
         }
         assert_eq!(grad.len(), 784);
@@ -317,6 +374,7 @@ impl CnnFp32 {
             match op {
                 Op::Conv(c) => c.params.zero_grad(),
                 Op::Linear(c) => c.params.zero_grad(),
+                Op::Residual(c) => c.zero_grad(),
                 _ => {}
             }
         }
@@ -326,6 +384,7 @@ impl CnnFp32 {
             match op {
                 Op::Conv(c) => c.params.update(lr_shift, samples),
                 Op::Linear(c) => c.params.update(lr_shift, samples),
+                Op::Residual(c) => c.update(lr_shift, samples),
                 _ => {}
             }
         }
@@ -336,6 +395,7 @@ impl CnnFp32 {
             .map(|op| match op {
                 Op::Conv(c) => c.params.nonfinite(),
                 Op::Linear(c) => c.params.nonfinite(),
+                Op::Residual(c) => c.nonfinite(),
                 _ => 0,
             })
             .sum()
@@ -392,9 +452,169 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
     )
 }
 
+/*
+ * One normalization-free identity shortcut, compared with a parameter-matched
+ * plain CNN. The two architectures differ **only** in the addition of x to
+ * the two 1x1-convolution branch outputs. Spatial path:
+ *   28x28 --3x3/4ch--> 26x26 --pool--> 13x13
+ *   --1x1/4ch--> 13x13 --1x1/4ch--> 13x13
+ *   --3x3/8ch--> 11x11 --pool--> 5x5 --Linear--> 10.
+ *
+ * The extra 1x1 convolutions isolate residual gradient flow without adding
+ * padding/projection or changing the existing Conv2D geometry. We reuse the
+ * controlled He-v2 integer-only *initialization* scaling from #38 (×5/2
+ * before training), so both variants start with identical decoded weights.
+ * It is NOT canonical CIFAR-10 ResNet-20 or a depth stability result.
+ */
+fn scale_control_initial_weights(values: &mut [Dyadic]) {
+    for value in values {
+        value.v = i32::try_from(i64::from(value.v) * 5 / 2)
+            .expect("residual control: initialization overflow");
+    }
+}
+
+pub fn build_skip_control_models(seed: u64, residual: bool) -> (Sequential, CnnFp32) {
+    seed_rng(seed);
+    let mut integer = Sequential::new();
+    let mut ops = Vec::new();
+
+    let mut stem = Conv2D::new(1, 4, 3, 3, 28, 28, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    scale_control_initial_weights(&mut stem.kernels.data);
+    ops.push(Op::Conv(Convolution::from_integer(&stem)));
+    integer.add(stem);
+    ops.push(Op::Relu);
+    integer.add(ReLU::new());
+    ops.push(Op::Pool(Pool::new(4, 26, 26, 2, 2)));
+    integer.add(MaxPool2D::new(4, 26, 26, 2, 2));
+
+    let mut first = Conv2D::new(4, 4, 1, 1, 13, 13, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    scale_control_initial_weights(&mut first.kernels.data);
+    let second = Conv2D::new(4, 4, 1, 1, 13, 13, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    if residual {
+        ops.push(Op::Residual(Box::new(IdentityResidual::new(
+            &first, &second,
+        ))));
+        let mut branch = Sequential::new();
+        branch.add(first);
+        branch.add(ReLU::new());
+        branch.add(second);
+        integer.add(ResidualBlock::new(branch));
+    } else {
+        ops.push(Op::Conv(Convolution::from_integer(&first)));
+        integer.add(first);
+        ops.push(Op::Relu);
+        integer.add(ReLU::new());
+        ops.push(Op::Conv(Convolution::from_integer(&second)));
+        integer.add(second);
+    }
+
+    let mut downstream = Conv2D::new(4, 8, 3, 3, 13, 13, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    scale_control_initial_weights(&mut downstream.kernels.data);
+    ops.push(Op::Conv(Convolution::from_integer(&downstream)));
+    integer.add(downstream);
+    ops.push(Op::Relu);
+    integer.add(ReLU::new());
+    ops.push(Op::Pool(Pool::new(8, 11, 11, 2, 2)));
+    integer.add(MaxPool2D::new(8, 11, 11, 2, 2));
+
+    ops.push(Op::Flatten);
+    integer.add(Flatten);
+    let mut dense = Linear::new(200, 64, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    scale_control_initial_weights(&mut dense.weights.data);
+    ops.push(Op::Linear(Dense::from_integer(&dense)));
+    integer.add(dense);
+    ops.push(Op::Relu);
+    integer.add(ReLU::new());
+
+    let head = Linear::new(64, 10, SHIFT, SHIFT, BITS)
+        .with_grad_clip(GRAD_CLIP)
+        .with_momentum(MOM_SHIFT);
+    ops.push(Op::Linear(Dense::from_integer(&head)));
+    integer.add(head);
+    (
+        integer,
+        CnnFp32 {
+            ops,
+            inputs: Vec::new(),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fp32_identity_residual_matches_hand_calculated_gradient() {
+        let mut first = Conv2D::new(1, 1, 1, 1, 1, 1, 0, 0, 31);
+        first.kernels.data[0] = Dyadic::new(2, 0);
+        first.biases.data[0] = Dyadic::new(0, 0);
+        let mut second = Conv2D::new(1, 1, 1, 1, 1, 1, 0, 0, 31);
+        second.kernels.data[0] = Dyadic::new(3, 0);
+        second.biases.data[0] = Dyadic::new(0, 0);
+        let mut block = IdentityResidual::new(&first, &second);
+        assert_eq!(block.forward(&[4.0]), vec![28.0]); // 4 + 3 * ReLU(2 * 4)
+        assert_eq!(block.backward(&[4.0], &[1.0]), vec![7.0]); // 1 + 3*2
+        assert_eq!(block.first.params.grad_weights, vec![12.0]);
+        assert_eq!(block.second.params.grad_weights, vec![8.0]);
+        block.zero_grad();
+        assert_eq!(block.first.params.grad_weights, vec![0.0]);
+        assert_eq!(block.second.params.grad_weights, vec![0.0]);
+    }
+
+    #[test]
+    fn skip_control_models_both_backends_support_forward_backward_update() {
+        for residual in [false, true] {
+            let (mut integer, mut fp32) = build_skip_control_models(1337, residual);
+            let input = integers::dyadic::Tensor::from_vec(
+                vec![Dyadic::new(0, SHIFT); 784],
+                vec![1, 28, 28],
+            );
+            assert_eq!(integer.forward(&input.view()).data.len(), 10);
+            assert_eq!(fp32.forward(&vec![0.0; 784]).len(), 10);
+            let target = vec![0.0; 10];
+            fp32.zero_grad();
+            assert!(fp32.accumulate(&vec![0.0; 784], &target) < 10);
+            fp32.update(7, 1);
+            assert_eq!(fp32.nonfinite_parameters(), 0);
+        }
+    }
+
+    #[test]
+    fn plain_and_residual_controls_start_with_identical_parameters() {
+        fn parameters(model: &CnnFp32) -> Vec<(Vec<f32>, Vec<f32>)> {
+            let mut pairs = Vec::new();
+            for op in &model.ops {
+                match op {
+                    Op::Conv(c) => pairs.push((c.params.weights.clone(), c.params.bias.clone())),
+                    Op::Linear(c) => pairs.push((c.params.weights.clone(), c.params.bias.clone())),
+                    Op::Residual(r) => {
+                        pairs.push((r.first.params.weights.clone(), r.first.params.bias.clone()));
+                        pairs.push((
+                            r.second.params.weights.clone(),
+                            r.second.params.bias.clone(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            pairs
+        }
+        let (_, plain) = build_skip_control_models(1337, false);
+        let (_, residual) = build_skip_control_models(1337, true);
+        assert_eq!(parameters(&plain), parameters(&residual));
+        assert_eq!(parameters(&plain).len(), 6); // Four convs + two dense layers.
+    }
+
     #[test]
     fn pool_ties_overlap_and_gradient_scatter() {
         let mut pool = Pool::new(1, 3, 3, 2, 1);

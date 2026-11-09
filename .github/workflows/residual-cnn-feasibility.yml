@@ -1,0 +1,52 @@
+name: Residual CNN four-arm development feasibility
+
+on:
+  pull_request:
+    branches: [big-refactor]
+    paths:
+      - 'src/nn/residual.rs'
+      - 'src/nn/mod.rs'
+      - 'experiments/cnn_reference.rs'
+      - 'experiments/residual_feasibility.py'
+      - 'examples/held_out.rs'
+      - 'tests/residual_block.rs'
+      - '.github/workflows/residual-cnn-feasibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paired-feasibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify residual and independent FP32 unit contracts
+        run: |
+          cargo test --locked --test residual_block
+          cargo test --locked --test cnn_integration
+      - name: Fetch only the canonical MNIST development partition
+        run: |
+          python3 experiments/fetch_mnist.py --data-dir data/mnist --train-only
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Compile paired architectures from one source revision
+        run: cargo build --locked --release --example held_out
+      - name: Four-arm one-seed validation-only feasibility (not a convergence claim)
+        run: |
+          python3 experiments/residual_feasibility.py --out-dir /tmp/residual-feasibility
+          test ! -e data/mnist/t10k-images-idx3-ubyte
+          test ! -e data/mnist/t10k-labels-idx1-ubyte
+      - name: Write experimental summary
+        if: success()
+        run: cat /tmp/residual-feasibility/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve original four-arm JSON and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: residual-four-arm-feasibility
+          path: /tmp/residual-feasibility/
+          if-no-files-found: warn
+          retention-days: 30
