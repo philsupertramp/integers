@@ -497,7 +497,9 @@ pub fn build_skip_control_models(seed: u64, residual: bool) -> (Sequential, CnnF
         .with_grad_clip(GRAD_CLIP)
         .with_momentum(MOM_SHIFT);
     if residual {
-        ops.push(Op::Residual(Box::new(IdentityResidual::new(&first, &second))));
+        ops.push(Op::Residual(Box::new(IdentityResidual::new(
+            &first, &second,
+        ))));
         let mut branch = Sequential::new();
         branch.add(first);
         branch.add(ReLU::new());
