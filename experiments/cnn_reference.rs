@@ -588,6 +588,29 @@ mod tests {
     }
 
     #[test]
+    fn plain_and_residual_controls_start_with_identical_parameters() {
+        fn parameters(model: &CnnFp32) -> Vec<(Vec<f32>, Vec<f32>)> {
+            let mut pairs = Vec::new();
+            for op in &model.ops {
+                match op {
+                    Op::Conv(c) => pairs.push((c.params.weights.clone(), c.params.bias.clone())),
+                    Op::Linear(c) => pairs.push((c.params.weights.clone(), c.params.bias.clone())),
+                    Op::Residual(r) => {
+                        pairs.push((r.first.params.weights.clone(), r.first.params.bias.clone()));
+                        pairs.push((r.second.params.weights.clone(), r.second.params.bias.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            pairs
+        }
+        let (_, plain) = build_skip_control_models(1337, false);
+        let (_, residual) = build_skip_control_models(1337, true);
+        assert_eq!(parameters(&plain), parameters(&residual));
+        assert_eq!(parameters(&plain).len(), 6); // Four convs + two dense layers.
+    }
+
+    #[test]
     fn pool_ties_overlap_and_gradient_scatter() {
         let mut pool = Pool::new(1, 3, 3, 2, 1);
         let x = [1., 2., 3., 4., 9., 9., 7., 9., 9.];
