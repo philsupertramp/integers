@@ -130,7 +130,7 @@ def main():
     (args.out_dir / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
     lines = [
         "# Residual path: one-seed development feasibility (#39)", "",
-        f"Source: \`{manifest['source_commit']}\`; seed: {args.seed}; "
+        f"Source: `{manifest['source_commit']}`; seed: {args.seed}; "
         f"epochs: {args.epochs}; development train/validation: "
         f"{args.train_limit}/{args.validation_limit}; batch 32; LR shift 7.", "",
         "| Architecture | Backend | Final train accuracy | Final validation accuracy | Training time (diagnostic only) |",

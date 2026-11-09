@@ -289,7 +289,10 @@ impl IdentityResidual {
             }
         }
         let dbranch = self.first.backward(input, &dh);
-        grad.iter().zip(dbranch).map(|(&identity, f)| identity + f).collect()
+        grad.iter()
+            .zip(dbranch)
+            .map(|(&identity, f)| identity + f)
+            .collect()
     }
     fn zero_grad(&mut self) {
         self.first.params.zero_grad();
@@ -449,7 +452,6 @@ pub fn build_models(seed: u64) -> (Sequential, CnnFp32) {
     )
 }
 
-
 /*
  * One normalization-free identity shortcut, compared with a parameter-matched
  * plain CNN. The two architectures differ **only** in the addition of x to
@@ -537,7 +539,13 @@ pub fn build_skip_control_models(seed: u64, residual: bool) -> (Sequential, CnnF
         .with_momentum(MOM_SHIFT);
     ops.push(Op::Linear(Dense::from_integer(&head)));
     integer.add(head);
-    (integer, CnnFp32 { ops, inputs: Vec::new() })
+    (
+        integer,
+        CnnFp32 {
+            ops,
+            inputs: Vec::new(),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -566,7 +574,8 @@ mod tests {
         for residual in [false, true] {
             let (mut integer, mut fp32) = build_skip_control_models(1337, residual);
             let input = integers::dyadic::Tensor::from_vec(
-                vec![Dyadic::new(0, SHIFT); 784], vec![1, 28, 28]
+                vec![Dyadic::new(0, SHIFT); 784],
+                vec![1, 28, 28],
             );
             assert_eq!(integer.forward(&input.view()).data.len(), 10);
             assert_eq!(fp32.forward(&vec![0.0; 784]).len(), 10);
